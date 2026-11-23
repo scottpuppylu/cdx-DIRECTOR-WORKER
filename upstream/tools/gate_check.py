@@ -1,0 +1,2463 @@
+"""Check the format of a RESUME_STATE, work order, task report or gate verdict, so a rule fails in a script instead of
+relying on the model remembering it.
+
+Prints OK / FAIL per file with one line per problem; exit 1 when anything fails. Only reads, except `--snapshot`,
+which writes one snapshot file.
+Passing means the file follows the format and the rules below. It does not mean the work is correct: reviewing the
+evidence and the product is still the Director's job (docs/02, docs/07).
+
+  --resume   the four header lines come first, in order, filled in; UPDATED holds a date.
+             2.2.2 (shadow): a file over resume.max_bytes (default 20480) or with a line over resume.max_line_bytes
+             (default 4096) gets `~ shadow: RESUME_SIZE <bytes> ... ~<tokens> tokens, longest line <n>: <bytes>`; the
+             exit code stays the same, --strict makes it fail. The limits come from --config director_work.json, else
+             a director_work.json beside the file, else the defaults (memory_size_check.py holds the rule)
+  --order    required fields filled in; SCOPE / FORBIDDEN are concrete path lists; acceptance rows are concrete;
+             an optional `CHECKS:` list holds one `- AC-n: ["program", "arg"]` line (JSON array of strings) per AUTO
+             criterion: the check the Director approves, locked by the dispatch hash. A Strict order with an AUTO
+             criterion and no check is noted. An optional `REQUIRED_CHANGES:` list (globs the work must change, read
+             by scope_check.py) must lie inside SCOPE and outside FORBIDDEN, or the order cannot be done.
+             2.2.2: BASE_REF freshness. The BASE_REF commit is compared with its remote branch after a git fetch in
+             --repo (default: the order's folder): a commit that is missing or behind prints `~ WARN BASE_REF ...`,
+             --strict-base makes it fail. A fetch that fails, or a folder that is not a git checkout, says it did not
+             compare (never a silent pass). Switches: "base_ref" {"check", "fetch", "strict"} in --config, else the
+             director_work.json in the order's folder or the one above it
+  --report   required fields filled in; RESULT in the vocabulary; PASS is refused with NOT_RUN tests or a scope violation
+  --test-request
+             every field of templates/TEST_REQUEST.md filled; BUILD_GB, CACHE_GB and WRITE_GB in GiB, not GB;
+             CAPTURE `<sets> x <images> x <MiB> = <GiB>` (or NONE) adds up; WRITE_GB covers BUILD_GB + CAPTURE +
+             CACHE_GB (L-030, L-031); DURATION `<sets> x <measured minutes per set, timeouts included> = <minutes>`
+             adds up and fits the limit on the TEST REQUEST line (L-033)
+  --verdict  verdict and next step in the vocabulary; status split by aspect; stop state written. With --match, the
+             verdict's `ORDER: <file> REVISION n` line must name a matched order at its REVISION; with --candidate, its
+             `CANDIDATE_HEAD:` must be that commit (exactly for Strict). A missing line fails Strict and is noted otherwise
+  --match REPORT ORDER
+             the report's ACCEPTANCE table against the order, one row per AC: no AC missing or added; each status
+             allowed for its type (a worker cannot write PASS on a REVIEW or PO criterion); PASS needs evidence;
+             RESULT PASS with no FAIL / BLOCKED / UNVERIFIED row; ORDER_SHA256 equals the order's hash now.
+             Either table fails on a duplicate AC row, a duplicate column name or a row whose cell count differs
+             from the header's; a `|` inside backticks or written `\\|` does not split a cell
+  --evidence-dir DIR
+             with --match: an AUTO row marked PASS must name in 證據 an evidence_record.py file (.json) in DIR whose
+             command exited 0, with no artifact missing, recorded at the HEAD the report names. A file without the
+             record's fields and types (schema, label, command, cwd, started, finished, exit_code, timed_out, git,
+             artifacts) is not evidence; one without `schema` is read as legacy. A legacy record, a record without
+             git HEAD, uncommitted changes or a label naming another AC fail a Strict order and are noted otherwise.
+             The report's HEAD must be 7 to 40 hex digits: Strict fails, Standard and --report note it. When the order
+             has CHECKS, a record's command must be the approved one for its AC: Strict fails, Standard notes it.
+             A record's `order` field (`evidence_record.py run --order`) must name this order at its REVISION and
+             hash, unless --dispatch-log has the whole line `EVIDENCE_EQUIVALENT <WO-ID> rev=<old> sha=<old hash>
+             to rev=<new>` (read like a DISPATCH line). A record without one gets a WARN at REVISION 1; from
+             REVISION 2 it fails Strict and is noted otherwise.
+             The records are read, not rerun: only `evidence_record.py verify --rerun --order ...` runs a check again
+  --dispatch-log LOG
+             with --match: the order's hash now must equal the one the Director logged at dispatch, as a line
+             `DISPATCH <WO-ID> rev=<n> sha=<64 hex>` in LOG (the last line for an order wins; the ID is the order's
+             title or file name), and rev must be the order's REVISION. The line is the whole line, optionally after
+             a `<date> |` column and before a `| <basis>` column; a DISPATCH quoted in a note, indented, after `>` or
+             inside a ``` / ~~~ fence is not one. No line for the order fails in every governance mode. The title's
+             ID and the file name's ID must agree, and the report's ORDER line must name this order.
+             Without this flag the hash is only compared with the order as it is now, which a worker can rewrite.
+  --candidate SHA
+             with --match or --verdict: the commit under review, 40 hex digits, which the Director reads with
+             `git rev-parse <worker branch>`. The report's HEAD must be it (a prefix is enough outside Strict) and every
+             evidence record must be recorded at it (exactly for Strict).
+  Strict binds the review to one commit: a Strict --match fails without --candidate, without --dispatch-log, without
+             --evidence-dir when an AUTO row is PASS, or when the report's HEAD is not all 40 hex digits.
+             The report's `ORDER: <file> REVISION n` line must name the order's REVISION; without a revision Strict
+             fails and Standard notes it.
+  --hash FILE  print the SHA-256 that ORDER_SHA256 compares (line endings counted as LF) and the DISPATCH line to log
+  --preflight REPORT ORDER
+             before moving a review made with an older version to this one: list, one `LACKS` line each, what the
+             report, order, evidence and dispatch log lack for a Strict review now (a HEAD that is not 40 hex digits, a
+             report ORDER line without REVISION, an order without a DISPATCH line for its REVISION, AUTO criteria
+             without CHECKS, evidence records without a supported schema, a full git HEAD or `git.dirty` false).
+             With --repo, a short HEAD is resolved there to the full commit (when it is unique). Takes
+             --evidence-dir and --dispatch-log; what they would show is NOT_CHECKED without them. Exit 1 when
+             anything is lacking. Only reads, like every check here.
+
+2.1 (shadow: these only add `~` notes and never change the exit code; an order without the new fields passes as before):
+  --brief BRIEF.md
+             alone: print the brief's `BRIEF_REVISION = n` and `BRIEF_FINGERPRINTS_V1 = {"B-2": "<sha256>"}` lines for an
+             order to pin. A row's fingerprint is sha256 of UTF-8 `brief-row-v1\n` + the compact JSON array
+             [ID, 類別, 內容, 怎麼算做到] of the 編號 table row (cells read by split_cells, ID without ** or backticks).
+             With --order / --match / --preflight: `~ BRIEF_STALE <WO> <B> <AC-1,AC-2 | WHOLE_ORDER>` when a pinned row
+             changed or is gone (舊條件驗過，新條件待重驗 / 需求已取消), `~ BRIEF_UNCONFIRMED` (依據未確認) for a row listed
+             twice or not 4 cells wide, an order without pins that traces brief rows, or a traced row it did not pin. With
+             --dispatch-log, the latest whole line `BRIEF_LOCKED rev=<n> sha=<64 hex> snapshot=<path>` (path from the log's
+             folder) is the basis: a brief that is not it is compared through the locked snapshot (a draft is not the basis).
+  --snapshot DIR
+             with --brief (狀態 LOCKED, 版次 a number): write DIR/<版次>-<sha>.md atomically (temp file in DIR, fsync,
+             rename; an identical file is kept) and print the BRIEF_LOCKED line to log. With --hash ORDER: keep the order
+             as DIR/<WO-ID>-rev<n>-<sha>.md for --order-history.
+  --order-history DIR
+             with --match: evidence carried over by EVIDENCE_EQUIVALENT is compared with the fingerprints the old order
+             (found in DIR by its hash) pinned; a changed condition is `~ BRIEF_STALE`, no old order `~ BRIEF_UNCONFIRMED`.
+  --po-acceptance PO_ACCEPTANCE.json
+             the PO's acceptance records (schema po-acceptance-v1: candidate_id, commit, entry, entry_sha256,
+             manifest_sha256, offered_message_ref, reply_ref, outcome seen / changes / accepted / null, replied_at,
+             excerpt); a record missing a binding is `~ UNBOUND_PO_REPLY`. With --candidate the commit must be it.
+             2.2 (F09): the product is checked too, from --artifact-root (default: the record file's folder): the
+             entry must be a file inside it, with entry_sha256 when the record has it; an optional `manifest` path
+             must hash to manifest_sha256. A missing or changed file, an entry outside the root, or one reply_ref used
+             for two different products is UNBOUND_PO_REPLY. A record whose entry or manifest could not be hashed is
+             `PO 回覆 <outcome>，成品待核對` (what was not checked), never 已驗收.
+  EVIDENCE_RERUN (2.2, F08): `evidence_record.py verify --rerun` prints, after an OK rerun, the whole line
+             `EVIDENCE_RERUN <WO-ID> <AC> candidate=<40 hex> result=ok record=<file>` for the Director to log
+             (with --brief / --order-history it ends ` brief=ok|stale|unconfirmed`; stale and unconfirmed lines are
+             not counted as a Director rerun);
+             trace_report reads it as 總監重跑過.
+  A verdict may carry `ORDER_SHA256:` and `REPORT_SHA256:` (gate_check.py --hash of each file); with --match a
+             mismatch is `~ VERDICT_RECORD`.
+
+The hash only detects a changed order after the fact; it cannot stop anyone from editing it. An evidence record shows
+a command ran and passed, not that it tests the right thing.
+Lines starting with `~` are notes for the newer format (v0.10): they never fail a file.
+
+2.2.4, 2.2.5 (B4: code is locked after the verdict; FAIL by default, --warn prints WARN and exits 0):
+  --after-verdict VERDICT [VERDICT ...] --repo DIR [--orders DIR]
+             commits made after the last gate verdict. Of the verdicts' `CANDIDATE_HEAD:` commits (resolved in --repo),
+             the last is the one the others lead to (else the newest commit date). Each commit from it to HEAD that
+             changes a file that is not a document prints `~ FAIL LATE_COMMIT <sha> <subject>: <files>`: the verdict
+             judged the candidate, so changed code needs a new GATE_VERDICT whose CANDIDATE_HEAD is the new commit
+             (2.2.5: inside the order's SCOPE too). A document is a file under a DIRECTOR/ or docs/ folder or a .md /
+             .rst / .txt file; commits that only change documents pass. A verdict whose candidate is a commit that is
+             no longer in HEAD's history (the branch was rewritten after the verdict) prints `~ FAIL REWRITTEN`. The
+             order (`ORDER:` file, looked up in --orders, the verdict's folder and ../orders) is named in the title.
+             A candidate that cannot be resolved says it did not compare (NOT_CHECKED, never a silent pass). Only reads
+             (git rev-parse / rev-list / diff / merge-base).
+
+2.2.5 (B3, gate order; B5, final acceptance):
+  --sequence ORDER [ORDER ...] --dispatch-log DIRECTOR_LOG.md --repo DIR
+             for each Standard / Strict order (Direct is skipped):
+             - the plan approval must come before the worker's first action. The approval is the order's earliest
+               whole line `PLAN_APPROVED <WO-ID> ...` in the log, else its earliest DISPATCH line; its time is the
+               line's `<date time [zone]> |` column, else the nearest dated heading or dated line above it. The first
+               action is the earliest commit on any ref (author time) whose subject starts with the order's ID
+               (`WO-12: ...`, the commit convention). Approval later than that commit fails (an approval written
+               after the work began); no approval line at all fails. A log time without a zone is read in the
+               commit's zone. No commit, or no time for the approval, is a NOT_CHECKED note.
+             - its own spec review: a whole line `SPEC_REVIEW <WO-ID> tokens=.. issues=.. adopted=..` in the log, else
+               a reviews/*SPEC_REVIEW* file whose name holds the ID (ported from the DeepSeek port's ds.4 B4). None
+               fails; a line without the three fields is noted.
+             - the reviews come from other sessions: the spec review's session (`session=<id>` on its line, or
+               `SESSION_ID:` in its file) must differ from the author's (`session=` on the DISPATCH line, or
+               `SESSION_ID:` in the order), and the gate verdict's `SESSION_ID:` (a *VERDICT* file holding the ID)
+               from the task report's (a *TASK_REPORT* file holding the ID). The same id fails; a missing id is
+               `~ WARN SESSION` (not shown either way).
+  --final DIR
+             final acceptance of the DIRECTOR folder DIR (or a folder holding DIRECTOR/): FAIL without end-to-end
+             evidence, a non-empty file in evidence/E2E/ (the lead ran the spec's scenarios once through the product's
+             public entry point). Notes (never fail): an E2E record without an `ENTRY_POINT:` line, a
+             DECISION_REGISTER.md table of DD rows without a 驗收案例 column, and each DD row (not SUPERSEDED) whose
+             驗收案例 cell is empty: `~ WARN DD_CASE`.
+
+2.3.0 (N2, feasibility before a fix set or a frozen gate):
+  --feasibility RECORD [RECORD ...]
+             before a fix set opens, or a gate's numbers are frozen, a CPU feasibility search must have run. The record
+             holds `FEASIBILITY:` (what it is for), `FEASIBLE_COUNT:` (solutions found; 0 fails: do not open the set),
+             `SCRIPT:` and `RESULT:` (paths from the record's folder that must exist; a JSON RESULT with
+             "feasible_count" must agree) and, for a gate, `THRESHOLDS:` lines `- <name>: <value> source=<video|mocap|
+             measurement|dataset>:<what>`. A threshold without a real-world source fails unless it is marked
+             `reference`; then it is listed `~ REFERENCE` (a reference number, not a gate). No record fails.
+  --verdict, self-check line: a PASS / PASS_WITH_WARNINGS / CONDITIONAL_PASS verdict names at least one check its
+             writer ran (`- `<command>` exit=<n> at=<HH:MM>`, written by ran_line.py). Severity from the project
+             config key "verdict_self_check": "warn" (default in 2.3.x: a `~ WARN SELF_CHECK` note, exit code
+             unchanged) or "fail" (the verdict fails). Config: --config, else director_work.json in the verdict's
+             folder or the one above it.
+
+Bringing in a project that already has files in another format:
+  --warn          print WARN instead of FAIL and exit 0, so old files do not block work
+  --since DATE    SKIP files dated before DATE (YYYY-MM-DD): ISSUED_BY of an order, UPDATED of a RESUME_STATE, the
+                  first date in a report or verdict. A file with no such date cannot be placed, so it is also SKIPped,
+                  marked UNDATED and counted on its own in the last line; run without --since to check it.
+The fixed words come from vocabulary.json next to this file.
+"""
+import argparse
+import hashlib
+import json
+import os
+import pathlib
+import re
+import sys
+
+VOCAB = json.loads((pathlib.Path(__file__).resolve().parent / "vocabulary.json").read_text(encoding="utf-8"))
+RESUME_HEADER = tuple(VOCAB["resume_header"])
+ORDER_FIELDS = ("ISSUED_BY", "PRIMARY_WORKER", "MODEL / EFFORT", "FALLBACK", "GOVERNANCE", "BASE_REF")
+GOVERNANCE = tuple(VOCAB["governance"])
+REPORT_FIELDS = ("RESULT", "ENGINEERING", "PRODUCT", "DONE", "TESTS", "SCOPE_CHECK", "EVIDENCE", "UNVERIFIED",
+                 "KNOWN_ISSUES", "NEXT")
+REPORT_RESULTS = tuple(VOCAB["report_results"])
+VERDICTS = tuple(VOCAB["verdicts"])
+NEXT_STEPS = tuple(VOCAB["next_steps"])
+AC_STATUSES = VOCAB["ac_worker_statuses"]  # type -> the statuses a worker may write in the report
+UNFINISHED = ("FAIL", "BLOCKED", "UNVERIFIED")
+COLUMNS = {"類型": "type", "type": "type", "要求": "requirement", "req": "requirement", "驗證方法": "how verified",
+           "how": "how verified", "預期": "expected", "expected": "expected", "實際": "actual", "actual": "actual",
+           "證據": "evidence", "evidence": "evidence", "狀態": "status", "status": "status",
+           "追溯": "traces", "traces": "traces"}
+LEGACY_COLUMNS = ["requirement", "how verified", "expected", "actual", "evidence", "status"]
+DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+DATED_BY = {"order": r"^\s*ISSUED_BY\s*=.*?(\d{4}-\d{2}-\d{2})", "resume": r"^UPDATED\s*:.*?(\d{4}-\d{2}-\d{2})"}
+VAGUE = re.compile(r"視情況|相關檔案|相關的檔案|等等|之類|適當|盡量|儘量|必要時|(?<![\w./\-])(?:as needed|etc|tbd|todo)(?![\w/\-]|\.\w)", re.I)  # not inside a name like todo.py
+PLACEHOLDER = re.compile(r"<[^<>@\n]+>")  # <name@host> is an address, not a placeholder
+CODE = re.compile(r"`[^`\n]*`")  # <...> inside a code span is format text, not a placeholder
+EVIDENCE_FILE = re.compile(r"[\w.-]+\.json\b")
+SHA = re.compile(r"[0-9a-fA-F]{7,40}")
+# a DISPATCH event is a whole line: optionally the log's `<date [time] [zone]> |` column first, then the event, then
+# optionally `| <basis>`; the same words inside another line (a NOTE, backticks, a `>` quote) are data, not an event
+LOG_DATE = r"(?:\d{4}-\d{2}-\d{2}(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?(?:[ \t]*(?:[+-]\d{2}:?\d{2}|Z))?[ \t]*\|[ \t]*)?"
+DISPATCH = re.compile(LOG_DATE + r"DISPATCH[ \t]+([^\s|`]+?)(?:\.md)?[ \t]+rev=(\d+)[ \t]+sha=([0-9a-fA-F]{64})[ \t]*(?:\|[^`]*)?")
+# the Director's ruling that evidence recorded for an older revision still holds: a whole line, read like DISPATCH
+EQUIVALENT = re.compile(LOG_DATE + r"EVIDENCE_EQUIVALENT[ \t]+([^\s|`]+?)(?:\.md)?[ \t]+rev=(\d+)[ \t]+"
+                        r"sha=([0-9a-fA-F]{64})[ \t]+to[ \t]+rev=(\d+)[ \t]*(?:\|[^`]*)?")
+FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
+ORDER_ID = re.compile(r"[A-Za-z]+-\d+")
+TOO_BROAD = ("*", "**", "**/*", ".", "./", "/")
+
+
+def blank(value):
+    return value.strip() in ("", "...", "…")
+
+
+def filled(name, value, problems):
+    if blank(value):
+        problems.append(f"{name}: empty")
+    elif PLACEHOLDER.search(CODE.sub("", value)):
+        problems.append(f"{name}: placeholder left: {PLACEHOLDER.search(CODE.sub('', value)).group(0)}")
+    else:
+        return True
+    return False
+
+
+def parse_list(text, key):
+    """Items of a `KEY:` line followed by `- item` lines; None when the key is missing. ` #` starts a comment; an item
+    written in backticks (`- `a #b.txt``) is taken as it is, so a name holding ` #` round-trips (S02)."""
+    lines = text.splitlines()
+    for n, line in enumerate(lines):
+        if re.fullmatch(rf"\s*{key}\s*[:：]\s*", line):
+            items = []
+            for item in lines[n + 1:]:
+                m = re.match(r"\s*-\s+(.*)", item)
+                if not m:
+                    break
+                quoted = re.fullmatch(r"`([^`]+)`(?:\s+#.*)?\s*", m.group(1))
+                items.append(quoted.group(1) if quoted else re.split(r"\s+#", m.group(1))[0].strip())
+            return items
+    return None
+
+
+def comment_notes(text, notes):
+    """An item cut at ` #` may be a name that holds ` #` (S02): say what was kept, and how to keep the rest. Only when a
+    character follows the `#` (`a #1.txt`); `# text`, with a space, is read as an ordinary comment."""
+    for key in ("SCOPE", "FORBIDDEN", "REQUIRED_CHANGES", "CHECKS"):
+        m = re.search(rf"^[ \t]*{key}[ \t]*[:：][ \t]*\n((?:[ \t]*-[ \t]+.*\n?)*)", text, re.M)
+        for line in (m.group(1).splitlines() if m else []):
+            item = re.match(r"\s*-\s+(.*)", line).group(1)
+            if re.search(r"\s+#\S", item) and not re.fullmatch(r"`([^`]+)`(?:\s+#.*)?\s*", item):
+                kept = re.split(r"\s+#", item)[0].strip()
+                notes.append(f"{key}: `{item.strip()}` is read as `{kept}` (` #` starts a "
+                             "comment); if ` #` is part of the name, write the item in backticks")
+
+
+def check_paths(key, text, problems):
+    items = parse_list(text, key)
+    if items is None:
+        problems.append(f"{key}: missing (a `{key}:` line followed by `- glob` lines)")
+    elif not items:
+        problems.append(f"{key}: no entries (write `- NONE` when nothing applies)")
+    else:
+        for item in items:
+            if not filled(key, item, problems):
+                continue
+            if VAGUE.search(item):
+                problems.append(f"{key}: vague entry: {item}")
+            elif item in TOO_BROAD:
+                problems.append(f"{key}: too broad: {item}")
+            elif item.startswith(("/", "..")) or re.match(r"[A-Za-z]:", item):
+                problems.append(f"{key}: must be relative to the repo root: {item}")
+
+
+def split_cells(line):
+    r"""The cells of a table row: `|` splits, except inside a backtick code span or escaped as `\|` (which becomes `|`)."""
+    cells, cell, fence, i = [], [], 0, 0
+    line = line.strip()
+    if line.startswith("|"):
+        line = line[1:]
+    if line.endswith("|") and not line.endswith("\\|"):
+        line = line[:-1]
+    while i < len(line):
+        ch = line[i]
+        if ch == "`":
+            run = len(line[i:]) - len(line[i:].lstrip("`"))
+            fence = 0 if fence == run else (run if fence == 0 else fence)
+            cell.append("`" * run)
+            i += run
+            continue
+        if ch == "\\" and i + 1 < len(line) and line[i + 1] == "|":
+            cell.append("|")
+            i += 2
+            continue
+        if ch == "|" and not fence:
+            cells.append("".join(cell).strip())
+            cell = []
+        else:
+            cell.append(ch)
+        i += 1
+    cells.append("".join(cell).strip())
+    return cells
+
+
+def ac_table(text, problems=None):
+    """{AC id: {column: cell}} from the table rows that start with AC-<n>, columns named by the table's header row.
+    A header without known names falls back to the old order: requirement, how verified, expected, ...
+    With a problems list, records a duplicate AC row, a duplicate column name and a row whose cell count differs
+    from its header's; without one (older callers) it only parses, keeping the first row of a duplicate."""
+    header, rows, width = None, {}, None
+    for line in text.splitlines():
+        if not line.lstrip().startswith("|"):
+            continue
+        cells = split_cells(line)
+        if cells[0] == "ID":
+            header = [COLUMNS.get(cell, cell) for cell in cells[1:]]
+            width = len(cells)
+            seen = set()
+            for name in header:
+                if name in seen and problems is not None:
+                    problems.append(f"acceptance: column {name} appears twice in the header")
+                seen.add(name)
+        elif re.fullmatch(r"AC-[\w-]+", cells[0]):
+            if problems is not None:
+                if cells[0] in rows:
+                    problems.append(f"{cells[0]}: listed twice; one row per AC")
+                if width is not None and len(cells) != width:
+                    problems.append(f"{cells[0]}: {len(cells)} cells, the header has {width}")
+            if cells[0] in rows:
+                continue
+            names = header if header and set(header) & set(COLUMNS.values()) else LEGACY_COLUMNS
+            rows[cells[0]] = dict(zip(names, cells[1:]))
+    return rows
+
+
+def order_hash(data):
+    return hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()
+
+
+def order_identity(text, path=None):
+    """(names a dispatch line may call this order, problem or None). The names are the first word of its title, its
+    file name without .md and that name's leading `WO-n` ID. The problem: the title and the file name give two IDs."""
+    title = re.search(r"^#\s+(\S+)", text, re.M)
+    title = title.group(1) if title else None
+    stem = pathlib.Path(path).stem if path is not None else None
+    file_id, title_id = (ORDER_ID.match(name) if name else None for name in (stem, title))
+    ids = []
+    for name in (title, stem, file_id.group(0) if file_id else None):
+        if name and name not in ids:
+            ids.append(name)
+    problem = None
+    if file_id and title_id and file_id.group(0).upper() != title_id.group(0).upper():
+        problem = (f"order: the title names {title_id.group(0)}, the file name {pathlib.Path(path).name} names "
+                   f"{file_id.group(0)}; one order has one ID")
+    return ids, problem
+
+
+def order_ids(text, path=None):
+    """The names a dispatch line may call this order (see order_identity)."""
+    return order_identity(text, path)[0]
+
+
+def order_key(ids):
+    """The `WO-n` ID among an order's names (the first one that is only an ID), else its first name, else None."""
+    return next((name for name in ids if ORDER_ID.fullmatch(name)), ids[0] if ids else None)
+
+
+def id_prefixes(names):
+    """The leading `WO-n` IDs of names, upper-case."""
+    return {m.group(0).upper() for m in (ORDER_ID.match(name) for name in names) if m}
+
+
+def order_revision(text):
+    m = re.search(r"^[ \t]*REVISION[ \t]*=[ \t]*(\d+)", text, re.M)
+    return m.group(1) if m else "1"
+
+
+def order_line(text):
+    """(rest of the line, revision or None) of a report's or verdict's `ORDER: WO-file.md REVISION n` line;
+    None when there is no ORDER: line. `rev=n` and `REVISION: n` are read too."""
+    line = re.search(r"^\s*ORDER\s*:\s*(.+)$", text, re.M)
+    if not line:
+        return None
+    rev = re.search(r"(?:REVISION|\brev)\s*[=:]?\s*(\d+)", line.group(1), re.I)
+    return line.group(1), (int(rev.group(1)) if rev else None)
+
+
+def order_checks(text, problems=None):
+    """{AC id: command} from the order's `CHECKS:` list, one `- AC-1: ["program", "arg", ...]` line per AUTO criterion
+    (a JSON array of strings, run without a shell); None when the order has no CHECKS. With a problems list, records a
+    line that is not in that form and an AC listed twice (the first line wins)."""
+    items = parse_list(text, "CHECKS")
+    if items is None:
+        return None
+    checks = {}
+    for item in items:
+        m = re.fullmatch(r"(AC-[\w-]+)\s*:\s*(.+)", item)
+        try:
+            command = json.loads(m.group(2)) if m else None
+        except ValueError:
+            command = None
+        if not (isinstance(command, list) and command and all(isinstance(part, str) for part in command)
+                and command[0].strip()):
+            if problems is not None:
+                problems.append(f'CHECKS: `{item}` is not `AC-n: ["program", "arg", ...]` (a JSON array of strings; '
+                                "a ` #` starts a comment, so a command cannot hold one)")
+            continue
+        if m.group(1) in checks:
+            if problems is not None:
+                problems.append(f"CHECKS: {m.group(1)} listed twice; one approved check per AC")
+            continue
+        checks[m.group(1)] = command
+    return checks
+
+
+def log_lines(text):
+    """The lines of a log that may be events: every line outside a ``` or ~~~ fence, right-stripped. An event must
+    then match its pattern as a whole line, so the same words quoted inside another line, after `>` or indented
+    are data."""
+    fence = None
+    for line in text.splitlines():
+        mark = FENCE.match(line)
+        if mark and fence is None:
+            fence = mark.group(1)
+            continue
+        if fence is not None:
+            if mark and mark.group(1)[0] == fence[0] and len(mark.group(1)) >= len(fence) and not mark.group(2).strip():
+                fence = None
+            continue
+        yield line.rstrip()
+
+
+def dispatch_records(text):
+    """{order id: (rev, sha)} from DISPATCH event lines, in log order (a later line for an id moves it to the end, so
+    the last item for any of an order's names is its latest dispatch). An event is a whole line,
+    `DISPATCH <WO-ID> rev=<n> sha=<64 hex>`, optionally after the log's `<date> |` column and before a `| basis`
+    column. The same words quoted inside another line, an indented line and lines inside a ``` or ~~~ fence are data."""
+    records = {}
+    for line in log_lines(text):
+        m = DISPATCH.fullmatch(line)
+        if m:
+            records.pop(m.group(1), None)
+            records[m.group(1)] = (m.group(2), m.group(3).lower())
+    return records
+
+
+def equivalent_records(text):
+    """[(order id, old rev, old sha, new rev)] from whole `EVIDENCE_EQUIVALENT <WO-ID> rev=<old> sha=<64 hex> to
+    rev=<new>` lines, read by the same rules as DISPATCH lines (log_lines): the Director's ruling that evidence
+    recorded for the old revision still answers the new one (G03b)."""
+    return [(m.group(1), int(m.group(2)), m.group(3).lower(), int(m.group(4)))
+            for m in (EQUIVALENT.fullmatch(line) for line in log_lines(text)) if m]
+
+
+# 2.1 (題1 P-1/P-4, 題4 P-2): the BRIEF's rows, what an order pinned of them, and the PO's reviews. Shadow: all of it
+# only adds notes; a file without the new fields reads as before.
+BRIEF_ROW_TAG = "brief-row-v1\n"
+UNCONFIRMED = "依據未確認"
+BRIEF_LOCKED = re.compile(LOG_DATE + r"BRIEF_LOCKED[ \t]+rev=(\d+)[ \t]+sha=([0-9a-fA-F]{64})(?:[ \t]+snapshot=([^\s|`]+))?"
+                          r"[ \t]*(?:\|[^`]*)?")
+PO_REVIEW = re.compile(LOG_DATE + r"PO_PRODUCT_REVIEW[ \t]+([A-Za-z]+-\d+)((?:[ \t]+[a-z_]+=[^\s|`]+)+)[ \t]*(?:\|[^`]*)?")
+PO_OUTCOMES = {"seen": "seen", "changes": "changes", "accepted": "accepted", "看過": "seen", "要求修改": "changes",
+               "接受": "accepted"}
+PO_ACCEPTANCE_SCHEMA = "po-acceptance-v1"
+RERUN = re.compile(LOG_DATE + r"EVIDENCE_RERUN[ \t]+([A-Za-z]+-\d+)[ \t]+(AC-\d+)[ \t]+candidate=([0-9a-fA-F]{40})[ \t]+"
+                   r"result=ok(?:[ \t]+record=[^\s|`]+)?(?:[ \t]+brief=(ok|stale|unconfirmed))?[ \t]*(?:\|[^`]*)?")
+HEX64 = re.compile(r"[0-9a-f]{64}")
+
+
+def id_prefix(name):
+    m = re.match(r"[A-Za-z]+", name)
+    return m.group(0).upper() if m else ""
+
+
+def id_sort(name):
+    m = re.fullmatch(r"([A-Za-z]+)-(\d+)", name)
+    return (m.group(1).upper(), int(m.group(2))) if m else (name, 0)
+
+
+def brief_table(text):
+    """({ID: [ID, 類別, 內容, 怎麼算做到]}, {ambiguous IDs}, problem or None) from the BRIEF's table whose header's first
+    cell is 編號 (lines inside a ``` / ~~~ fence are examples, not rows). An ID may be written in ** or backticks. A row
+    listed twice, or a row or header that is not 4 cells wide, makes its ID ambiguous: it gets no fingerprint
+    (依據未確認). problem: the brief has no such table."""
+    rows, ambiguous, width, found = {}, set(), None, False
+    for line in log_lines(text):
+        if not line.lstrip().startswith("|"):
+            width = None
+            continue
+        cells = split_cells(line)
+        if cells[0] == "編號":
+            width, found = len(cells), True
+            continue
+        ident = re.fullmatch(r"\*{0,2}`?([A-Za-z]+-\d+)`?\*{0,2}", cells[0]) if width is not None else None
+        if not ident:
+            continue
+        name = ident.group(1)
+        if name in rows or name in ambiguous or width != 4 or len(cells) != 4:
+            rows.pop(name, None)
+            ambiguous.add(name)
+            continue
+        rows[name] = [name] + cells[1:]
+    return rows, ambiguous, (None if found else "no table whose header starts with 編號")
+
+
+def brief_fingerprint(row):
+    """sha256 of UTF-8 `brief-row-v1\n` + the row as a compact JSON array [ID, 類別, 內容, 怎麼算做到] (ensure_ascii off,
+    separators `,` and `:`). Line endings, the spaces around a cell and the 版次 do not change it; a change to any of
+    the four cells does."""
+    data = BRIEF_ROW_TAG + json.dumps(list(row), ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()
+
+
+def brief_revision(text):
+    m = re.search(r"^\s*[-*]?\s*版次\s*[:：]\s*(\d+)", text, re.M)
+    return int(m.group(1)) if m else None
+
+
+def brief_is_locked(text):
+    return bool(re.search(r"^\s*[-*]?\s*狀態\s*[:：]\s*LOCKED\b", text, re.M))
+
+
+def brief_locks(text):
+    """[(rev, sha, snapshot path or None)] from whole `BRIEF_LOCKED rev=<n> sha=<64 hex> [snapshot=<path>]` lines, read
+    like DISPATCH lines; the last one is the brief the PO locked."""
+    return [(int(m.group(1)), m.group(2).lower(), m.group(3))
+            for m in (BRIEF_LOCKED.fullmatch(line) for line in log_lines(text)) if m]
+
+
+def load_brief(path, log_text=None, log_path=None, notes=None):
+    """The brief to compare orders with: {"rows", "ambiguous", "problem", "revision", "label", "sha"}. With a log that
+    has BRIEF_LOCKED lines, a brief that is not the latest locked one is replaced by that lock's snapshot (a draft is
+    not the basis) when the snapshot is there with the logged hash; otherwise the brief is read and noted as
+    依據待確認."""
+    notes = notes if notes is not None else []
+    data = pathlib.Path(path).read_bytes()
+    text, label, sha = data.decode("utf-8-sig", errors="replace"), str(path), order_hash(data)
+    locks = brief_locks(log_text) if log_text else []
+    trusted = bool(locks) and locks[-1][1] == sha
+    if locks and locks[-1][1] != sha:
+        rev, locked, snap = locks[-1]
+        snap_path = pathlib.Path(log_path).parent / snap if snap and log_path else None
+        if snap_path and snap_path.is_file() and order_hash(snap_path.read_bytes()) == locked:
+            notes.append(f"BRIEF: {path} is not the latest BRIEF_LOCKED (rev={rev} sha={locked[:12]}); a draft is not the "
+                         f"basis: compared with the locked snapshot {snap}")
+            text, label, sha = snap_path.read_bytes().decode("utf-8-sig", errors="replace"), snap, locked
+            trusted = True
+        else:
+            notes.append(f"BRIEF_UNCONFIRMED: {path} is not the latest BRIEF_LOCKED (rev={rev} sha={locked[:12]}) and its "
+                         f"snapshot {snap or '(none named)'} is missing or changed: 依據待確認")
+    elif log_text is not None and not locks:
+        notes.append("BRIEF: the log has no BRIEF_LOCKED line, so which brief the PO locked is 依據待確認 "
+                     "(`gate_check.py --brief BRIEF.md --snapshot DIRECTOR/brief-history` prints it)")
+    if not brief_is_locked(text):
+        notes.append(f"BRIEF: {label} does not say 狀態：LOCKED; a draft is 依據待確認")
+        trusted = False
+    rows, ambiguous, problem = brief_table(text)
+    # trusted (2.2, F08): the rows read are the latest BRIEF_LOCKED brief and say LOCKED; anything else is unconfirmed
+    return {"rows": rows, "ambiguous": ambiguous, "problem": problem, "revision": brief_revision(text), "label": label,
+            "sha": sha, "trusted": trusted}
+
+
+def order_brief(text, notes=None):
+    """(BRIEF_REVISION or None, {B: fingerprint} or None) of an order. A value in another form is noted and read as
+    absent (shadow: never a problem). The fingerprints are a JSON object on the `BRIEF_FINGERPRINTS_V1 =` line; a
+    trailing ` # comment` is allowed."""
+    revision = pins = None
+    rev = re.search(r"^[ \t]*BRIEF_REVISION[ \t]*=[ \t]*(\S*)", text, re.M)
+    if rev and rev.group(1).isdigit():
+        revision = int(rev.group(1))
+    elif rev and notes is not None:
+        notes.append(f"BRIEF_REVISION: not a number ({rev.group(1) or 'empty'}); read as absent")
+    line = re.search(r"^[ \t]*BRIEF_FINGERPRINTS_V1[ \t]*=[ \t]*(.*)$", text, re.M)
+    if line:
+        m = re.search(r"\{.*\}", line.group(1))
+        try:
+            value = json.loads(m.group(0)) if m else None
+        except ValueError:
+            value = None
+        if isinstance(value, dict) and all(isinstance(k, str) and isinstance(v, str) and HEX64.fullmatch(v)
+                                           for k, v in value.items()):
+            pins = value
+        elif notes is not None:
+            notes.append('BRIEF_FINGERPRINTS_V1: not a JSON object {"B-2": "<64 lower-case hex>"}; read as absent')
+    return revision, pins
+
+
+def order_traces(text):
+    """(IDs on the TRACES_TO line, {AC: IDs of its 追溯 cell} or None when the AC table has no 追溯 column)."""
+    line = re.search(r"^[ \t]*TRACES_TO[ \t]*=[ \t]*(.*)$", text, re.M)
+    traced = ORDER_ID.findall(re.split(r"\s+#", line.group(1))[0]) if line else []
+    rows = ac_table(text)
+    per_ac = ({ac: ORDER_ID.findall(row.get("traces", "")) for ac, row in rows.items()}
+              if any("traces" in row for row in rows.values()) else None)
+    return traced, per_ac
+
+
+def brief_domain(brief, extra=()):
+    """The ID prefixes that are brief rows: those of the brief's rows, else of extra (an order's pins), else B."""
+    names = (set(brief["rows"]) | brief["ambiguous"]) if brief else set()
+    return {id_prefix(n) for n in names} or {id_prefix(n) for n in extra} or {"B"}
+
+
+def brief_acs(b, per_ac):
+    acs = [ac for ac, ids in (per_ac or {}).items() if b in ids]
+    return ",".join(acs) if acs else "WHOLE_ORDER"
+
+
+def brief_notes(order_text, order_path, brief, notes):
+    """Shadow notes for one order against the brief: BRIEF_STALE for a pinned row that changed or is gone,
+    BRIEF_UNCONFIRMED (依據未確認) for an ambiguous row, an order with no pins that traces brief rows, and a traced
+    row without a pin. A raised 版次 with the rows unchanged is no note."""
+    key = order_key(order_ids(order_text, order_path)) or "<WO-ID>"
+    revision, pins = order_brief(order_text, notes)
+    traced, per_ac = order_traces(order_text)
+    rows, ambiguous, domain = brief["rows"], brief["ambiguous"], brief_domain(brief, pins or ())
+    wanted = [b for b in dict.fromkeys(traced + [i for ids in (per_ac or {}).values() for i in ids])
+              if id_prefix(b) in domain]
+    if pins is None:
+        if wanted:
+            notes.append(f"BRIEF_UNCONFIRMED {key} {','.join(sorted(wanted, key=id_sort))}: {UNCONFIRMED}: the order has "
+                         "no BRIEF_FINGERPRINTS_V1, so a changed brief row is not detected (`gate_check.py --brief "
+                         "BRIEF.md` prints the lines to add)")
+        return
+    for b in sorted(set(wanted) | set(pins), key=id_sort):
+        acs = brief_acs(b, per_ac)
+        if b in ambiguous:
+            notes.append(f"BRIEF_UNCONFIRMED {key} {b}: {UNCONFIRMED}: {brief['label']} lists {b} twice or not as 4 cells")
+        elif b not in pins:
+            notes.append(f"BRIEF_UNCONFIRMED {key} {b}: {UNCONFIRMED}: the order traces {b} but BRIEF_FINGERPRINTS_V1 "
+                         "has no fingerprint for it")
+        elif b not in rows:
+            notes.append(f"BRIEF_STALE {key} {b} {acs}: {b} is no longer in {brief['label']}: 需求已取消，待調整範圍")
+        elif brief_fingerprint(rows[b]) != pins[b]:
+            same = revision is not None and revision == brief["revision"]
+            notes.append(f"BRIEF_STALE {key} {b} {acs}: the brief row changed since the order pinned it (BRIEF_REVISION "
+                         f"{revision if revision is not None else '?'}, brief 版次 "
+                         f"{brief['revision'] if brief['revision'] is not None else '?'})"
+                         + ("; 同版內容有變: the 版次 was not raised" if same else "") + ": 舊條件驗過，新條件待重驗")
+
+
+def find_order_snapshot(folder, sha):
+    """The file in folder whose order_hash is sha, or None."""
+    for path in sorted(pathlib.Path(folder).iterdir()) if folder and pathlib.Path(folder).is_dir() else []:
+        if path.is_file() and order_hash(path.read_bytes()) == sha:
+            return path
+    return None
+
+
+def carried_notes(ac, name, bound, binding, notes):
+    """Evidence carried over by EVIDENCE_EQUIVALENT (F-4): the brief rows this AC traced in the old order (found by its
+    hash in --order-history) against the brief now (or the new order's pins without --brief)."""
+    key = order_key(binding["ids"]) or "<WO-ID>"
+    brief, history = binding.get("brief"), binding.get("history")
+    old = find_order_snapshot(history, bound["sha"])
+    if old is None:
+        notes.append(f"BRIEF_UNCONFIRMED {key} {ac}: {name} is carried over from REVISION {bound['rev']} by "
+                     f"EVIDENCE_EQUIVALENT, but the order it was recorded for (sha {bound['sha'][:12]}) is not in "
+                     + (f"--order-history {history}" if history else "an --order-history folder")
+                     + ", so its brief condition is not compared: 沿用依據未確認")
+        return
+    old_text = old.read_bytes().decode("utf-8-sig", errors="replace")
+    _, old_pins = order_brief(old_text)
+    traced, per_ac = order_traces(old_text)
+    pinned = binding.get("pinned") or {}
+    domain = brief_domain(brief, set(old_pins or ()) | set(pinned))
+    for b in [b for b in (per_ac.get(ac, []) if per_ac is not None else traced) if id_prefix(b) in domain]:
+        was = (old_pins or {}).get(b)
+        now = (brief_fingerprint(brief["rows"][b]) if b in brief["rows"] else None) if brief else pinned.get(b)
+        if was is None:
+            notes.append(f"BRIEF_UNCONFIRMED {key} {b} {ac}: {name} is carried over from REVISION {bound['rev']}, whose "
+                         f"order ({old.name}) pinned no fingerprint for {b}: 沿用依據未確認")
+        elif now != was:
+            notes.append(f"BRIEF_STALE {key} {b} {ac}: {name} was recorded for REVISION {bound['rev']} under the old "
+                         f"condition of {b} and carried over by EVIDENCE_EQUIVALENT: 舊條件驗過，新條件待重驗")
+
+
+def write_snapshot(data, folder, name):
+    """(path, written) of folder/name holding data, written atomically: a temp file in the same folder, fsync, then a
+    rename over the name. A file already there with the same hash is kept, so a retry writes nothing."""
+    import tempfile
+    folder = pathlib.Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / name
+    if target.is_file() and order_hash(target.read_bytes()) == order_hash(data):
+        return target, False
+    fd, tmp = tempfile.mkstemp(prefix=".snapshot-", suffix=".part", dir=str(folder))
+    try:
+        with os.fdopen(fd, "wb") as out:
+            out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(tmp, str(target))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return target, True
+
+
+def print_brief(path, folder=None):
+    """Print the brief's BRIEF_REVISION and BRIEF_FINGERPRINTS_V1 lines; with folder, write its snapshot and print the
+    BRIEF_LOCKED line. True when the brief has no 編號 table."""
+    data = pathlib.Path(path).read_bytes()
+    text, sha = data.decode("utf-8-sig", errors="replace"), order_hash(data)
+    rows, ambiguous, problem = brief_table(text)
+    if problem:
+        print(f"FAIL brief {path}\n  - {problem}")
+        return True
+    revision = brief_revision(text)
+    print(f"BRIEF {path}: 版次 {revision if revision is not None else '?'}, {len(rows)} row(s), sha {sha}")
+    print(f"  BRIEF_REVISION = {revision if revision is not None else '<版次>'}")
+    print("  BRIEF_FINGERPRINTS_V1 = " + json.dumps({b: brief_fingerprint(rows[b]) for b in sorted(rows, key=id_sort)},
+                                                  ensure_ascii=False))
+    for b in sorted(ambiguous, key=id_sort):
+        print(f"  ~ BRIEF_UNCONFIRMED {b}: {UNCONFIRMED}: listed twice or not as 4 cells; no fingerprint")
+    if folder:
+        target, written = write_snapshot(data, folder, f"{revision}-{sha}.md")
+        print(f"  SNAPSHOT {target} ({'written' if written else 'already there, kept'})")
+        print(f"  BRIEF_LOCKED rev={revision} sha={sha} snapshot={pathlib.Path(folder).name}/{target.name}")
+    return False
+
+
+def po_reviews(text):
+    """The PO's product reviews in the Director's log, whole lines read like DISPATCH: `PO_PRODUCT_REVIEW <WO-ID>
+    candidate=<7-40 hex> outcome=seen|changes|accepted [ref=<message>] [manifest=<64 hex>] [brief=B-2:<64 hex>,...]`
+    (看過 / 要求修改 / 接受 read as the three outcomes). [{"order", "candidate", "outcome", "ref", "manifest", "brief",
+    "problem", "line"}]; problem names what does not bind, or is None."""
+    found = []
+    for line in log_lines(text):
+        m = PO_REVIEW.fullmatch(line)
+        if not m:
+            continue
+        tokens = dict(token.split("=", 1) for token in m.group(2).split())
+        brief, problem = {}, []
+        for part in filter(None, tokens.get("brief", "").split(",")):
+            b, _, fp = part.partition(":")
+            if ORDER_ID.fullmatch(b) and HEX64.fullmatch(fp.lower()):
+                brief[b] = fp.lower()
+            else:
+                problem.append(f"brief={part} is not B-n:<64 hex>")
+        candidate = tokens.get("candidate", "").lower()
+        if not re.fullmatch(r"[0-9a-f]{7,40}", candidate):
+            problem.append("candidate= is not a commit (7 to 40 hex digits)")
+        outcome = PO_OUTCOMES.get(tokens.get("outcome", ""))
+        if outcome is None:
+            problem.append("outcome= is not seen / changes / accepted")
+        manifest = tokens.get("manifest", "").lower() or None
+        if manifest is not None and not HEX64.fullmatch(manifest):
+            problem.append("manifest= is not 64 hex digits")
+        found.append({"order": m.group(1), "candidate": candidate, "outcome": outcome, "ref": tokens.get("ref"),
+                      "manifest": manifest, "brief": brief, "problem": "; ".join(problem) or None, "line": line.strip()})
+    return found
+
+
+def rerun_records(text, held=None):
+    """2.2 (F08): {(WO-ID, AC): [candidate, ...]} from whole `EVIDENCE_RERUN` lines: the Director reran the approved
+    check of that AC on that candidate (evidence_record.py verify --rerun) and it passed. A line with brief=stale or
+    brief=unconfirmed (the rerun's brief comparison, same as --match's) is not counted; held, when given, gets
+    {(WO-ID, AC): [(candidate, state), ...]} for those lines."""
+    found = {}
+    for m in (RERUN.fullmatch(line) for line in log_lines(text)):
+        if m and m.group(4) in (None, "ok"):
+            found.setdefault((m.group(1), m.group(2)), []).append(m.group(3).lower())
+        elif m and held is not None:
+            held.setdefault((m.group(1), m.group(2)), []).append((m.group(3).lower(), m.group(4)))
+    return found
+
+
+def acceptance_identity(record):
+    """The product a PO_ACCEPTANCE record is about: (candidate_id, commit, entry, entry_sha256, manifest_sha256).
+    Any value that is not text is kept as its JSON text, so a malformed record never raises here."""
+    def get(key):
+        value = record.get(key)
+        if not isinstance(value, str):
+            return None if value is None else json.dumps(value, sort_keys=True, ensure_ascii=False)
+        return value if key in ("candidate_id", "entry") else value.lower()
+    return tuple(get(key) for key in ("candidate_id", "commit", "entry", "entry_sha256", "manifest_sha256"))
+
+
+def acceptance_product(record, root):
+    """2.2 (F09): (problems, unchecked) of the product files a bound record names, from root. problems: the entry is
+    not a file inside root, or a file's hash is not the recorded one. unchecked: what could not be compared."""
+    problems, unchecked = [], []
+    root = pathlib.Path(root).resolve()
+    for key, digest_key, needed in (("entry", "entry_sha256", True), ("manifest", "manifest_sha256", False)):
+        name = record.get(key)
+        if name is None and not needed:
+            unchecked.append("manifest 沒列路徑（只有 manifest_sha256），沒核對")
+            continue
+        if not (isinstance(name, str) and name.strip()):
+            problems.append(f"{key} is not a path")
+            continue
+        path = (root / name).resolve()
+        if path != root and root not in path.parents:
+            problems.append(f"{key} {name} is outside the product folder {root}")
+        elif not path.is_file():
+            problems.append(f"{key} {name} not found under {root}")
+        elif record.get(digest_key) is None:
+            unchecked.append(f"{key} 沒有 {digest_key}，內容沒核對")
+        elif hashlib.sha256(path.read_bytes()).hexdigest() != str(record[digest_key]).lower():
+            problems.append(f"{key} {name} does not hash to {digest_key} {str(record[digest_key])[:12]}: the product changed")
+    return problems, unchecked
+
+
+def shared_replies(records):
+    """2.2 (F09): reply_ref -> the products that use it, for a reply used for two different products. Only records
+    that pass acceptance_problems() count: a malformed one is already UNBOUND_PO_REPLY on its own."""
+    used = {}
+    for record in records:
+        if (isinstance(record, dict) and isinstance(record.get("reply_ref"), str) and record["reply_ref"].strip()
+                and not acceptance_problems(record)):
+            used.setdefault(record["reply_ref"], set()).add(acceptance_identity(record))
+    return {ref: ids for ref, ids in used.items() if len(ids) > 1}
+
+
+def acceptance_records(text):
+    """(records, problem) of a PO_ACCEPTANCE.json: one object, a list of them, or {"records": [...]}."""
+    try:
+        data = json.loads(text)
+    except ValueError as error:
+        return [], f"not JSON ({error})"
+    if isinstance(data, dict) and isinstance(data.get("records"), list):
+        data = data["records"]
+    if isinstance(data, dict):
+        data = [data]
+    return (data, None) if isinstance(data, list) else ([], "not a JSON object or list")
+
+
+def acceptance_problems(record, candidate=None):
+    """What keeps one PO_ACCEPTANCE record from binding the PO's reply to one product: candidate ID, commit (40 hex),
+    entry file, manifest SHA-256 and the message it was offered in; an outcome needs the reply's message too."""
+    if not isinstance(record, dict):
+        return ["not a JSON object"]
+    out = []
+    if record.get("schema") != PO_ACCEPTANCE_SCHEMA:
+        out.append(f"schema is {json.dumps(record.get('schema'), ensure_ascii=False)}, not {PO_ACCEPTANCE_SCHEMA}")
+    for key in ("candidate_id", "entry", "offered_message_ref"):
+        if not (isinstance(record.get(key), str) and record[key].strip()):
+            out.append(f"{key} missing")
+    commit = record.get("commit")
+    if not (isinstance(commit, str) and re.fullmatch(r"[0-9a-fA-F]{40}", commit)):
+        out.append("commit is not 40 hex digits")
+    elif candidate and commit.lower() != candidate:
+        out.append(f"commit {commit[:12]} is not the --candidate {candidate[:12]}")
+    for key, needed in (("manifest_sha256", True), ("entry_sha256", False)):
+        value = record.get(key)
+        if (value is not None or needed) and not (isinstance(value, str) and HEX64.fullmatch(value.lower())):
+            out.append(f"{key} is not 64 hex digits")
+    outcome = record.get("outcome")
+    if outcome is not None and not (isinstance(outcome, str) and outcome in PO_OUTCOMES):
+        out.append("outcome is not seen / changes / accepted / null")
+    elif outcome is not None and not (isinstance(record.get("reply_ref"), str) and record["reply_ref"].strip()):
+        out.append("an outcome without reply_ref: the PO's reply is not bound to a message")
+    return out
+
+
+def check_po_acceptance(text, notes, candidate=None, root=None):
+    """PO_ACCEPTANCE.json (題4 P-2), notes only: each record bound, or UNBOUND_PO_REPLY with what it lacks.
+    root (2.2, F09): the folder the entry and manifest paths are read from; None skips the product check."""
+    records, problem = acceptance_records(text)
+    if problem:
+        notes.append(f"UNBOUND_PO_REPLY file: {problem}; no record read")
+        return []
+    if not records:
+        notes.append("PO_ACCEPTANCE: no record")
+    shared = shared_replies(records)
+    for n, record in enumerate(records, 1):
+        tag = record.get("candidate_id") if isinstance(record, dict) and isinstance(record.get("candidate_id"), str) \
+            and record["candidate_id"].strip() else f"#{n}"
+        bad = acceptance_problems(record, candidate)
+        unchecked = []
+        if not bad and root is not None:
+            more, unchecked = acceptance_product(record, root)
+            bad += more
+        if not bad and isinstance(record.get("reply_ref"), str) and record["reply_ref"] in shared:
+            bad.append(f"reply_ref {record['reply_ref']} is used for {len(shared[record['reply_ref']])} different products; "
+                       "one reply binds one product")
+        if bad:
+            notes.append(f"UNBOUND_PO_REPLY {tag}: {'; '.join(bad)}")
+        else:
+            outcome = PO_OUTCOMES.get(record.get("outcome") or "")
+            state = {"seen": "看過", "changes": "看過，要求再改", "accepted": "已驗收"}.get(outcome, "已送出，還沒回覆")
+            if unchecked or root is None:
+                state = (f"PO 回覆 {outcome}，成品待核對（" + ("；".join(unchecked) or "沒核對入口檔") + "）") if outcome \
+                    else state + "（成品待核對）"
+            notes.append(f"PO_ACCEPTANCE {tag}: {record['commit'][:12]} {record['entry']}: {state} "
+                         f"({record.get('reply_ref') or record['offered_message_ref']})")
+    return []
+
+
+def verdict_record_notes(text, order_path, report_path, notes):
+    """A verdict's optional `ORDER_SHA256:` / `REPORT_SHA256:` lines against the --match order and report now."""
+    for key, path, what in (("ORDER_SHA256", order_path, "order"), ("REPORT_SHA256", report_path, "report")):
+        m = re.search(rf"^\s*{key}\s*[:=]\s*(\S*)", text, re.M)
+        if not m:
+            continue
+        value = m.group(1).strip("`").lower()
+        if path is None or not pathlib.Path(path).is_file():
+            notes.append(f"VERDICT_RECORD: {key} given, but no --match {what} to compare it with")
+            continue
+        now = order_hash(pathlib.Path(path).read_bytes())
+        if not HEX64.fullmatch(value):
+            notes.append(f"VERDICT_RECORD: {key} is not 64 hex digits: {value or 'empty'}")
+        elif value != now:
+            notes.append(f"VERDICT_RECORD: {key} {value[:12]} is not the {what}'s hash now ({now[:12]}); the verdict "
+                         f"judged another {what}")
+
+
+def order_binding(data, path=None):
+    """(binding, problem): what `evidence_record.py run --order` writes into a record's `order` field, {"id", "rev",
+    "sha", "path"}. sha is order_hash of the file's bytes, the hash `--hash` prints for the DISPATCH line, so a record
+    and a dispatch name an order the same way (G03b). problem: the order has no ID, or its title and file name differ."""
+    text = data.decode("utf-8-sig", errors="replace")
+    ids, problem = order_identity(text, path)
+    if problem or not ids:
+        return None, problem or "order: no title or file name to take its ID from"
+    return {"id": order_key(ids), "rev": int(order_revision(text)), "sha": order_hash(data),
+            "path": str(pathlib.Path(path).resolve()) if path is not None else None}, None
+
+
+def dispatch_for(dispatch, ids):
+    """(name, (rev, sha)) of the latest DISPATCH line for any of an order's names, or None."""
+    hits = [(name, value) for name, value in dispatch.items() if name in ids]
+    return hits[-1] if hits else None
+
+
+def check_dispatch(order_text, order_path, now, dispatch, log_name, problems, notes):
+    """The order's hash now against the hash the Director logged when dispatching it. Given a log, an order with no
+    DISPATCH line fails in every governance: GOVERNANCE, REVISION and the ID are the order's own claim until its hash
+    equals a dispatched one, so a worker cannot lower the mode or rename the order to skip the check."""
+    ids = order_ids(order_text, order_path)
+    hit = dispatch_for(dispatch, ids)
+    if hit is None:
+        line = f"DISPATCH {order_key(ids) or '<WO-ID>'} rev={order_revision(order_text)} sha={now}"
+        problems.append(f"DISPATCH: no line for {' / '.join(ids) or order_path} in {log_name}; an order the log does not "
+                        f"show as dispatched is not reviewed against it (the Director logs `{line}` when dispatching)")
+        return
+    name, (rev, sha) = hit
+    if rev != order_revision(order_text):
+        problems.append(f"DISPATCH: the latest line for {name} logs rev={rev}, the order is at REVISION "
+                        f"{order_revision(order_text)}; log a DISPATCH line for this revision when dispatching it")
+    if sha != now:
+        problems.append(f"DISPATCH: the order's hash now ({now[:12]}) is not the one logged at dispatch "
+                        f"({sha[:12]}, {name} rev={rev}); the order changed after dispatch: compare its 變更紀錄, "
+                        "and treat the report's ORDER_SHA256 as matching a changed order")
+
+
+def check_resume(text, notes):
+    problems = []
+    head = [line for line in text.splitlines() if line.strip()][:4]
+    for n, key in enumerate(RESUME_HEADER):
+        m = re.fullmatch(rf"{key}\s*:\s*(.*)", head[n]) if n < len(head) else None
+        if not m:
+            problems.append(f"line {n + 1} of the header must be `{key}: ...`")
+        else:
+            filled(key, m.group(1), problems)
+    updated = re.search(r"^UPDATED\s*:\s*(.*)$", text, re.M)
+    if not updated or not re.search(r"\d{4}-\d{2}-\d{2}", updated.group(1)):
+        problems.append("UPDATED: missing or without a date (read it from `date`)")
+    return problems
+
+
+def size_tool():
+    """memory_size_check.py from this folder: one source for the size rule (2.2.2)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("gate_check_memory_size",
+                                                  pathlib.Path(__file__).resolve().parent / "memory_size_check.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def resume_size(raw, max_bytes=None, max_line_bytes=None):
+    """2.2.2: `RESUME_SIZE ...` when a RESUME_STATE's bytes are over the limits (default 20480 bytes, lines 4096 bytes:
+    docs/06; every resume reads the whole file), else None. Shadow unless --strict."""
+    tool = size_tool()
+    default_bytes, default_line = tool.LIMITS["resume"]
+    max_bytes = default_bytes if max_bytes is None else max_bytes
+    max_line_bytes = default_line if max_line_bytes is None else max_line_bytes
+    facts = tool.measure(raw)
+    over = tool.over_limits(facts, max_bytes, max_line_bytes)
+    if not over:
+        return None
+    return (f"RESUME_SIZE {facts['bytes']} bytes (limit {max_bytes}), ~{facts['tokens']} tokens, longest line "
+            f"{facts['longest_line']}: {facts['longest_bytes']} bytes (limit {max_line_bytes}); over: {', '.join(over)}; "
+            "move old sections word for word to RESUME_HISTORY_<YYYYMMDD>.md beside it: resume_archive.py, dry-run "
+            "first (docs/06)")
+
+
+def resume_limits_for(path, config, notes):
+    """The limits for one RESUME_STATE: --config, else director_work.json beside the file, else the defaults."""
+    found = pathlib.Path(config) if config else pathlib.Path(path).resolve().parent / "director_work.json"
+    if not config and not found.is_file():
+        return None, None
+    return size_tool().config_limits(found, notes)
+
+
+def check_order(text, notes):
+    problems = []
+    for key in ORDER_FIELDS:
+        m = re.search(rf"^\s*{re.escape(key)}\s*=\s*(.*)$", text, re.M)
+        if not m:
+            problems.append(f"{key}: missing")
+        elif filled(key, m.group(1), problems) and key == "GOVERNANCE" and m.group(1).strip() not in GOVERNANCE:
+            problems.append(f"GOVERNANCE: must be one of {', '.join(GOVERNANCE)}")
+    check_paths("SCOPE", text, problems)
+    check_paths("FORBIDDEN", text, problems)
+    comment_notes(text, notes)
+    required_changes(text, problems)
+    rows = ac_table(text, problems)
+    if not rows:
+        problems.append("acceptance: no AC-<n> row")
+    for ac, row in rows.items():
+        for name in ("requirement", "how verified", "expected"):
+            cell = row.get(name, "")
+            if filled(f"{ac} {name}", cell, problems) and VAGUE.search(cell):
+                problems.append(f"{ac} {name}: vague: {cell.strip()}")
+        if "type" in row and row["type"] not in AC_STATUSES:
+            problems.append(f"{ac} 類型: must be one of {', '.join(AC_STATUSES)}, got: {row['type'] or 'empty'}")
+    sample = next(iter(rows.values()), {})
+    if rows and "type" not in sample:
+        notes.append(f"acceptance: no 類型 column; give each AC one of {' / '.join(AC_STATUSES)}")
+    if {"actual", "evidence", "status"} & sample.keys():
+        notes.append("acceptance: 實際 / 證據 / 狀態 belong in the TASK REPORT's ACCEPTANCE table, not in the order")
+    checks = order_checks(text, problems)
+    for ac in sorted(checks or {}):
+        kind = rows.get(ac, {}).get("type") or "AUTO"
+        if ac not in rows:
+            problems.append(f"CHECKS: {ac} is not an acceptance criterion of this order")
+        elif kind != "AUTO" and kind in AC_STATUSES:  # a type outside the vocabulary is reported above
+            problems.append(f"CHECKS: {ac} is {kind}; only an AUTO criterion has a check to rerun")
+    if re.search(r"^\s*GOVERNANCE\s*=\s*Strict\b", text, re.M):
+        unchecked = [ac for ac, row in rows.items() if (row.get("type") or "AUTO") == "AUTO" and ac not in (checks or {})]
+        if unchecked:
+            notes.append(f"CHECKS: Strict order without an approved check for AUTO {', '.join(unchecked)}; add "
+                         '`CHECKS:` with `- AC-n: ["program", "arg"]` so `evidence_record.py verify --rerun --order` '
+                         "runs the check the Director approved")
+    revision = re.search(r"^[ \t]*REVISION[ \t]*=[ \t]*(\S*)", text, re.M)
+    if not revision:
+        notes.append("REVISION: missing; start at 1 and log every later change under 變更紀錄")
+    elif not revision.group(1).isdigit():
+        problems.append(f"REVISION: must be a number, got: {revision.group(1) or 'empty'}")
+    else:
+        for n in range(2, int(revision.group(1)) + 1):
+            if not re.search(rf"^\|\s*{n}\s*\|", text, re.M):
+                problems.append(f"REVISION {revision.group(1)}: 變更紀錄 has no row for revision {n}")
+    if not re.search(r"^\s*TRACES_TO\s*=", text, re.M):
+        notes.append("TRACES_TO: missing; name the requirement or decision IDs this order serves, or NONE")
+    for key in ("DELIVERABLES", "STOP_RULES"):
+        m = re.search(rf"{key}\s*[:：=]\s*(.*)", text)
+        if not m:
+            problems.append(f"{key}: missing")
+        else:
+            filled(key, m.group(1), problems)
+    return problems
+
+
+def report_fields(text):
+    fields, key = {}, None
+    for line in text.splitlines():
+        m = re.match(r"\s*([A-Z][A-Z_]+)(?:（[^）]*）)?\s*:\s*(.*)$", line)
+        if m:
+            key = m.group(1)
+            fields[key] = m.group(2)
+        elif key and not line.startswith(("```", "#")):
+            fields[key] += " " + line.strip()
+    return fields
+
+
+def check_report(text, notes):
+    problems = []
+    fields = report_fields(text)
+    if "TASK_ID" not in text or "HEAD" not in text:
+        problems.append("TASK_ID / HEAD: missing")
+    for key in REPORT_FIELDS:
+        if key not in fields:
+            problems.append(f"{key}: missing")
+        else:
+            filled(key, fields[key], problems)
+    result = fields.get("RESULT", "").strip()
+    if result and result not in REPORT_RESULTS:
+        problems.append(f"RESULT: must be exactly one of {', '.join(REPORT_RESULTS)}, got: {result}")
+    scope = re.sub(r"^SCOPE_CHECK:\s*", "", fields.get("SCOPE_CHECK", "").strip())  # the pasted last line keeps its prefix
+    if scope and not scope.startswith(("PASS", "VIOLATION", "NOT_RUN")) and not blank(scope):
+        problems.append("SCOPE_CHECK: must start with PASS, VIOLATION or NOT_RUN (the last line of scope_check.py)")
+    if fields.get("EVIDENCE", "").strip() == "NONE":
+        problems.append("EVIDENCE: a bare NONE needs a reason: `NONE: why`")
+    if result == "PASS":
+        if "NOT_RUN" in fields.get("TESTS", ""):
+            problems.append("RESULT PASS with NOT_RUN in TESTS: a skipped test is not a pass")
+        if scope.startswith("VIOLATION"):
+            problems.append("RESULT PASS with a scope violation")
+        if scope.startswith("NOT_RUN"):
+            problems.append("RESULT PASS with SCOPE_CHECK NOT_RUN: the scope was not checked")
+    check_head(text, problems, notes)
+    check_header_once(text, problems)
+    if not ac_table(text, problems):
+        notes.append("ACCEPTANCE: no table; give each AC of the order its own row and check it with --match")
+    return problems
+
+
+def report_head_values(text):
+    """Every value a report writes as HEAD, in order: the value after `HEAD:`, or its place in
+    `TASK_ID / ... / HEAD / WORKTREE_CLEAN: ... / <value> / yes` (counted from the right, so a branch name with slashes
+    does not shift it)."""
+    found = []
+    for line in text.splitlines():
+        keys, sep, values = line.partition(":")
+        names = [key.strip() for key in keys.split("/")]
+        if sep and "HEAD" in names:
+            parts = [value.strip() for value in values.split("/")]
+            back = len(names) - names.index("HEAD")
+            if len(parts) >= back:
+                found.append(parts[-back])
+    return found
+
+
+def report_head_value(text):
+    """The first value a report writes as HEAD; None when no line names HEAD."""
+    values = report_head_values(text)
+    return values[0] if values else None
+
+
+HEADER_ONCE = ("ORDER", "ORDER_SHA256", "RESULT")
+
+
+def check_header_once(text, problems):
+    """A report names its commit, order, order hash and result once (G02b): a second line could say something else."""
+    heads = report_head_values(text)
+    if len(heads) > 1:
+        problems.append(f"HEAD: the report names HEAD {len(heads)} times ({', '.join(v[:12] or 'empty' for v in heads)}); "
+                        "write it once")
+    for key in HEADER_ONCE:
+        lines = re.findall(rf"^[ \t]*{key}[ \t]*:", text, re.M)
+        if len(lines) > 1:
+            problems.append(f"{key}: the report has {len(lines)} {key}: lines; write it once")
+
+
+def report_head(text):
+    """The commit a report names, lower-case, or None when the HEAD value is not 7 to 40 hex digits."""
+    value = report_head_value(text)
+    return value.lower() if value and SHA.fullmatch(value) else None
+
+
+def check_head(text, problems, notes, strict=False):
+    """HEAD must be a commit hash (7 to 40 hex digits): a problem for a Strict order, otherwise a note."""
+    value = report_head_value(text)
+    if value is not None and not SHA.fullmatch(value):
+        (problems if strict else notes).append(f"HEAD: {value or 'empty'} is not a commit hash (7 to 40 hex digits)")
+    return value
+
+
+def required_changes(text, problems):
+    """An optional REQUIRED_CHANGES list must be concrete and lie inside SCOPE and outside FORBIDDEN."""
+    required = parse_list(text, "REQUIRED_CHANGES")
+    if required is None:
+        return
+    check_paths("REQUIRED_CHANGES", text, problems)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("scope_check", pathlib.Path(__file__).resolve().parent / "scope_check.py")
+    scope_check = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(scope_check)
+    scope = [scope_check.glob_regex(g) for g in parse_list(text, "SCOPE") or [] if g != "NONE"]
+    forbidden = [(g, scope_check.glob_regex(g)) for g in parse_list(text, "FORBIDDEN") or [] if g != "NONE"]
+    for item in required:
+        path = item.replace("\\", "/").lstrip("/")
+        rule = next((g for g, rx in forbidden if rx.fullmatch(path)), None)
+        if rule:
+            problems.append(f"REQUIRED_CHANGES: {item} is FORBIDDEN ({rule}); the order cannot be done")
+        elif item != "NONE" and not any(rx.fullmatch(path) for rx in scope):
+            problems.append(f"REQUIRED_CHANGES: {item} is outside SCOPE; the order cannot be done")
+
+
+def evidence_module():
+    """evidence_record.py next to this file, for its record checks."""
+    import importlib.util
+    path = pathlib.Path(__file__).resolve().parent / "evidence_record.py"
+    spec = importlib.util.spec_from_file_location("evidence_record", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def check_binding(ac, name, record, binding, problems, notes, strict):
+    """The record's `order` field (evidence_record.py run --order) against the order now (G03b). binding: {"ids", "rev",
+    "sha", "path", "equivalent"} of the order and the log's EVIDENCE_EQUIVALENT lines. A bound record must be for this
+    order at this revision and hash, or an EVIDENCE_EQUIVALENT line must carry it over. An unbound record is accepted
+    with a warning at REVISION 1; from REVISION 2 it may answer an earlier revision, which fails Strict."""
+    bound, rev, now, ids = record.get("order"), binding["rev"], binding["sha"], binding["ids"]
+    key, fix = order_key(ids) or "<WO-ID>", f"evidence_record.py run --order {binding['path'] or '<order>'}"
+    out = problems if strict else notes
+    if bound is None:
+        if rev == 1:
+            notes.append(f"{ac}: {name}: WARN evidence not bound to the order (recorded without --order); "
+                         "from the next MAJOR version `evidence_record.py run --order` is required")
+        else:
+            out.append(f"{ac}: {name}: not bound to an order revision and the order is at REVISION {rev}, so it may "
+                       f"answer an earlier one; " + ("Strict: " if strict else "") + f"record again with `{fix}`")
+        return
+    same_order = bound["id"] in ids or bool(id_prefixes([bound["id"]]) & id_prefixes(ids))
+    if not same_order:
+        out.append(f"{ac}: {name}: recorded for order {bound['id']}, this order is {key}; record again with `{fix}`")
+        return
+    if (bound["rev"], bound["sha"]) == (rev, now):
+        return
+    carried = any((eid in ids or id_prefixes([eid]) & id_prefixes(ids)) and (old_rev, old_sha, new_rev) == (bound["rev"], bound["sha"], rev)
+                  for eid, old_rev, old_sha, new_rev in binding["equivalent"])
+    if not carried:
+        out.append(f"{ac}: {name}: recorded for {bound['id']} REVISION {bound['rev']} (sha {bound['sha'][:12]}), the order "
+                   f"is REVISION {rev} (sha {now[:12]}); record again with `{fix}`, or the Director logs the whole line "
+                   f"`EVIDENCE_EQUIVALENT {key} rev={bound['rev']} sha={bound['sha']} to rev={rev}`")
+    elif binding.get("history") or binding.get("brief"):  # 2.1: the keys evidence_record.py's binding does not have
+        carried_notes(ac, name, bound, binding, notes)
+
+
+def check_evidence(ac, evidence, folder, head, problems, notes, strict=False, candidate=None, approved=None, binding=None):
+    """An AUTO row marked PASS against the evidence_record.py files its 證據 cell names.
+    strict: uncommitted changes, a label naming another AC, a legacy record, a record without git HEAD and a command
+    other than the approved one fail instead of being noted. candidate: the commit under review; the record's HEAD is
+    compared with it instead of the report's (exactly for a Strict order, as a prefix otherwise). approved: the order's
+    CHECKS command for this AC, or None. binding: the order's identity for check_binding, or None."""
+    names = EVIDENCE_FILE.findall(evidence)
+    if not names:
+        problems.append(f"{ac}: PASS names no evidence_record file (.json) in 證據")
+        return
+    ev = evidence_module()
+    for name in names:
+        try:
+            record = json.loads((pathlib.Path(folder) / name).read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            problems.append(f"{ac}: {name} is not an evidence_record file in {folder}")
+            continue
+        bad = ev.record_problems(record)
+        if bad:
+            more = f" (+{len(bad) - 1} more)" if len(bad) > 1 else ""
+            problems.append(f"{ac}: {name} is not an evidence_record file: {bad[0]}{more}")
+            continue
+        if "schema" not in record:
+            (problems if strict else notes).append(
+                f"{ac}: {name}: legacy record without `schema`; "
+                + ("Strict: record again with evidence_record.py run" if strict else "only command, exit_code and artifacts checked"))
+        elif record["schema"] not in ev.SCHEMAS:
+            (problems if strict else notes).append(
+                f"{ac}: {name}: schema {record['schema']} is not one this tool reads ({', '.join(map(str, ev.SCHEMAS))})"
+                + ("; Strict: record again with this evidence_record.py" if strict else ""))
+        code, git = record["exit_code"], record.get("git") or {}
+        if code != 0 or record.get("timed_out"):
+            problems.append(f"{ac}: {name}: the command exited {code}{' (timed out)' if record.get('timed_out') else ''}")
+        lost = [item.get("path") for item in record.get("artifacts", []) if item.get("sha256") is None]
+        if lost:
+            problems.append(f"{ac}: {name}: artifact missing when recorded: {lost[0]}")
+        recorded = (git.get("head") or "").lower()
+        if candidate and recorded:
+            if not (recorded == candidate if strict else candidate.startswith(recorded)):
+                problems.append(f"{ac}: {name}: recorded at HEAD {recorded[:12]}, the candidate is {candidate[:12]}; "
+                                "record again at the candidate commit")
+        elif head and recorded and not (recorded.startswith(head) or head.startswith(recorded)):
+            problems.append(f"{ac}: {name}: recorded at HEAD {recorded[:12]}, the report says {head[:12]}; "
+                            "record again after the last commit")
+        elif not recorded and (strict or head or candidate):
+            (problems if strict else notes).append(
+                f"{ac}: {name}: recorded with no git HEAD; " + ("Strict: record again inside the worktree" if strict
+                                                                 else "not compared with the report's"))
+        if record.get("log_error"):  # 2.2 (F15): the full output log the run was asked to keep is incomplete
+            (problems if strict else notes).append(
+                f"{ac}: {name}: its --log was not written in full ({str(record['log_error'])[:80]}); the record is incomplete"
+                + ("; Strict: record again" if strict else ""))
+        if git.get("dirty"):
+            (problems if strict else notes).append(
+                f"{ac}: {name}: recorded with uncommitted changes" + ("; Strict: commit, then record again" if strict else ""))
+        elif strict and "schema" in record and git.get("dirty") is not False:
+            problems.append(f"{ac}: {name}: git.dirty is {json.dumps(git.get('dirty'))}, not false: the record does not say "
+                            "the worktree was clean; Strict: record again inside the worktree")
+        for item in record.get("artifacts", []):
+            if item.get("sha256") is None:
+                continue
+            path = pathlib.Path(item["path"])
+            if not path.is_absolute() and not record.get("cwd"):
+                notes.append(f"{ac}: {name}: artifact {item['path']} not hashed again: the record has no cwd to find it from")
+                continue
+            now_hash = ev.hash_artifact(path if path.is_absolute() else pathlib.Path(record["cwd"], path))["sha256"]
+            if now_hash != item["sha256"]:
+                (problems if strict else notes).append(
+                    f"{ac}: {name}: artifact {'gone' if now_hash is None else 'changed'} since it was recorded: {item['path']}"
+                    + ("; Strict: the record's hash is not what is on disk" if strict else ""))
+        if approved is not None and record["command"] != approved:
+            (problems if strict else notes).append(
+                f"{ac}: {name}: its command is not the order's approved check (CHECKS {ac}); "
+                + ("Strict: record again with exactly that command" if strict else "record again with that command"))
+        label = record.get("label")
+        if label is not None and ac not in re.split(r"[\s,;/+]+", str(label)):
+            (problems if strict else notes).append(
+                f"{ac}: {name}: its label is {label}, not {ac}" + ("; Strict: record once per AC, or label both" if strict else ""))
+        if binding is not None:
+            check_binding(ac, name, record, binding, problems, notes, strict)
+
+
+def check_match(report, order, notes, evidence_dir=None, dispatch=None, order_path=None, log_name=None, candidate=None,
+                equivalent=None, brief=None, history=None):
+    """The report's ACCEPTANCE rows against the order's acceptance criteria and its hash.
+    dispatch: the records of --dispatch-log (None when the flag is absent), order_path: the order file's path,
+    candidate: the commit under review (40 hex digits, lower-case) from --candidate, or None, equivalent: the
+    EVIDENCE_EQUIVALENT lines of --dispatch-log, brief: load_brief of --brief, history: the --order-history folder
+    (both only add notes on carried-over evidence)."""
+    problems = []
+    order_text = order.decode("utf-8-sig")
+    binding = {"ids": order_ids(order_text, order_path), "rev": int(order_revision(order_text)), "sha": order_hash(order),
+               "path": str(order_path) if order_path is not None else None, "equivalent": equivalent or [],
+               "brief": brief, "history": history, "pinned": order_brief(order_text)[1]}
+    order_problems = []
+    wanted, got = ac_table(order_text, order_problems), ac_table(report, problems)
+    checks = order_checks(order_text, order_problems) or {}
+    problems.extend(f"order: {p}" for p in order_problems)
+    strict = bool(re.search(r"^\s*GOVERNANCE\s*=\s*Strict\b", order_text, re.M))
+    head_value = check_head(report, problems, notes, strict)
+    check_header_once(report, problems)
+    hashlike = head_value.lower() if head_value and SHA.fullmatch(head_value) else None
+    if strict and (head_value is None or hashlike) and not (hashlike and len(hashlike) == 40):
+        problems.append(f"HEAD: a Strict report names the full commit (40 hex digits), got {hashlike or 'none'}")
+    if strict and not candidate:
+        problems.append("CANDIDATE: a Strict match needs --candidate <40 hex digits> (`git rev-parse <worker branch>`)")
+    if candidate and hashlike and not candidate.startswith(hashlike):
+        problems.append(f"HEAD: the report names {hashlike[:12]}, the candidate is {candidate[:12]}; "
+                        "the report was not written for the commit under review")
+    head = report_head(report) if evidence_dir else None
+    if evidence_dir and not head and not candidate:
+        notes.append("HEAD: the report names no commit hash" + ("" if head_value is None else " (see above)")
+                     + "; evidence HEAD not compared")
+    if not wanted:
+        problems.append("order: no AC-<n> row")
+    for ac, spec in wanted.items():
+        kind = spec.get("type", "")
+        if not kind:
+            notes.append(f"{ac}: the order gives no 類型; checked as AUTO")
+            kind = "AUTO"
+        row = got.get(ac)
+        if row is None:
+            problems.append(f"{ac}: in the order but not in the report's ACCEPTANCE table")
+            continue
+        if kind not in AC_STATUSES:
+            problems.append(f"{ac}: the order's 類型 {kind} is not one of {', '.join(AC_STATUSES)}")
+            continue
+        status, evidence = row.get("status", ""), row.get("evidence", "")
+        if status not in AC_STATUSES[kind]:
+            hint = {"REVIEW": "; a reviewer, then the Director, judges it", "PO": "; only the PO judges it"}.get(kind, "")
+            problems.append(f"{ac} ({kind}): status must be one of {' / '.join(AC_STATUSES[kind])}, got: {status or 'empty'}{hint}")
+        if status == "PASS" and (blank(evidence) or evidence.upper().startswith("NONE")):
+            problems.append(f"{ac}: PASS without evidence")
+        elif status == "PASS" and kind == "AUTO" and evidence_dir:
+            check_evidence(ac, evidence, evidence_dir, head, problems, notes, strict, candidate, checks.get(ac), binding)
+        if status in ("PASS", "FAIL") and blank(row.get("actual", "")):
+            problems.append(f"{ac}: {status} with 實際 empty")
+    for ac in sorted(got.keys() - wanted.keys()):
+        problems.append(f"{ac}: in the report but not in the order")
+    auto_pass = [ac for ac, spec in wanted.items() if spec.get("type", "AUTO") in ("AUTO", "")
+                 and got.get(ac, {}).get("status", "") == "PASS"]
+    if strict and auto_pass and not evidence_dir:
+        problems.append(f"EVIDENCE: Strict order checked without --evidence-dir; the records of AUTO PASS rows "
+                        f"{', '.join(auto_pass)} were not read")
+    if report_fields(report).get("RESULT", "").strip() == "PASS":
+        open_rows = sorted(ac for ac, row in got.items() if row.get("status", "") in UNFINISHED)
+        if open_rows:
+            problems.append(f"RESULT PASS with {' / '.join(UNFINISHED)} rows: {', '.join(open_rows)}")
+    named, wanted_rev = order_line(report), int(order_revision(order_text))
+    if named is None or named[1] is None:
+        (problems if strict else notes).append(
+            f"ORDER: the report names no order revision; write `ORDER: {pathlib.Path(order_path).name if order_path else 'WO-file.md'} "
+            f"REVISION {wanted_rev}`")
+    elif named[1] != wanted_rev:
+        problems.append(f"ORDER: the report is for REVISION {named[1]}, the order is at REVISION {wanted_rev}; "
+                        "the report answers an older or newer order")
+    ids, identity = order_identity(order_text, order_path)
+    if identity:
+        problems.append(identity)
+    named_ids, order_id_set = id_prefixes([named[0].strip()] if named else []), id_prefixes(ids)
+    if named_ids and order_id_set and not named_ids & order_id_set:
+        problems.append(f"ORDER: the report names {named[0].split()[0]}, the order is {order_key(ids)}; "
+                        "the report answers another order")
+    claimed = re.search(r"^\s*ORDER_SHA256\s*[:=]\s*([0-9a-fA-F]{64})\b", report, re.M)
+    now = order_hash(order)
+    if not claimed:
+        problems.append("ORDER_SHA256: missing (64 hex digits from `gate_check.py --hash ORDER`)")
+    elif claimed.group(1).lower() != now:
+        problems.append(f"ORDER_SHA256: the order is not the one the worker hashed ({claimed.group(1)[:12]} != {now[:12]}); "
+                        "compare it with its 變更紀錄 and the hash logged at dispatch")
+    if dispatch is not None:
+        check_dispatch(order_text, order_path, now, dispatch, log_name, problems, notes)
+    elif strict:
+        problems.append("DISPATCH: Strict order checked without --dispatch-log; the hash was only compared with the order as it is now")
+    return problems
+
+
+def resolve_commit(repo, short):
+    """The full commit a short hash names in repo, or None when it is unknown or ambiguous."""
+    import subprocess
+    try:
+        done = subprocess.run(["git", "-C", str(repo), "-c", "core.useReplaceRefs=false", "rev-parse", "--verify",
+                               "--quiet", f"{short}^{{commit}}"], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    full = done.stdout.strip().lower()
+    return full if done.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}", full) else None
+
+
+def preflight(report, order, order_path, evidence_dir=None, dispatch=None, log_name=None, repo=None):
+    """(lacks, not checked): what an older report, order, evidence and dispatch log lack for a Strict review now (M01-M03),
+    each with the step that supplies it. Only reads."""
+    lacks, unchecked = [], []
+    order_text = order.decode("utf-8-sig")
+    wanted, got = ac_table(order_text) or {}, ac_table(report) or {}
+    rev = order_revision(order_text)
+    heads = report_head_values(report)
+    value = heads[0] if heads else None
+    if value is None:
+        lacks.append("HEAD: the report names no commit; the worker writes `HEAD: <40 hex digits>` (git rev-parse HEAD)")
+    elif not re.fullmatch(r"[0-9a-fA-F]{40}", value):
+        full = resolve_commit(repo, value) if repo and SHA.fullmatch(value) else None
+        if full:
+            lacks.append(f"HEAD: the report names {value}; in {repo} that is {full}: write the full commit in the report "
+                         "(keep the old report for the record)")
+        else:
+            lacks.append(f"HEAD: the report names {value or 'empty'}, not 40 hex digits; "
+                         + ("it does not name one commit in " + str(repo) + ": the worker resubmits" if repo else
+                            "resolve it with `git rev-parse <short>` in a trusted checkout (--repo), or the worker resubmits"))
+    named = order_line(report)
+    if named is None or named[1] is None:
+        lacks.append(f"ORDER: the report names no revision; write `ORDER: {pathlib.Path(order_path).name} REVISION {rev}`")
+    elif str(named[1]) != rev:
+        lacks.append(f"ORDER: the report is for REVISION {named[1]}, the order is at REVISION {rev}; the worker reports "
+                     "on this revision")
+    if dispatch is None:
+        unchecked.append("DISPATCH: no --dispatch-log")
+    else:
+        hit = dispatch_for(dispatch, order_ids(order_text, order_path))
+        now = order_hash(order)
+        if hit is None or hit[1] != (rev, now):
+            ids = order_ids(order_text, order_path)
+            lacks.append(f"DISPATCH: {log_name} has no `DISPATCH {order_key(ids) or '<WO-ID>'} rev={rev} sha={now[:12]}...` "
+                         "line for the order as it is; the Director logs it (gate_check.py --hash) when dispatching "
+                         "this revision" + (f" (latest is rev={hit[1][0]} sha={hit[1][1][:12]})" if hit else ""))
+    auto = [ac for ac, spec in wanted.items() if spec.get("type", "AUTO") in ("AUTO", "")]
+    checks = order_checks(order_text) or {}
+    without = [ac for ac in auto if ac not in checks]
+    if without:
+        lacks.append(f"CHECKS: no approved check for AUTO {', '.join(without)}; for `evidence_record.py verify --rerun` "
+                     "the Director writes CHECKS, raises REVISION, logs a new DISPATCH and the worker records again "
+                     "(--match without CHECKS still works)")
+    files = sorted({name for ac in auto if got.get(ac, {}).get("status") == "PASS"
+                    for name in EVIDENCE_FILE.findall(got[ac].get("evidence", ""))})
+    if not evidence_dir:
+        unchecked.append(f"EVIDENCE: no --evidence-dir ({len(files)} record(s) named by AUTO PASS rows)")
+        return lacks, unchecked
+    ev = evidence_module()
+    for name in files:
+        try:
+            record = json.loads((pathlib.Path(evidence_dir) / name).read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            lacks.append(f"EVIDENCE {name}: not readable in {evidence_dir}; record again at the candidate")
+            continue
+        bad = ev.record_problems(record)
+        git = record.get("git") if isinstance(record, dict) and isinstance(record.get("git"), dict) else {}
+        missing = []
+        if bad:
+            missing.append(f"not an evidence record ({bad[0]})")
+        elif "schema" not in record:
+            missing.append("no `schema` (legacy record)")
+        elif record["schema"] not in ev.SCHEMAS:
+            missing.append(f"schema {record['schema']} is not one this version reads")
+        head = str(git.get("head") or "")
+        if not bad and not re.fullmatch(r"[0-9a-fA-F]{40}", head):
+            missing.append(f"git.head is {head or 'missing'}, not 40 hex digits")
+        if not bad and git.get("dirty") is not False:
+            missing.append(f"git.dirty is {json.dumps(git.get('dirty'))}, not false")
+        if not bad and rev != "1" and record.get("order") is None:
+            missing.append(f"no `order` binding and the order is at REVISION {rev} (run --order)")
+        if missing:
+            lacks.append(f"EVIDENCE {name}: {'; '.join(missing)}; record again with this evidence_record.py run (or verify "
+                         "--rerun) at the candidate; keep the old file with a closed review as it was")
+    return lacks, unchecked
+
+
+def is_document(path):
+    """2.2.4: a file under a DIRECTOR/ folder, or a .md / .rst / .txt file. 2.2.5 (B4): or under a top-level docs/."""
+    parts = path.replace("\\", "/").split("/")
+    return "DIRECTOR" in parts[:-1] or parts[0] == "docs" and len(parts) > 1 \
+        or parts[-1].lower().endswith((".md", ".rst", ".txt"))
+
+
+def verdict_order(verdict, text, orders_dir=None):
+    """2.2.4: the order file a verdict's `ORDER:` line names, from orders_dir, the verdict's folder or ../orders."""
+    named = order_line(text)
+    if not named or not named[0].split():
+        return None
+    name = named[0].split()[0].strip("`")
+    folder = pathlib.Path(verdict).resolve().parent
+    for where in ([pathlib.Path(orders_dir)] if orders_dir else []) + [folder, folder.parent / "orders"]:
+        if (where / name).is_file():
+            return where / name
+    return None
+
+
+def after_verdict(verdicts, repo, orders_dir=None, strict=True):
+    """2.2.4, 2.2.5 (B4): commits after the last verdict's candidate that change files that are not documents (code
+    needs a new verdict for the new candidate), and verdicts whose candidate is no longer in HEAD's history (rewritten).
+    strict=False (--warn) prints WARN. Returns (lines to print, number of late or rewritten found, files not found)."""
+    lines, missing, found = [], [], []
+    for path in verdicts:
+        if not pathlib.Path(path).is_file():
+            missing.append(path)
+            lines.append(f"FAIL after-verdict {path}\n  - file not found")
+            continue
+        text = pathlib.Path(path).read_text(encoding="utf-8-sig")
+        head = re.search(r"^\s*CANDIDATE_HEAD\s*[:=]\s*(\S*)", text, re.M)
+        value = head.group(1).strip("`").lower() if head else ""
+        full = resolve_commit(repo, value) if re.fullmatch(r"[0-9a-f]{7,40}", value) else None
+        if full:
+            found.append((full, path, text))
+        else:
+            lines.append(f"  ~ NOT_CHECKED {path}: CANDIDATE_HEAD {value or '(none)'} is not a commit in {repo}")
+    if not found:
+        if verdicts and not missing:
+            lines.insert(0, f"NOT_CHECKED after-verdict: no verdict candidate resolves in {repo}; not compared")
+        return lines, 0, missing
+
+    def leads_to(a, b):
+        return a == b or base_git(repo, "merge-base", "--is-ancestor", a, b)[0] == 0
+    word = "FAIL" if strict else "WARN"
+    code, out = base_git(repo, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+    head_sha = out.lower() if code == 0 else ""
+    rewritten = []  # 2.2.5 (B4): the verdict's commit is no longer on the branch
+    if head_sha:
+        for full, path, text in found:
+            if not leads_to(full, head_sha):
+                subject = base_git(repo, "log", "-1", "--format=%s", full)[1]
+                rewritten.append(f"  ~ {word} REWRITTEN {path}: CANDIDATE_HEAD {full[:12]} ({subject}) is not in the "
+                                 f"history of HEAD {head_sha[:12]}; the branch was rewritten after the verdict (or HEAD "
+                                 "is another branch): judge the new commit again")
+        kept = [f for f in found if leads_to(f[0], head_sha)]
+        if rewritten and not kept:
+            return ([f"{word} AFTER_VERDICT: no verdict candidate is in the history of HEAD {head_sha[:12]}"]
+                    + rewritten + lines, len(rewritten), missing)
+        found = kept or found
+    last = next((f for f in found if all(leads_to(o[0], f[0]) for o in found)), None)
+    how = "the others lead to it"
+    if last is None:
+        last = max(found, key=lambda f: int((base_git(repo, "log", "-1", "--format=%ct", f[0])[1] or "0").split()[0]))
+        how = "newest commit date; the candidates are on different lines"
+    candidate, path, text = last
+    order = verdict_order(path, text, orders_dir)
+    title = (f"AFTER_VERDICT {path} candidate {candidate[:12]} ({how}); order "
+             + (f"{order.name}" if order else "not found") + "; every non-document file counts (SCOPE too)")
+    head = f"{word} {title}" if rewritten else None
+    if not head_sha:
+        return [f"NOT_CHECKED {title}", f"  ~ NOT_CHECKED HEAD is not a commit in {repo}"] + lines, 0, missing
+    if head_sha == candidate:
+        return [head or f"OK   {title}", "  ~ HEAD is the candidate; no commit after the verdict"] + rewritten + lines, \
+            len(rewritten), missing
+    code, out = base_git(repo, "rev-list", "--reverse", "--parents", f"{candidate}..{head_sha}")
+    late = []
+    for row in (out.split("\n") if code == 0 and out else []):
+        commit, *parents = row.split()
+        code, names = base_git(repo, "-c", "core.quotePath=false", "diff", "--name-only", "--no-renames",
+                               parents[0] if parents else "4b825dc642cb6eb9a060e54bf8d69288fbee4904", commit)
+        code_files = [n for n in names.split("\n") if n and not is_document(n)]
+        if code_files:
+            subject = base_git(repo, "log", "-1", "--format=%s", commit)[1]
+            late.append(f"  ~ {word} LATE_COMMIT {commit[:12]} {subject}: "
+                        + ", ".join(code_files[:8]) + (f" (+{len(code_files) - 8} more)" if len(code_files) > 8 else ""))
+    count = len(out.split("\n")) if code == 0 and out else 0
+    found_any = len(late) + len(rewritten)
+    lead = f"{word} " if found_any else "OK   "
+    return ([f"{lead}{title}: HEAD {head_sha[:12]} is {count} commit(s) later, {len(late)} change files that are not "
+             "documents" + ("; a code change needs a new GATE_VERDICT for the new candidate" if late else "")
+             + ("" if strict else "; --warn, exit unchanged")] + late + rewritten + lines, found_any, missing)
+
+
+# 2.2.5 (B3): events read like DISPATCH (a whole line, outside fences), optionally after a `<date> |` column and an
+# `EVENT |` column, before a `| note` column.
+EVENT_COLUMN = r"(?:[A-Z][A-Z_]*[ \t]*\|[ \t]*)?"
+PLAN_APPROVED = re.compile(LOG_DATE + EVENT_COLUMN + r"PLAN_APPROVED[ \t]+([^\s|`]+?)(?:\.md)?(?:[ \t]+([^|`]*))?(?:\|[^`]*)?")
+DISPATCH_EVENT = re.compile(LOG_DATE + EVENT_COLUMN + r"DISPATCH[ \t]+([^\s|`]+?)(?:\.md)?[ \t]+(rev=\d+[ \t]+sha=[0-9a-fA-F]{64})"
+                            r"[ \t]*(?:\|[^`]*)?")
+SPEC_REVIEW_EVENT = re.compile(LOG_DATE + EVENT_COLUMN + r"SPEC_REVIEW[ \t]+([^\s|`]+?)(?:\.md)?(?:[ \t]+([^|`]*))?(?:\|[^`]*)?")
+LOG_TIME = re.compile(r"#*[ \t]*(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?"
+                      r"(?:[ \t]*(?:([+-])(\d{2}):?(\d{2})|(Z)))?")
+SESSION = re.compile(r"(?:^[ \t]*SESSION_ID[ \t]*[:=][ \t]*|\bsession=)`?([A-Za-z0-9][\w.:-]*)", re.M)
+REVIEW_FIELDS = ("tokens=", "issues=", "adopted=")
+
+
+def log_time(line):
+    """The time a log line or heading starts with (naive when it gives no zone), else None."""
+    import datetime
+    m = LOG_TIME.match(line)
+    if not m:
+        return None
+    year, month, day, hour, minute, second, sign, zone_h, zone_m, zulu = m.groups()
+    try:
+        when = datetime.datetime(int(year), int(month), int(day), int(hour), int(minute), int(second or 0))
+    except ValueError:
+        return None
+    if zulu:
+        return when.replace(tzinfo=datetime.timezone.utc)
+    if sign:
+        shift = datetime.timedelta(hours=int(zone_h), minutes=int(zone_m))
+        return when.replace(tzinfo=datetime.timezone(shift if sign == "+" else -shift))
+    return when
+
+
+def timed_events(text, pattern):
+    """[(id, time or None, how, match)] of the whole-line events in log order. A line without a time of its own takes
+    the time of the nearest dated heading or dated line above it. The log is append-only, so a line is not older than
+    the dated lines above it: a line dated earlier than the latest dated line above it (headings aside) gets that
+    later time. how says where the time came from ("" for the line's own)."""
+    out, above, latest = [], None, None
+    for line in log_lines(text):
+        own = log_time(line)
+        m = pattern.fullmatch(line)
+        if m:
+            when, how = (own, "") if own else (above, " (from the dated heading or line above it)")
+            if when is not None and latest is not None and when.replace(tzinfo=None) < latest.replace(tzinfo=None):
+                how = (f" (the line says {when:%H:%M} but comes below a line dated {latest:%Y-%m-%d %H:%M}; an "
+                       "append-only log line is not older than the lines above it)")
+                when = latest.replace(tzinfo=when.tzinfo or latest.tzinfo)
+            out.append((m.group(1), when, how, m))
+        if own:
+            above = own
+            if not line.lstrip().startswith("#") and (latest is None
+                                                      or own.replace(tzinfo=None) > latest.replace(tzinfo=None)):
+                latest = own
+    return out
+
+
+def named_id(ids):
+    """A regex for any of the order IDs as a whole word (WO-1 does not match WO-10)."""
+    return re.compile("|".join(rf"(?<![A-Za-z0-9]){re.escape(i)}(?![0-9])" for i in sorted(ids)), re.I)
+
+
+def first_commit(repo, ids):
+    """(author time, sha, subject) of the earliest commit on any ref whose subject starts with one of ids, else None.
+    Raises RuntimeError when git cannot list the commits."""
+    import datetime
+    code, out = base_git(repo, "log", "--all", "--format=%H%x09%aI%x09%s")
+    if code:
+        raise RuntimeError(out.splitlines()[-1][:200] if out else f"git log exit {code}")
+    starts = re.compile(r"[\[(]?(?:" + named_id(ids).pattern + ")", re.I)
+    best = None
+    for row in out.splitlines():
+        sha, _, rest = row.partition("\t")
+        when, _, subject = rest.partition("\t")
+        if starts.match(subject.strip()):
+            try:
+                # git writes a UTC time as ...Z; fromisoformat takes Z only from Python 3.11 on
+                at = datetime.datetime.fromisoformat(re.sub(r"Z$", "+00:00", when.strip()))
+            except ValueError:
+                continue
+            if best is None or at < best[0]:
+                best = (at, sha, subject.strip())
+    return best
+
+
+def session_in(text):
+    m = SESSION.search(text or "")
+    return m.group(1) if m else None
+
+
+def files_naming(folder, ids, word):
+    """The .md files under folder (not .git) whose name holds word and one of the order IDs."""
+    rx = named_id(ids)
+    try:
+        return sorted(p for p in folder.rglob("*.md") if ".git" not in p.parts and word in p.name.upper()
+                      and rx.search(p.name))
+    except OSError:
+        return []
+
+
+def read_or_none(path):
+    try:
+        return path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError):
+        return None
+
+
+def sequence_problems(order_text, order_path, log_text, log_path, repo, notes):
+    """2.2.5 (B3) for one Standard / Strict order: approval before the first commit, its own spec review, reviews from
+    another session. Returns the problems; notes get NOT_CHECKED and WARN lines."""
+    problems = []
+    ids = id_prefixes(order_ids(order_text, order_path)) or {pathlib.Path(order_path).stem.upper()}
+    label = "/".join(sorted(ids))
+    mine = lambda events: [e for e in events if id_prefixes([e[0]]) & ids]  # noqa: E731
+    approvals = mine(timed_events(log_text, PLAN_APPROVED))
+    kind = "PLAN_APPROVED"
+    if not approvals:
+        approvals, kind = mine(timed_events(log_text, DISPATCH_EVENT)), "DISPATCH"
+    try:
+        first = first_commit(repo, ids)
+    except RuntimeError as error:
+        first = None
+        notes.append(f"NOT_CHECKED first action: git log in {repo} failed ({error})")
+    if not approvals:
+        problems.append(f"PLAN_APPROVED: no `PLAN_APPROVED {label} ...` or `DISPATCH {label} rev=.. sha=..` line in "
+                        f"{log_path}; the work has no approval on record")
+    elif first is None:
+        notes.append(f"NOT_CHECKED gate order: no commit subject starts with {label}; the first action was not found")
+    else:
+        timed = [e for e in approvals if e[1] is not None]
+        if not timed:
+            notes.append(f"NOT_CHECKED gate order: the {kind} line for {label} has no time and no dated heading above it")
+        else:
+            at, sha, subject = first
+            name, when, how, _ = min(timed, key=lambda e: e[1].replace(tzinfo=e[1].tzinfo or at.tzinfo))
+            approved = when if when.tzinfo else when.replace(tzinfo=at.tzinfo)
+            shown = approved.strftime("%Y-%m-%d %H:%M %z") + how
+            if approved > at:
+                problems.append(f"GATE_ORDER: {kind} {name} at {shown} is later than the worker's first commit "
+                                f"{sha[:10]} at {at.isoformat()} `{subject[:80]}`; the approval was written after the "
+                                "work began")
+            else:
+                notes.append(f"gate order: {kind} {name} at {shown}, first commit {sha[:10]} at {at.isoformat()}")
+    # its own spec review (ported from the DeepSeek port's ds.4 B4 spec_review_problems)
+    reviews = mine(timed_events(log_text, SPEC_REVIEW_EVENT))
+    review_files = files_naming(pathlib.Path(log_path).resolve().parent / "reviews", ids, "SPEC_REVIEW")
+    reviewer = None
+    if reviews:
+        rest = reviews[-1][3].group(2) or ""
+        lacking = [f for f in REVIEW_FIELDS if f not in rest]
+        if lacking:
+            notes.append(f"SPEC_REVIEW {label}: the log line lacks {' '.join(lacking)}")
+        reviewer = session_in(reviews[-1][3].group(0))
+    elif review_files:
+        notes.append(f"SPEC_REVIEW {label}: no log line; review file {review_files[-1].name}")
+    else:
+        problems.append(f"SPEC_REVIEW: no `SPEC_REVIEW {label} tokens=... issues=... adopted=...` line in {log_path} "
+                        "and no reviews/*SPEC_REVIEW* file naming it; every Standard / Strict order needs its own")
+    if reviewer is None and review_files:
+        reviewer = session_in(read_or_none(review_files[-1]))
+    dispatches = mine(timed_events(log_text, DISPATCH_EVENT))
+    author = session_in(order_text) or next((session_in(e[3].group(0)) for e in reversed(dispatches)
+                                             if session_in(e[3].group(0))), None)
+    folder = pathlib.Path(log_path).resolve().parent
+    verdicts = files_naming(folder, ids, "VERDICT")
+    reports = files_naming(folder, ids, "TASK_REPORT")
+    pairs = [("SPEC_REVIEW", reviewer, "the order's author", author, bool(reviews or review_files))]
+    if verdicts:
+        pairs.append(("GATE_VERDICT", session_in(read_or_none(verdicts[-1])), "the task report's",
+                      session_in(read_or_none(reports[-1])) if reports else None, True))
+    for what, theirs, whose, own, present in pairs:
+        if not present:
+            continue
+        if theirs and own and theirs == own:
+            problems.append(f"SESSION: the {what} for {label} came from session {theirs}, the same as {whose}; a review "
+                            "must come from another session")
+        elif not (theirs and own):
+            lacking = [name for name, value in (("the reviewer", theirs), (whose, own)) if not value]
+            notes.append(f"WARN SESSION: {what} {label}: no session id for {' and '.join(lacking)}; not shown that the "
+                         "review came from another session")
+    return problems
+
+
+E2E_ENTRY = re.compile(r"^[ \t]*ENTRY_POINT[ \t]*[:=][ \t]*\S", re.M)
+
+
+FEAS_FIELD = re.compile(r"^[ \t]*(FEASIBILITY|FEASIBLE_COUNT|SCRIPT|RESULT)[ \t]*[:=][ \t]*(.*?)[ \t]*$", re.M)
+FEAS_THRESHOLD = re.compile(r"^[ \t]*[-*][ \t]+(?P<name>[^:\n]+?)[ \t]*:[ \t]*(?P<rest>.+?)[ \t]*$")
+FEAS_SOURCE = re.compile(r"\bsource[ \t]*=[ \t]*(?P<kind>video|mocap|measurement|dataset)[ \t]*:[ \t]*(?P<what>\S.*)$", re.I)
+FEAS_REFERENCE = re.compile(r"(?:^|\s)(?:reference|參考)(?:\s|$)", re.I)
+
+
+def feasibility_problems(path, notes):
+    """2.3.0 (N2): a feasibility record, written before a fix set opens or a gate threshold is frozen.
+
+    FEASIBILITY: <the fix set or gate it is for>
+    FEASIBLE_COUNT: <how many solutions the CPU search found; 0 = none: do not open the set>
+    SCRIPT: <the search script, a path>
+    RESULT: <its output, a path; a JSON with "feasible_count" must agree>
+    THRESHOLDS:
+    - <name>: <value> source=<video|mocap|measurement|dataset>:<what was measured>
+    - <name>: <value> reference        (no real-world source: a reference number, never a gate)
+    """
+    record = pathlib.Path(path)
+    text = read_or_none(record) if record.is_file() else None
+    if text is None:
+        return [f"no feasibility record ({path} not found or not UTF-8 text): run the CPU feasibility search first and "
+                "write FEASIBILITY / FEASIBLE_COUNT / SCRIPT / RESULT"]
+    fields = {m.group(1): m.group(2) for m in FEAS_FIELD.finditer(text)}
+    problems = [f"{key}: missing or empty" for key in ("FEASIBILITY", "FEASIBLE_COUNT", "SCRIPT", "RESULT")
+                if blank(fields.get(key, "")) or PLACEHOLDER.search(fields.get(key, "") or "")]
+    count = None
+    if "FEASIBLE_COUNT" in fields and not blank(fields["FEASIBLE_COUNT"]):
+        try:
+            count = int(fields["FEASIBLE_COUNT"].split()[0])
+        except ValueError:
+            problems.append(f"FEASIBLE_COUNT: {fields['FEASIBLE_COUNT']!r} is not a whole number")
+        else:
+            if count <= 0:
+                problems.append("FEASIBLE_COUNT 0: the search found no solution inside these limits; do not open the "
+                                "fix set (change the limits, the method or the design first)")
+    for key in ("SCRIPT", "RESULT"):
+        value = (fields.get(key) or "").strip().strip("`")
+        if blank(value) or PLACEHOLDER.search(value):
+            continue
+        target = pathlib.Path(value) if pathlib.Path(value).is_absolute() else record.parent / value
+        if not target.is_file():
+            problems.append(f"{key}: {value} not found (relative to the record's folder)")
+        elif key == "RESULT" and target.suffix.lower() == ".json" and count is not None:
+            try:
+                data = json.loads(target.read_text(encoding="utf-8-sig"))
+            except (OSError, ValueError):
+                notes.append(f"NOT_CHECKED RESULT {value}: not readable JSON")
+                continue
+            got = data.get("feasible_count") if isinstance(data, dict) else None
+            if got is not None and got != count:
+                problems.append(f"FEASIBLE_COUNT {count} but {value} says feasible_count {got}")
+    lines = text.splitlines()
+    start = next((i for i, line in enumerate(lines) if re.match(r"^[ \t]*THRESHOLDS[ \t]*:", line)), None)
+    gates = 0
+    if start is None:
+        notes.append("THRESHOLDS: none listed (a record for a fix set alone; a frozen gate lists its numbers here)")
+        return problems
+    for line in lines[start + 1:]:
+        if not line.strip():
+            continue
+        row = FEAS_THRESHOLD.match(line)
+        if not row:
+            break
+        name, rest = row.group("name").strip(), row.group("rest")
+        if FEAS_SOURCE.search(rest):
+            gates += 1
+        elif FEAS_REFERENCE.search(rest):
+            notes.append(f"REFERENCE {name}: no real-world source; a reference number, not a gate")
+        else:
+            problems.append(f"threshold {name}: no real-world source; write source=video:<clip and frame> / "
+                            "mocap:<take> / measurement:<what> / dataset:<name>, or mark it `reference` (then it is "
+                            "not a gate)")
+    notes.append(f"THRESHOLDS: {gates} gate number(s) with a real-world source")
+    return problems
+
+
+def final_problems(folder, notes):
+    """2.2.5 (B5): final acceptance of a DIRECTOR folder (or a folder holding DIRECTOR/)."""
+    base = pathlib.Path(folder)
+    if not (base / "evidence").is_dir() and (base / "DIRECTOR").is_dir():
+        base = base / "DIRECTOR"
+    problems = []
+    e2e = base / "evidence" / "E2E"
+    records = sorted(p for p in e2e.rglob("*") if p.is_file() and p.stat().st_size > 0) if e2e.is_dir() else []
+    if not records:
+        problems.append(f"E2E: no end-to-end evidence in {e2e}; before the final verdict the lead runs the spec's "
+                        "scenarios once through the product's public entry point and keeps the output there")
+    elif not any(E2E_ENTRY.search(read_or_none(p) or "") for p in records):
+        notes.append(f"WARN E2E: no record in {e2e} names its `ENTRY_POINT:` (the one public entry point it ran)")
+    register = base / "DECISION_REGISTER.md"
+    text = read_or_none(register) if register.is_file() else None
+    if text is None:
+        notes.append(f"NOT_CHECKED DD cases: {register} not found")
+        return problems
+    column, no_column, empty = None, 0, []
+    for line in text.splitlines():
+        if not line.lstrip().startswith("|"):
+            column = None if not line.strip() else column
+            continue
+        cells = split_cells(line)
+        if cells and cells[0] == "ID":
+            column = next((i for i, c in enumerate(cells) if "驗收案例" in c), -1)
+            continue
+        if not cells or not re.fullmatch(r"\**DD-\d+\**", cells[0]) or any("SUPERSEDED" in c for c in cells):
+            continue
+        if column is None or column < 0:
+            no_column += 1
+        elif column >= len(cells) or blank(cells[column]) or cells[column].strip() in ("-", "—", "無"):
+            empty.append(cells[0].strip("*"))
+    if no_column:
+        notes.append(f"WARN DD_CASE: {no_column} DD row(s) in {register.name} are in a table without a 驗收案例 column")
+    if empty:
+        notes.append(f"WARN DD_CASE: {', '.join(empty[:12])}" + (f" (+{len(empty) - 12} more)" if len(empty) > 12 else "")
+                     + " have no 驗收案例 (an end-to-end case with exact expected numbers)")
+    return problems
+
+
+# 2.3.0: a PASS-type verdict names at least one check its writer ran: the command and its result, as ran_line.py writes
+# them (`- `<command>` exit=<n> at=<HH:MM>`); a placeholder command does not count.
+SELF_CHECK_VERDICTS = ("PASS", "PASS_WITH_WARNINGS", "CONDITIONAL_PASS")
+SELF_CHECKED = re.compile(r"^\s*-\s*`(?![^`]*<[^`]*>)[^`]+`\s+exit=\d+\s+at=\d\d:\d\d", re.M)
+
+
+SELF_CHECK_LEVELS = ("warn", "fail")
+SELF_CHECK_DEFAULT = "warn"  # 2.3.x default; projects opt into "fail" (it may become the default in 3.0)
+SELF_CHECK_MESSAGE = ("evidence I checked myself: a PASS verdict needs at least one line `- `<command>` exit=<n> "
+                      "at=<HH:MM>` (written by ran_line.py) for a check its writer ran; a worker's word is not one")
+
+
+def self_check_level(verdict_path, config_path, notes):
+    """2.3.0: "verdict_self_check" ("warn" or "fail") from --config, else director_work.json in the verdict's folder
+    or the one above it; default "warn". A bad value or an unreadable file is a note and keeps the default."""
+    folder = pathlib.Path(verdict_path).resolve().parent
+    found = [pathlib.Path(config_path)] if config_path else [f / "director_work.json" for f in (folder, folder.parent)]
+    path = next((f for f in found if f.is_file()), None)
+    if path is None:
+        return SELF_CHECK_DEFAULT
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as error:
+        notes.append(f"{path.name}: cannot read ({error}); verdict_self_check {SELF_CHECK_DEFAULT} used")
+        return SELF_CHECK_DEFAULT
+    value = data.get("verdict_self_check", SELF_CHECK_DEFAULT) if isinstance(data, dict) else SELF_CHECK_DEFAULT
+    if value not in SELF_CHECK_LEVELS:
+        notes.append(f"{path.name} verdict_self_check: \"warn\" or \"fail\", got {value!r}; {SELF_CHECK_DEFAULT} used")
+        return SELF_CHECK_DEFAULT
+    return value
+
+
+def check_verdict(text, notes, self_check=SELF_CHECK_DEFAULT):
+    problems = []
+    section = re.search(r"^##\s*A\b.*?$(.*?)(?=^##\s|\Z)", text, re.M | re.S)
+    lines = [line.strip() for line in section.group(1).splitlines() if line.strip()] if section else []
+    if not lines or lines[0] not in VERDICTS:
+        problems.append(f"verdict: the first line of section A must be exactly one of {', '.join(VERDICTS)}")
+    aspects = next((line for line in lines if "工程" in line), "")
+    if not all(word in aspects for word in ("工程", "成品", "PO 驗收")):
+        problems.append("status by aspect: one line must cover 工程, 成品 and PO 驗收")
+    step = next((line for line in lines if line.startswith("下一步")), None)
+    value = re.split(r"[:：]", step, maxsplit=1)[-1].strip() if step else ""
+    if value not in NEXT_STEPS:
+        problems.append(f"下一步: must be exactly one of {', '.join(NEXT_STEPS)}")
+    stop = re.search(r"^##\s*F\b.*?$(.*?)(?=^##\s|\Z)", text, re.M | re.S)
+    if not stop or blank(stop.group(1)):
+        problems.append("section F (stop state): missing or empty")
+    if lines and lines[0] in SELF_CHECK_VERDICTS and not SELF_CHECKED.search(text):
+        if self_check == "fail":
+            problems.append(SELF_CHECK_MESSAGE)
+        else:
+            notes.append("WARN SELF_CHECK " + SELF_CHECK_MESSAGE + " (verdict_self_check: warn; set \"fail\" to enforce)")
+    return problems
+
+
+def verdict_binding(text, orders, candidate, notes, reports=None):
+    """With --match or --candidate: the verdict must answer a --match order at its REVISION and judge the candidate.
+    orders: [(order text, order path)] of the --match pairs; candidate: 40 hex digits, lower-case, or None; reports:
+    {str(order path): report path} of the pairs, for the verdict's optional REPORT_SHA256 (notes only)."""
+    problems, named = [], order_line(text)
+    named_ids = id_prefixes([named[0].strip()]) if named else set()
+    hits = [(t, p) for t, p in orders if named_ids & id_prefixes(order_ids(t, p))]
+    if not hits and not named_ids and len(orders) == 1:
+        hits = orders
+    strict = any(re.search(r"^\s*GOVERNANCE\s*=\s*Strict\b", t, re.M) for t, _ in (hits or orders))
+    if orders and not named_ids:
+        (problems if strict else notes).append(
+            "ORDER: the verdict names no order; write `ORDER: <order file> REVISION n` at the top")
+    elif orders and not hits:
+        problems.append(f"ORDER: the verdict names {named[0].split()[0]}, which is none of the --match orders; "
+                        "the verdict judges another order")
+    for order_text, order_path in hits[:1]:
+        wanted = int(order_revision(order_text))
+        if named is None or named[1] is None:
+            (problems if strict else notes).append(f"ORDER: the verdict names no REVISION; the order is at REVISION {wanted}")
+        elif named[1] != wanted:
+            problems.append(f"ORDER: the verdict is for REVISION {named[1]}, the order is at REVISION {wanted}; "
+                            "the verdict judges an older or newer order")
+        verdict_record_notes(text, order_path, (reports or {}).get(str(order_path)), notes)
+    if candidate:
+        head = re.search(r"^\s*CANDIDATE_HEAD\s*[:=]\s*(\S*)", text, re.M)
+        value = head.group(1).strip("`").lower() if head else ""
+        if not value:
+            (problems if strict else notes).append(
+                f"CANDIDATE_HEAD: the verdict names no commit; write `CANDIDATE_HEAD: {candidate}`")
+        elif not re.fullmatch(r"[0-9a-f]{7,40}", value):
+            problems.append(f"CANDIDATE_HEAD: not a commit hash (7 to 40 hex digits): {value}")
+        elif not (value == candidate if strict else candidate.startswith(value)):
+            problems.append(f"CANDIDATE_HEAD: the verdict is for {value[:12]}, the candidate is {candidate[:12]}; "
+                            "the verdict judged another commit")
+    return problems
+
+
+TR_FIELDS = ("TEST REQUEST", "FROM", "PURPOSE", "MIN_SCOPE", "TIER", "CHANGES", "SWITCHES", "EXCLUSIVE_MIN", "NORMAL_MIN",
+             "BUILD_GB", "CAPTURE", "CACHE_GB", "WRITE_GB", "DURATION", "TIER0_DONE")
+NUMBER = r"(\d+(?:\.\d+)?)"
+TIMES = r"\s*[x×*]\s*"
+
+
+def tr_fields(text):
+    fields = {}
+    for line in text.splitlines():
+        m = re.match(r"\s*([A-Z][A-Z0-9_ ]*[A-Z0-9_])\s*:\s*(.*)$", line)
+        if m:
+            fields[m.group(1)] = m.group(2).strip()
+    return fields
+
+
+def check_test_request(text, notes):
+    """The TEST REQUEST fields (templates/TEST_REQUEST.md): all filled, the disk estimate in GiB covering build,
+    capture and cache (L-030, L-031), the duration counted as sets x measured minutes with timeouts (L-033)."""
+    problems, fields = [], tr_fields(text)
+    for key in TR_FIELDS:
+        if key not in fields:
+            problems.append(f"{key}: missing")
+        else:
+            filled(key, fields[key], problems)
+    gib = {}
+    for key in ("BUILD_GB", "CACHE_GB", "WRITE_GB"):
+        value = fields.get(key, "")
+        if re.search(r"\bGB\b", value):
+            problems.append(f"{key}: write GiB (2^30 bytes), not decimal GB (L-031)")
+        m = re.match(NUMBER, value)
+        if m:
+            gib[key] = float(m.group(1))
+        elif value and not PLACEHOLDER.search(value):
+            problems.append(f"{key}: a number of GiB, got: {value}")
+    capture = fields.get("CAPTURE", "")
+    m = re.match(NUMBER + TIMES + NUMBER + TIMES + NUMBER + r"\s*(?:MiB|MB)?\s*=\s*" + NUMBER, capture)
+    if capture.upper().startswith("NONE"):
+        gib["CAPTURE"] = 0.0
+    elif m:
+        sets, images, mib, total = (float(x) for x in m.groups())
+        if abs(sets * images * mib / 1024 - total) > max(0.05, 0.05 * total):
+            problems.append(f"CAPTURE: {sets:g} x {images:g} x {mib:g} MiB is {sets * images * mib / 1024:.2f} GiB, "
+                            f"not {total:g}")
+        gib["CAPTURE"] = total
+    elif capture and not PLACEHOLDER.search(capture):
+        problems.append("CAPTURE: `<sets> x <images per set> x <MiB per image> = <GiB>`, or NONE")
+    if len(gib) == 4 and gib["WRITE_GB"] + 0.05 < gib["BUILD_GB"] + gib["CAPTURE"] + gib["CACHE_GB"]:
+        problems.append(f"WRITE_GB: {gib['WRITE_GB']:g} GiB is less than BUILD_GB + CAPTURE + CACHE_GB = "
+                        f"{gib['BUILD_GB'] + gib['CAPTURE'] + gib['CACHE_GB']:g} GiB (L-030)")
+    duration = fields.get("DURATION", "")
+    m = re.match(NUMBER + TIMES + NUMBER + r"\s*(?:min|分鐘)?\s*=\s*" + NUMBER, duration)
+    if m:
+        sets, each, total = (float(x) for x in m.groups())
+        if abs(sets * each - total) > 1:
+            problems.append(f"DURATION: {sets:g} x {each:g} is {sets * each:g} minutes, not {total:g}")
+        cap = re.findall(r"\d+", fields.get("TEST REQUEST", ""))
+        if cap and float(cap[-1]) < total:
+            problems.append(f"TEST REQUEST: the limit {cap[-1]} minutes is below DURATION {total:g}")
+    elif duration and not PLACEHOLDER.search(duration):
+        problems.append("DURATION: `<sets> x <measured minutes per set, timeouts included> = <minutes>` (L-033)")
+    return problems
+
+
+CHECKS = {"resume": check_resume, "order": check_order, "report": check_report, "verdict": check_verdict,
+          "test-request": check_test_request, "po-acceptance": check_po_acceptance}
+
+
+def dated(kind, text):
+    """The date a file says it was written, or None."""
+    m = re.search(DATED_BY[kind], text, re.M) if kind in DATED_BY else DATE.search(text)
+    return m.group(m.lastindex or 0) if m else None
+
+
+BASE_DEFAULTS = {"check": True, "fetch": True, "strict": False}
+BASE_SHA = re.compile(r"(?:(?P<ref>[\w./-]+)\s*@\s*)?\b(?P<sha>[0-9a-fA-F]{7,40})\b")
+BRACKETED = re.compile(r"[（(][^（()）]*[)）]")
+
+
+def base_config(order_path, config_path, notes):
+    """2.2.2: the "base_ref" switches: --config, else director_work.json in the order's folder or the one above it
+    (DIRECTOR/orders/WO.md -> DIRECTOR/director_work.json). A switch that is not true / false is a note, default kept."""
+    config = dict(BASE_DEFAULTS)
+    folder = pathlib.Path(order_path).resolve().parent
+    found = [pathlib.Path(config_path)] if config_path else [f / "director_work.json" for f in (folder, folder.parent)]
+    path = next((f for f in found if f.is_file()), None)
+    if path is None:
+        return config
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as error:
+        notes.append(f"{path.name}: cannot read ({error}); base_ref defaults used")
+        return config
+    block = data.get("base_ref") if isinstance(data, dict) else None
+    if block is None:
+        return config
+    if not isinstance(block, dict):
+        notes.append(f"{path.name} base_ref: an object with check / fetch / strict, got {block!r}; defaults used")
+        return config
+    for key, value in block.items():
+        if key.startswith("_"):
+            continue
+        if key not in BASE_DEFAULTS:
+            notes.append(f"{path.name} base_ref.{key}: not a key this check reads (check, fetch, strict)")
+        elif not isinstance(value, bool):
+            notes.append(f"{path.name} base_ref.{key}: true or false, got {value!r}; {str(BASE_DEFAULTS[key]).lower()} used")
+        else:
+            config[key] = value
+    return config
+
+
+LONG_PATH_QUOTED = re.compile(r"""['"]([^'"\n]+)['"]""")
+LONG_PATH_BARE = re.compile(r"(\S+): Filename too long")
+WINDOWS_PATH_MAX = 259  # MAX_PATH 260 with the closing NUL
+
+
+def long_path(message, root):
+    """2.2.5 (B11): one clear line for git's `Filename too long`: which path, how long, how much over, what to do.
+    None when the message is about something else."""
+    line = next((row for row in (message or "").splitlines() if "Filename too long" in row), None)
+    if line is None:
+        return None
+    quoted = LONG_PATH_QUOTED.findall(line)
+    bare = LONG_PATH_BARE.search(line)
+    name = (next((q for q in quoted if "/" in q or "\\" in q), quoted[0]) if quoted else bare.group(1) if bare else "")
+    name = name.strip()
+    base = str(root).rstrip("/\\")
+    full = name if not name or os.path.isabs(name) else base + "/" + name
+    size = len(full)
+    over = (f"{size} characters, {size - WINDOWS_PATH_MAX} over the {WINDOWS_PATH_MAX} Windows allows"
+            if size > WINDOWS_PATH_MAX else f"{size} characters")
+    return (f"path too long for git on Windows: {full or root} ({over}); use a shorter origin / worktree folder "
+            "(for example D:/w/<name>) or `git config core.longpaths true` in that repository")
+
+
+def base_git(repo, *args, timeout=120):
+    import subprocess
+    try:
+        proc = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return 1, str(error)
+    out = (proc.stdout if proc.returncode == 0 else (proc.stderr or proc.stdout)).strip()
+    return proc.returncode, (long_path(out, repo) or out) if proc.returncode else out
+
+
+def base_ref_problems(order_text, repo, config, notes, fetched):
+    """2.2.2 (ported from the DeepSeek port's ds.3): is the order's BASE_REF commit still the tip of its remote branch?
+    A commit that is missing or behind is a `WARN BASE_REF` note, a problem with --strict-base ("strict"). A fetch
+    that fails, or a folder that is not a git checkout, says it did not compare: never a silent pass.
+    fetched caches one fetch per repository and remote for the whole run."""
+    if not config["check"]:
+        return []
+    m = re.search(r"^[ \t]*BASE_REF[ \t]*=[ \t]*(.*)$", order_text, re.M)
+    value = re.split(r"\s+#", m.group(1))[0].strip() if m else ""  # a trailing ` # comment` is not the ref
+    value = BRACKETED.sub(" ", value).strip()  # 2.2.5 (B10): `origin/main @ abc1234（v2.2.4）`: brackets are a comment
+    found = BASE_SHA.search(value)
+    if not found:  # no commit named (e.g. `main @ <placeholder>`): nothing to compare, and no note (older orders unchanged)
+        return []
+    problems = []
+
+    def warn(message):
+        (problems if config["strict"] else notes).append(("" if config["strict"] else "WARN ") + "BASE_REF: " + message)
+        return problems
+
+    sha, ref = found.group("sha").lower(), found.group("ref") or ""
+    code, top = base_git(repo, "rev-parse", "--show-toplevel")
+    if code:
+        return warn(f"not compared with the remote: {repo} is not a git checkout (give --repo <project checkout>)")
+    code, remotes = base_git(repo, "remote")
+    remotes = remotes.split() if not code else []
+    remote, branch = None, None
+    if "/" in ref and ref.split("/", 1)[0] in remotes:
+        remote, branch = ref.split("/", 1)
+    elif remotes:
+        remote = "origin" if "origin" in remotes else remotes[0]
+        branch = ref if ref and "/" not in ref else None
+    if not remote:
+        return warn("not compared with the remote: the repository has no remote")
+    if config["fetch"]:
+        key = (top, remote)
+        if key not in fetched:
+            fetched[key] = base_git(repo, "fetch", "--quiet", remote)
+        code, message = fetched[key]
+        if code:
+            return warn(f"not compared with the remote: git fetch {remote} failed "
+                        f"({message.splitlines()[-1][:200] if message else code})")
+    else:
+        notes.append(f"BASE_REF: compared with the local copy of {remote} (\"base_ref\": {{\"fetch\": false}}); not fetched")
+    if not branch:
+        code, head = base_git(repo, "symbolic-ref", "--short", f"refs/remotes/{remote}/HEAD")
+        branch = head.split("/", 1)[1] if not code and "/" in head else "main"
+    tip_ref = f"{remote}/{branch}"
+    code, tip = base_git(repo, "rev-parse", "--verify", "-q", tip_ref + "^{commit}")
+    if code:
+        return warn(f"not compared with the remote: {tip_ref} does not exist")
+    code, full = base_git(repo, "rev-parse", "--verify", "-q", sha + "^{commit}")
+    if code:
+        return warn(f"commit {sha} does not exist in {top}" + (" (even after fetching)" if config["fetch"] else ""))
+    if full == tip:
+        notes.append(f"BASE_REF {sha} = {tip_ref} ({'fetched now' if config['fetch'] else 'local copy'})")
+        return []
+    code, behind = base_git(repo, "rev-list", "--count", f"{full}..{tip}")
+    code2, ahead = base_git(repo, "rev-list", "--count", f"{tip}..{full}")
+    behind, ahead = int(behind or 0) if not code else 0, int(ahead or 0) if not code2 else 0
+    if behind:
+        return warn(f"{sha} is {behind} commit(s) behind {tip_ref} ({tip[:10]})" + (f" and {ahead} ahead" if ahead else "")
+                    + f"; start the work from {tip_ref} (git fetch, then a branch from it) or write in the order why not")
+    notes.append(f"BASE_REF {sha} is {ahead} commit(s) ahead of {tip_ref} (not pushed yet); not stale")
+    return []
+
+
+def main():
+    sys.stdout.reconfigure(encoding="utf-8")  # before parse_args: --help prints during parsing
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    for kind in CHECKS:
+        ap.add_argument(f"--{kind}", nargs="+", default=[], metavar="FILE")
+    ap.add_argument("--match", nargs=2, action="append", default=[], metavar=("REPORT", "ORDER"))
+    ap.add_argument("--evidence-dir", metavar="DIR", help="with --match: AUTO PASS rows need a passing evidence record here")
+    ap.add_argument("--dispatch-log", metavar="LOG", help="with --match: the order's hash must equal its DISPATCH line here")
+    ap.add_argument("--candidate", metavar="SHA", help="with --match: the commit under review, 40 hex digits (git rev-parse <branch>)")
+    ap.add_argument("--hash", nargs="+", default=[], metavar="FILE", help="print the hash ORDER_SHA256 compares and the DISPATCH line")
+    ap.add_argument("--preflight", nargs=2, action="append", default=[], metavar=("REPORT", "ORDER"),
+                    help="list what an older review lacks for a Strict review now (LACKS lines)")
+    ap.add_argument("--repo", metavar="DIR", help="with --preflight: a trusted checkout to resolve a short HEAD in; "
+                    "2.2.2 with --order: the project checkout the BASE_REF is fetched and compared in (default: the "
+                    "order's folder)")
+    ap.add_argument("--brief", metavar="BRIEF", help="the brief's fingerprints; with --order / --match / --preflight: "
+                    "BRIEF_STALE notes (shadow)")
+    ap.add_argument("--snapshot", metavar="DIR", help="with --brief or --hash: keep a snapshot in DIR (atomic write)")
+    ap.add_argument("--order-history", metavar="DIR", help="with --match: old orders, found by hash, for carried-over evidence")
+    ap.add_argument("--artifact-root", metavar="DIR", help="with --po-acceptance: the folder the entry and manifest paths "
+                    "are read from (default: the record file's folder)")
+    ap.add_argument("--after-verdict", nargs="+", default=[], metavar="VERDICT", help="2.2.4, 2.2.5: with --repo, FAIL "
+                    "for commits after the last verdict's candidate that change files that are not documents, and for "
+                    "a candidate no longer in HEAD's history (--warn: WARN, exit 0)")
+    ap.add_argument("--orders", metavar="DIR", help="2.2.4: with --after-verdict, the folder the verdict's ORDER file is in")
+    ap.add_argument("--sequence", nargs="+", default=[], metavar="ORDER", help="2.2.5: with --dispatch-log and --repo, "
+                    "approval before the first commit, a spec review per order, reviews from another session")
+    ap.add_argument("--final", metavar="DIR", help="2.2.5: final acceptance of a DIRECTOR folder: evidence/E2E/ and the "
+                    "DD 驗收案例 column")
+    ap.add_argument("--feasibility", nargs="+", default=[], metavar="RECORD", help="2.3.0: the feasibility record a fix "
+                    "set or a frozen gate needs (FEASIBLE_COUNT, SCRIPT, RESULT; each threshold with a real-world source "
+                    "or marked reference)")
+    ap.add_argument("--strict", action="store_true", help="2.2.2: with --resume, RESUME_SIZE fails instead of a shadow note; "
+                    "with --after-verdict, the default since 2.2.5 (kept for old commands)")
+    ap.add_argument("--config", metavar="director_work.json", help="2.2.2: with --resume, read resume.max_bytes / "
+                    "resume.max_line_bytes (default: director_work.json beside the RESUME_STATE, else 20480 / 4096); "
+                    "with --order, read base_ref.check / fetch / strict; with --verdict (2.3.0), read verdict_self_check "
+                    "(warn | fail; default: director_work.json in the verdict's folder or the one above, else warn)")
+    ap.add_argument("--strict-base", action="store_true", help="2.2.2: with --order, a BASE_REF commit that is missing "
+                    "or behind its remote branch, or a fetch that fails, fails (default: a WARN note)")
+    ap.add_argument("--warn", action="store_true", help="report problems as WARN and exit 0")
+    ap.add_argument("--since", metavar="YYYY-MM-DD", help="skip files dated before this day")
+    a = ap.parse_args()
+    sys.stdout.reconfigure(encoding="utf-8")
+    jobs = [(kind, path) for kind in CHECKS for path in getattr(a, kind.replace("-", "_"))] + [("match", pair) for pair in a.match]
+    if a.snapshot and not (a.brief or a.hash):
+        ap.error("--snapshot works with --brief or --hash")
+    if a.brief and not pathlib.Path(a.brief).is_file():
+        ap.error(f"--brief: file not found: {a.brief}")
+    if a.brief and a.snapshot:
+        brief_text = pathlib.Path(a.brief).read_text(encoding="utf-8-sig")
+        if not brief_is_locked(brief_text) or brief_revision(brief_text) is None:
+            ap.error("--brief with --snapshot: the brief must say 狀態：LOCKED and 版次：<number>; a draft is not snapshotted")
+    if a.order_history and not a.match:
+        ap.error("--order-history works with --match")
+    if a.order_history and not pathlib.Path(a.order_history).is_dir():
+        ap.error(f"--order-history: folder not found: {a.order_history}")
+    missing = [path for path in a.hash if not pathlib.Path(path).is_file()]
+    for path in a.hash:
+        if path in missing:
+            print(f"FAIL hash {path}\n  - file not found")
+            continue
+        data = pathlib.Path(path).read_bytes()
+        text, digest = data.decode("utf-8-sig", errors="replace"), order_hash(data)
+        ids, identity = order_identity(text, path)
+        print(f"{digest}  {path}\n  DISPATCH {order_key(ids) or pathlib.Path(path).stem} rev={order_revision(text)} sha={digest}")
+        if identity:
+            print(f"  - {identity}")
+        if a.snapshot:
+            name = f"{order_key(ids) or pathlib.Path(path).stem}-rev{order_revision(text)}-{digest}.md"
+            target, written = write_snapshot(data, a.snapshot, name)
+            print(f"  SNAPSHOT {target} ({'written' if written else 'already there, kept'})")
+    brief_failed = print_brief(a.brief, a.snapshot) if a.brief and (a.snapshot or not (jobs or a.preflight)) else False
+    late_failed = 0
+    if a.after_verdict or a.orders:
+        if not a.after_verdict:
+            ap.error("--orders works with --after-verdict")
+        if not a.repo or not pathlib.Path(a.repo).is_dir():
+            ap.error("--after-verdict needs --repo DIR, the checkout the commits are in")
+        if a.orders and not pathlib.Path(a.orders).is_dir():
+            ap.error(f"--orders: folder not found: {a.orders}")
+        lines, late, late_missing = after_verdict(a.after_verdict, a.repo, a.orders, not a.warn)
+        print("\n".join(lines))
+        late_failed = len(late_missing) + (0 if a.warn else late)
+    if a.sequence:  # 2.2.5 (B3)
+        if not a.dispatch_log or not pathlib.Path(a.dispatch_log).is_file():
+            ap.error("--sequence needs --dispatch-log DIRECTOR_LOG.md (an existing file)")
+        if not a.repo or not pathlib.Path(a.repo).is_dir():
+            ap.error("--sequence needs --repo DIR, the checkout the worker commits are in")
+        sequence_log = pathlib.Path(a.dispatch_log).read_text(encoding="utf-8-sig")
+        for path in a.sequence:
+            notes, text = [], read_or_none(pathlib.Path(path)) if pathlib.Path(path).is_file() else None
+            mode = re.search(r"^\s*GOVERNANCE\s*=\s*(\w+)", text or "", re.M)
+            if text is None:
+                problems = ["file not found (or not UTF-8 text)"]
+            elif not mode or mode.group(1) not in ("Standard", "Strict"):
+                print(f"SKIP sequence {path} (GOVERNANCE {mode.group(1) if mode else 'not set'}: only Standard / Strict)")
+                continue
+            else:
+                problems = sequence_problems(text, path, sequence_log, a.dispatch_log, a.repo, notes)
+            late_failed += bool(problems) and not a.warn
+            print(f"{('WARN' if a.warn else 'FAIL') if problems else 'OK  '} sequence {path}"
+                  + (f" (GOVERNANCE {mode.group(1)})" if mode else ""))
+            for line in [f"  - {p}" for p in problems] + [f"  ~ {n}" for n in notes]:
+                print(line)
+    if a.final:  # 2.2.5 (B5)
+        if not pathlib.Path(a.final).is_dir():
+            ap.error(f"--final: folder not found: {a.final}")
+        notes = []
+        problems = final_problems(a.final, notes)
+        late_failed += bool(problems) and not a.warn
+        print(f"{('WARN' if a.warn else 'FAIL') if problems else 'OK  '} final {a.final}")
+        for line in [f"  - {p}" for p in problems] + [f"  ~ {n}" for n in notes]:
+            print(line)
+    for path in a.feasibility:  # 2.3.0 (N2)
+        notes = []
+        problems = feasibility_problems(path, notes)
+        late_failed += bool(problems) and not a.warn
+        print(f"{('WARN' if a.warn else 'FAIL') if problems else 'OK  '} feasibility {path}")
+        for line in [f"  - {p}" for p in problems] + [f"  ~ {n}" for n in notes]:
+            print(line)
+    if not jobs and (a.hash or a.brief or a.after_verdict or a.sequence or a.final or a.feasibility) and not a.preflight:
+        return 1 if missing or brief_failed or late_failed else 0
+    if not jobs and not a.preflight:
+        ap.error("give at least one of --resume / --order / --report / --verdict / --test-request / --po-acceptance / "
+                 "--match / --preflight / --hash / --brief / --after-verdict / --sequence / --final / --feasibility")
+    if a.repo and not (a.preflight or a.order or a.after_verdict or a.sequence):
+        ap.error("--repo works with --preflight, --order, --after-verdict or --sequence")
+    if a.strict and not (a.resume or a.after_verdict):
+        ap.error("--strict works with --resume or --after-verdict")
+    if a.config and not (a.resume or a.order or a.verdict):
+        ap.error("--config works with --resume, --order or --verdict")
+    if a.strict_base and not a.order:
+        ap.error("--strict-base works with --order")
+    if a.repo and not pathlib.Path(a.repo).is_dir():
+        ap.error(f"--repo: folder not found: {a.repo}")
+    if a.config and not pathlib.Path(a.config).is_file():
+        ap.error(f"--config: file not found: {a.config}")
+    if a.since and not DATE.fullmatch(a.since):
+        ap.error("--since takes a date: YYYY-MM-DD")
+    if a.evidence_dir and not (a.match or a.preflight):
+        ap.error("--evidence-dir works with --match or --preflight")
+    if a.evidence_dir and not pathlib.Path(a.evidence_dir).is_dir():
+        ap.error(f"--evidence-dir: folder not found: {a.evidence_dir}")
+    if a.dispatch_log and not (a.match or a.preflight or a.brief or a.sequence):
+        ap.error("--dispatch-log works with --match, --preflight, --brief or --sequence")
+    if a.dispatch_log and not pathlib.Path(a.dispatch_log).is_file():
+        ap.error(f"--dispatch-log: file not found: {a.dispatch_log}")
+    if a.candidate and not (a.match or a.verdict or a.po_acceptance):
+        ap.error("--candidate works with --match, --verdict or --po-acceptance")
+    if a.candidate and not re.fullmatch(r"[0-9a-fA-F]{40}", a.candidate):
+        ap.error(f"--candidate takes the full commit, 40 hex digits (git rev-parse <branch>), got: {a.candidate}")
+    candidate = a.candidate.lower() if a.candidate else None
+    log_text = pathlib.Path(a.dispatch_log).read_text(encoding="utf-8-sig") if a.dispatch_log else None
+    dispatch = dispatch_records(log_text) if log_text is not None else None
+    equivalent = equivalent_records(log_text) if log_text is not None else []
+    matched = [(pathlib.Path(o).read_text(encoding="utf-8-sig"), pathlib.Path(o)) for _, o in a.match if pathlib.Path(o).is_file()]
+    pairs = {str(pathlib.Path(o)): pathlib.Path(r) for r, o in a.match}
+    brief = None
+    if a.brief and (jobs or a.preflight):
+        brief_lines = []
+        brief = load_brief(a.brief, log_text, a.dispatch_log, brief_lines)
+        print(f"BRIEF {brief['label']}: 版次 {brief['revision'] if brief['revision'] is not None else '?'}, "
+              f"{len(brief['rows'])} row(s); notes only, never fails")
+        for line in ([brief["problem"]] if brief["problem"] else []) + brief_lines:
+            print(f"  ~ {line}")
+
+    failed = skipped = undated = 0
+    fetched = {}  # 2.2.2: one git fetch per repository and remote for the BASE_REF check
+    for report_path, order_path in a.preflight:
+        files = [pathlib.Path(report_path), pathlib.Path(order_path)]
+        if not all(f.is_file() for f in files):
+            failed += 1
+            print(f"FAIL preflight {report_path} against {order_path}\n  - file not found")
+            continue
+        order = files[1].read_bytes()
+        mode = re.search(r"^\s*GOVERNANCE\s*=\s*(\w+)", order.decode("utf-8-sig"), re.M)
+        lacks, unchecked = preflight(files[0].read_text(encoding="utf-8-sig"), order, files[1], a.evidence_dir, dispatch,
+                                     a.dispatch_log, a.repo)
+        failed += bool(lacks)
+        print(f"PREFLIGHT {report_path} against {order_path} (GOVERNANCE {mode.group(1) if mode else 'not set'}): "
+              + (f"{len(lacks)} item(s) to migrate" if lacks else "nothing lacking") + "; only read")
+        for line in [f"  LACKS {item}" for item in lacks] + [f"  NOT_CHECKED {item}" for item in unchecked]:
+            print(line)
+        if brief:
+            extra = []
+            brief_notes(order.decode("utf-8-sig"), files[1], brief, extra)
+            for line in extra:
+                print(f"  ~ {line}")
+    for kind, path in jobs:
+        files = [pathlib.Path(p) for p in (path if kind == "match" else [path])]
+        text = files[0].read_text(encoding="utf-8-sig") if all(f.is_file() for f in files) else None
+        name = " against ".join(path) if kind == "match" else path
+        day = dated(kind, text) if text is not None and a.since else None
+        if day and day < a.since:
+            skipped += 1
+            print(f"SKIP {kind} {name} (dated {day}, before --since)")
+            continue
+        if a.since and text is not None and not day:
+            undated += 1
+            print(f"SKIP {kind} {name} (UNDATED: no date for --since to compare; run without --since to check it)")
+            continue
+        notes = []
+        if text is None:
+            problems = ["file not found"]
+        elif kind == "match":
+            problems = check_match(text, files[1].read_bytes(), notes, a.evidence_dir, dispatch, files[1], a.dispatch_log,
+                                   candidate, equivalent, brief, a.order_history)
+        elif kind == "po-acceptance":
+            problems = check_po_acceptance(text, notes, candidate, pathlib.Path(a.artifact_root) if a.artifact_root
+                                           else files[0].resolve().parent)
+        else:
+            problems = (check_verdict(text, notes, self_check_level(files[0], a.config, notes)) if kind == "verdict"
+                        else CHECKS[kind](text, notes))
+            if kind == "verdict" and (a.match or candidate):
+                problems += verdict_binding(text, matched, candidate, notes, pairs)
+            if kind == "resume":  # 2.2.2: size, shadow unless --strict
+                size = resume_size(files[0].read_bytes(), *resume_limits_for(files[0], a.config, notes))
+                if size and a.strict:
+                    problems.append(size)
+                elif size:
+                    notes.append(f"shadow: {size}")
+            if kind == "order":  # 2.2.2: BASE_REF freshness, WARN unless --strict-base
+                base = base_config(files[0], a.config, notes)
+                base["strict"] = base["strict"] or a.strict_base
+                problems += base_ref_problems(text, pathlib.Path(a.repo) if a.repo else files[0].resolve().parent, base,
+                                              notes, fetched)
+        if brief and text is not None and kind in ("order", "match"):
+            brief_notes(text if kind == "order" else files[1].read_text(encoding="utf-8-sig"), files[-1], brief, notes)
+        failed += bool(problems)
+        print(f"{('WARN' if a.warn else 'FAIL') if problems else 'OK  '} {kind} {name}")
+        for line in [f"  - {p}" for p in problems] + [f"  ~ {n}" for n in notes]:
+            print(line)
+    if a.warn or a.since:
+        print(f"checked {len(jobs) - skipped - undated}, {'warned' if a.warn else 'failed'} {failed}, skipped {skipped}"
+              + (f", UNDATED {undated} (not checked)" if undated else ""))
+    return 1 if (failed and not a.warn) or late_failed else 0
+
+
+def not_utf8(error, argv=None):
+    """2.2 (v2.1.0 known issue): one line, never a traceback, for an input file that is not UTF-8 text. It names the
+    file when it is on the command line or in a folder there (text files only: .md .json .jsonl .txt .log)."""
+    import itertools
+    named = []
+    for arg in (sys.argv[1:] if argv is None else argv):
+        path = pathlib.Path(arg)
+        try:
+            files = [path] if path.is_file() else (list(itertools.islice(
+                (p for p in path.rglob("*") if p.suffix.lower() in (".md", ".json", ".jsonl", ".txt", ".log")
+                 and ".git" not in p.parts), 2000)) if path.is_dir() else [])
+        except (OSError, ValueError):
+            files = []
+        for file in files:
+            try:
+                file.read_bytes().decode("utf-8")
+            except UnicodeDecodeError:
+                named.append(str(file))
+            except OSError:
+                pass
+    where = f" ({', '.join(dict.fromkeys(named[:3]))})" if named else ""
+    return f"a file is not UTF-8 text{where}: {error.reason} at byte {error.start}; save it as UTF-8 and run again"
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except UnicodeDecodeError as error:  # 2.2: one line and NOT_RUN (exit 2), never a traceback
+        print(f"GATE_CHECK: NOT_RUN {not_utf8(error)}")
+        sys.exit(2)
+    except (OSError, RuntimeError, ValueError) as error:  # 2.2.5: one line, never a traceback
+        print(f"GATE_CHECK: NOT_RUN {type(error).__name__}: {str(error)[:200]}")
+        sys.exit(2)

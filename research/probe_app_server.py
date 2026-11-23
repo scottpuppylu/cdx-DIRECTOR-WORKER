@@ -1,0 +1,285 @@
+"""Probe the installed Codex App Server against disposable local fixtures."""
+
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import os
+from pathlib import Path
+import queue
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+
+class AppServer:
+    def __init__(self, codex, cwd, env):
+        self.process = subprocess.Popen(
+            [codex, "app-server", "--listen", "stdio://"],
+            cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True, encoding="utf-8",
+        )
+        self.messages = queue.Queue()
+        self.request_id = 0
+        threading.Thread(target=self.read_stdout, daemon=True).start()
+
+    def read_stdout(self):
+        try:
+            for line in self.process.stdout:
+                self.messages.put(json.loads(line))
+        except (UnicodeError, ValueError) as error:
+            self.messages.put(error)
+        finally:
+            self.messages.put(None)
+
+    def send(self, message):
+        self.process.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
+        self.process.stdin.flush()
+
+    def call(self, method, params):
+        self.request_id += 1
+        self.send({"id": self.request_id, "method": method, "params": params})
+        return self.wait_for(lambda message: message.get("id") == self.request_id, method)
+
+    def wait_for(self, matches, description):
+        deadline = time.monotonic() + 25
+        while True:
+            try:
+                message = self.messages.get(timeout=max(0, deadline - time.monotonic()))
+            except queue.Empty as error:
+                raise RuntimeError(f"Timed out waiting for {description}") from error
+            if message is None:
+                raise RuntimeError(f"App Server closed before {description}")
+            if isinstance(message, Exception):
+                raise RuntimeError(f"Invalid App Server response during {description}") from message
+            if matches(message):
+                return message
+
+    def result(self, method, params):
+        response = self.call(method, params)
+        if "error" in response:
+            raise RuntimeError(f"{method}: {response['error']}")
+        return response["result"]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.process.stdin.close()
+        try:
+            self.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait(timeout=5)
+        finally:
+            self.process.stdout.close()
+
+
+def git(repo, *args):
+    return subprocess.check_output(
+        ["git", "-C", str(repo), "-c", "core.hooksPath=.git/no-hooks", *args],
+        encoding="utf-8", stderr=subprocess.PIPE, timeout=15,
+    ).strip()
+
+
+def create_fixture(root):
+    repo, worker = root / "總監 base", root / "施工 worker"
+    skill = repo / ".agents" / "skills" / "dw-probe"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: dw-probe\ndescription: Identify the disposable work-order probe.\n---\n\n"
+        "This is a discovery fixture.\n", encoding="utf-8",
+    )
+    (repo / "AGENTS.md").write_text("# Disposable Codex fixture\n", encoding="utf-8")
+    (repo / ".codex").mkdir()
+    (repo / ".codex" / "hooks.json").write_text(json.dumps({"hooks": {"SessionStart": [{
+        "matcher": "^compact$", "hooks": [{"type": "command", "command": "echo DW_PROBE"}],
+    }]}}), encoding="utf-8")
+    git(repo, "init", "-b", "main", "--template=")
+    git(repo, "add", "--", ".")
+    git(repo, "-c", "user.name=DW Probe", "-c", "user.email=dw-probe@example.invalid",
+        "-c", "commit.gpgSign=false", "commit", "-m", "Add probe fixture")
+    git(repo, "worktree", "add", "--detach", str(worker), "HEAD")
+    return repo, worker
+
+
+def sandbox_check(server, worker, policy_type):
+    marker = worker / (policy_type + ".txt")
+    command = [sys.executable, "-I", "-c",
+               "import pathlib, sys; pathlib.Path(sys.argv[1]).write_text('probe')", str(marker)]
+    response = server.call("command/exec", {
+        "command": command, "cwd": str(worker), "timeoutMs": 10000,
+        "sandboxPolicy": {"type": policy_type},
+    })
+    return {"exit": response.get("result", {}).get("exitCode"),
+            "marker_written": marker.is_file(),
+            "detail": (response.get("error", {}).get("message")
+                       or response.get("result", {}).get("stderr", "").strip().splitlines()[-1:])}
+
+
+class FixtureProvider(BaseHTTPRequestHandler):
+    """Return deterministic Responses streams without reaching a model service."""
+
+    def log_message(self, *_):
+        pass
+
+    def do_POST(self):
+        if self.path.split("?", 1)[0] != "/v1/responses":
+            self.send_error(404)
+            return
+        request = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+        functions = {tool.get("name") for tool in request.get("tools", []) if tool.get("type") == "function"}
+        self.server.shell_tools = sorted(name for name in functions if name and ("shell" in name or "exec" in name))
+        tool_results = [item for item in request.get("input", []) if item.get("type") == "function_call_output"]
+        has_result = bool(tool_results)
+        content = {"type": "output_text", "text": "DW_PROBE_OK", "annotations": []}
+        item = {"id": "msg_probe", "type": "message", "role": "assistant",
+                "status": "completed", "content": [content]}
+        response_id = "resp_probe_final"
+        command_tools = {"exec_command": "cmd", "shell_command": "command"}
+        command_tool = next((name for name in command_tools if name in functions), None)
+        if command_tool and not has_result:
+            code = 'python -c "import sys; print(42); sys.exit(7)"'
+            item = {"id": "fc_probe", "call_id": "call_probe", "type": "function_call",
+                    "name": command_tool, "arguments": json.dumps({command_tools[command_tool]: code}),
+                    "status": "completed"}
+            response_id = "resp_probe_tool"
+            output = [{"type": "response.output_item.added", "item": dict(item, status="in_progress")},
+                      {"type": "response.output_item.done", "item": item}]
+        else:
+            self.server.fixture_tool_results = [item.get("output") for item in tool_results
+                                                if item.get("call_id") == "call_probe"]
+            output = [
+                {"type": "response.output_item.added", "item": dict(item, status="in_progress", content=[])},
+                {"type": "response.output_text.delta", "item_id": item["id"], "output_index": 0,
+                 "content_index": 0, "delta": content["text"]},
+                {"type": "response.output_item.done", "item": item},
+            ]
+        events = [
+            {"type": "response.created", "response": {"id": response_id}},
+            *output,
+            {"type": "response.completed", "response": {"id": response_id, "usage": {
+                "input_tokens": 80, "input_tokens_details": {"cached_tokens": 60},
+                "output_tokens": 5, "output_tokens_details": {"reasoning_tokens": 2}, "total_tokens": 85,
+            }}},
+        ]
+        data = "".join(f"data: {json.dumps(event)}\n\n" for event in events).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+def event_check(server, thread_id):
+    result = server.result("turn/start", {"threadId": thread_id, "input": [
+        {"type": "text", "text": "Return the disposable fixture result."},
+    ]})
+    turn_id = result["turn"]["id"]
+    summary = {}
+    while True:
+        event = server.wait_for(
+            lambda message: message.get("params", {}).get("threadId") == thread_id
+            and message.get("method") in ("item/completed", "thread/tokenUsage/updated", "turn/completed"),
+            "fixture turn events",
+        )
+        params = event["params"]
+        if event["method"] == "turn/completed":
+            if params["turn"]["id"] != turn_id:
+                raise RuntimeError("Unexpected fixture turn ID")
+            return dict(summary, status=params["turn"]["status"])
+        if params.get("turnId") != turn_id:
+            continue
+        if event["method"] == "thread/tokenUsage/updated":
+            totals = params["tokenUsage"]["last"]
+            summary["usage"] = {name: totals.get(name) for name in
+                                ("inputTokens", "cachedInputTokens", "outputTokens", "totalTokens")}
+        elif params["item"]["type"] == "agentMessage":
+            summary["fixture_message"] = params["item"].get("text") == "DW_PROBE_OK"
+        elif params["item"]["type"] == "commandExecution":
+            item = params["item"]
+            summary["command_execution"] = {"status": item.get("status"), "exit": item.get("exitCode")}
+
+
+def probe(codex, root, port):
+    repo, worker = create_fixture(root)
+    codex_data = root / "codex data"
+    codex_data.mkdir()
+    config = (
+        'model = "dw-fixture"\nmodel_provider = "dw_fixture"\n'
+        '[model_providers.dw_fixture]\nname = "Disposable loopback fixture"\n'
+        f'base_url = "http://127.0.0.1:{port}/v1"\nwire_api = "responses"\n'
+        'requires_openai_auth = false\nrequest_max_retries = 0\nstream_max_retries = 0\n'
+        + "".join(f"\n[projects.{json.dumps(str(path), ensure_ascii=False)}]\n"
+                  'trust_level = "trusted"\n' for path in (repo, worker))
+    )
+    (codex_data / "config.toml").write_text(config, encoding="utf-8")
+    # Give this subprocess its own Codex configuration and thread store.
+    env = dict(os.environ, CODEX_HOME=str(codex_data))
+    env["NO_PROXY"] = ",".join(filter(None, [env.get("NO_PROXY"), "127.0.0.1"]))
+    with AppServer(codex, repo, env) as server:
+        initialize(server)
+        skills = server.result("skills/list", {"cwds": [str(repo), str(worker)], "forceReload": True})
+        hooks = server.result("hooks/list", {"cwds": [str(repo), str(worker)]})
+        thread = server.result("thread/start", {"cwd": str(worker), "ephemeral": False,
+                                                "sandbox": "read-only", "approvalPolicy": "never"})
+        worker_thread_id = thread["thread"]["id"]
+        summary = {
+            "cli": subprocess.check_output([codex, "--version"], encoding="utf-8", timeout=10).strip(),
+            "project_skill": [any(s["name"] == "dw-probe" and s["enabled"] for s in row["skills"])
+                              for row in skills["data"]],
+            "project_hook": [[{"event": h["eventName"], "trust": h["trustStatus"]}
+                              for h in row["hooks"] if h.get("command") == "echo DW_PROBE"]
+                             for row in hooks["data"]],
+            "thread_cwd_is_worker": Path(thread["thread"]["cwd"]).resolve() == worker.resolve(),
+            "worker_agents_loaded": any(Path(path).resolve() == (worker / "AGENTS.md").resolve()
+                                        for path in thread.get("instructionSources", [])),
+            "windows_sandbox_readiness": (server.result("windowsSandbox/readiness", {})
+                                           if os.name == "nt" else None),
+            "sandbox": {mode: sandbox_check(server, worker, mode)
+                        for mode in ("readOnly", "workspaceWrite")},
+            "loopback_turn": event_check(server, worker_thread_id),
+        }
+    with AppServer(codex, repo, env) as server:
+        initialize(server)
+        resumed = server.result("thread/resume", {"threadId": worker_thread_id, "excludeTurns": True})
+        history = server.result("thread/turns/list", {"threadId": worker_thread_id, "limit": 1})
+        summary["resume_from_new_server"] = {
+            "same_thread": resumed["thread"]["id"] == worker_thread_id,
+            "same_worktree": Path(resumed["thread"]["cwd"]).resolve() == worker.resolve(),
+            "latest_turn_status": history["data"][0]["status"] if history["data"] else None,
+        }
+    return summary
+
+
+def initialize(server):
+    server.result("initialize", {"clientInfo": {"name": "director_work_probe", "version": "0.1.0"}})
+    server.send({"method": "initialized"})
+
+
+def main():
+    codex = shutil.which("codex")
+    if not codex:
+        raise RuntimeError("codex executable not found on PATH")
+    temp = Path(tempfile.gettempdir()).resolve()
+    with tempfile.TemporaryDirectory(prefix="director-codex-probe-", dir=temp) as disposable:
+        root = Path(disposable).resolve()
+        if root.parent != temp or not root.name.startswith("director-codex-probe-"):
+            raise RuntimeError("Unexpected temporary fixture location")
+        with ThreadingHTTPServer(("127.0.0.1", 0), FixtureProvider) as provider:
+            threading.Thread(target=provider.serve_forever, daemon=True).start()
+            try:
+                result = probe(codex, root, provider.server_port)
+                result["loopback_turn"]["available_shell_tools"] = getattr(provider, "shell_tools", [])
+                tool_results = getattr(provider, "fixture_tool_results", [])
+                result["loopback_turn"]["tool_returned"] = bool(tool_results)
+                result["loopback_turn"]["tool_policy_blocked"] = any("blocked by policy" in str(output)
+                                                                     for output in tool_results)
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+            finally:
+                provider.shutdown()
+
+
+if __name__ == "__main__":
+    main()
