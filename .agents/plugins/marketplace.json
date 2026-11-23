@@ -1,0 +1,12 @@
+{
+  "name": "cdx-director-work",
+  "interface": {"displayName": "cdx DIRECTOR-WORK"},
+  "plugins": [
+    {
+      "name": "cdx",
+      "source": {"source": "local", "path": "./plugin/cdx"},
+      "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
+      "category": "Developer Tools"
+    }
+  ]
+}

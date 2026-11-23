@@ -8,7 +8,7 @@ TRACES_TO      = <這張工單服務的初衷卡、需求或決定編號，逗�
 BRIEF_REVISION        = <選用：初衷卡版次；不用就刪掉這兩行>
 BRIEF_FINGERPRINTS_V1 = <選用：gate_check.py --brief BRIEF.md 印的 {"B-2": "<64 位雜湊>"}>
 PRIMARY_WORKER = session「<名稱>」
-MODEL / EFFORT = <模型> / <medium|high|xhigh>（理由見 docs/05）
+MODEL / EFFORT = <模型> / <所選模型支援的 effort>（理由見 docs/05）
 FALLBACK       = <同 session 新對話，從 RESUME_STATE 接續 | 其他 worker>
 GOVERNANCE     = <Direct | Standard | Strict>
 BASE_REF       = <remote/branch @ commit，例：origin/main @ <fetch 後的 commit>>   # 開工前先 git fetch，寫 fetch 後遠端分支的最新 commit；落後時 gate_check.py --order 印 WARN BASE_REF（docs/02）
@@ -90,6 +90,13 @@ CHECKS:
 - 選用的 `追溯` 欄（加在表的最後一欄）：這條 AC 驗證 TRACES_TO 的哪些編號，例如 `DD-03`；沒有寫 `—`。不加這欄也照樣通過；加了之後 `trace_report.py` 每個編號一列，不必猜哪條 AC 服務哪個需求。
 
 結果不寫在這裡，寫在 TASK REPORT 的 ACCEPTANCE 表。成品類交件另附常識閘門表（docs/07）。
+
+Standard 與 Strict 需鎖定驗收測試。用 `cdx work lock-tests --base <SHA> <paths>` 產生指紋，規格審查後才派工。確定沒有可鎖的測試時，填 `- NONE` 並附原因。
+
+```text
+TESTS_LOCKED:
+- <repo 相對路徑> sha256=<64 位>
+```
 
 ## F. 安全與版控
 照 docs/08。驗收條件和規格不准改，有問題回報 BLOCKED 由總監裁決（docs/02）。總監派工時記下本檔雜湊，交件時比對；改了會被查出來，但工具擋不住改動。本工單特別禁止：<...>

@@ -1,0 +1,266 @@
+"""Exercise the cdx setup, work-order, evidence, and recovery contract offline."""
+
+import argparse
+import json
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+import uuid
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import cdx_audit
+import cdx_hook
+import cdx_session
+from cdx_common import ROOT, atomic_write, git, json_bytes, load_project, read_json
+from cdx_usage import summarize_app
+from cdx_work import order_spec
+
+
+def text(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(value.encode("utf-8"))
+
+
+class CDX(unittest.TestCase):
+    def setUp(self):
+        base = Path(tempfile.gettempdir()).resolve()
+        self.temp = tempfile.TemporaryDirectory(prefix="cdx-suite-", dir=base)
+        self.root = Path(self.temp.name).resolve()
+        self.assertEqual(self.root.parent, base)
+        self.assertTrue(self.root.name.startswith("cdx-suite-"))
+        self.addCleanup(self.temp.cleanup)
+
+    def run_script(self, tool, *args, code=0):
+        result = subprocess.run([sys.executable, "-I", "-B", "-X", "utf8", str(ROOT / "tools" / tool), *map(str, args)],
+                                cwd=ROOT, capture_output=True, encoding="utf-8", errors="replace", timeout=60)
+        self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+        return result.stdout + result.stderr
+
+    def git_project(self, name):
+        repo = self.root / name
+        repo.mkdir()
+        git(repo, "init", "-b", "main", "--template=")
+        git(repo, "config", "user.name", "cdx fixture")
+        git(repo, "config", "user.email", "cdx@example.invalid")
+        git(repo, "config", "commit.gpgSign", "false")
+        git(repo, "config", "core.autocrlf", "false")
+        git(repo, "config", "core.hooksPath", ".git/cdx-fixture-no-hooks")
+        return repo
+
+    def work(self, repo, *args, code=0):
+        return self.run_script("cdx.py", "work", "--repo", repo, *args, code=code)
+
+    def test_install_is_idempotent_and_preserves_existing_files(self):
+        repo = self.git_project("主 project")
+        agents = repo / "AGENTS.md"
+        text(agents, "# existing\nKeep this text.\n")
+        custom_hook = {"matcher": "startup", "hooks": [{"type": "command", "command": "echo fixture"}]}
+        hook_path = repo / ".codex" / "hooks.json"
+        text(hook_path, json.dumps({"hooks": {"SessionStart": [custom_hook]}}))
+        state = self.root / "DIRECTOR 外部"
+        args = ("setup", "--repo", repo, "--state", state, "--agents", "--hooks")
+        self.assertIn("CDX_SETUP PLAN", self.run_script("cdx.py", *args))
+        self.assertFalse(state.exists())
+        self.assertIn("CDX_SETUP COMPLETE", self.run_script("cdx.py", *args, "--apply"))
+        self.assertTrue(agents.read_bytes().startswith(b"# existing\nKeep this text.\n"))
+        self.assertEqual(read_json(hook_path)["hooks"]["SessionStart"][0], custom_hook)
+        _, loaded, info = load_project(repo)
+        self.assertEqual(loaded, state)
+        self.assertEqual(len(info["managed_skills"]), 5)
+        kit = Path(info["kit"])
+        self.assertTrue((kit / "tools" / "gate_check.py").is_file())
+        (state / "PO_PENDING.md").write_bytes(b"PO draft in progress\n")
+        self.assertIn("changed=0", self.run_script("cdx.py", *args, "--apply"))
+        self.assertEqual((state / "PO_PENDING.md").read_bytes(), b"PO draft in progress\n")
+        conflict = self.git_project("other")
+        self.assertIn("belongs", self.run_script("cdx.py", "setup", "--repo", conflict, "--state", state, code=2))
+        managed = repo / ".agents" / "skills" / "cdx-resume" / "SKILL.md"
+        managed.write_bytes(b"local customization\n")
+        self.assertIn("contains local edits", self.run_script("cdx.py", *args, "--apply", code=2))
+        self.assertEqual(managed.read_bytes(), b"local customization\n")
+
+    def test_work_order_full_flow_and_wrong_candidate(self):
+        repo = self.git_project("repo")
+        text(repo / "calc.txt", "broken\n")
+        text(repo / "verify.py", "from pathlib import Path\nassert Path('calc.txt').read_text().startswith('42\\n')\n")
+        git(repo, "add", "--", "calc.txt", "verify.py")
+        git(repo, "commit", "-m", "baseline")
+        base = git(repo, "rev-parse", "HEAD")
+        self.run_script("cdx.py", "setup", "--repo", repo, "--apply", "--hooks")
+        _, state, _ = load_project(repo)
+        worker = self.root / "worker line"
+        work = state / "work" / "WO-001"
+        name = "WO-001-calc.md"
+        order = state / "orders" / name
+        verify = [sys.executable, "-B", "verify.py"]
+        locked = self.work(repo, "lock-tests", "--base", base, "verify.py")
+        text(order, f"""# WO-001 — test the candidate
+ISSUED_BY = director 2026-01-02 10:00
+REVISION = 1
+TRACES_TO = DD-1
+PRIMARY_WORKER = cdx fixture
+MODEL / EFFORT = configured / standard
+FALLBACK = recover from state
+GOVERNANCE = Standard
+BASE_REF = main @ {base}
+NEW_BRANCH = codex/wo001
+WORKTREE = {worker}
+WORK_DIR = {work}
+
+SCOPE:
+- calc.txt
+FORBIDDEN:
+- verify.py
+
+| ID | type | req | how | expected |
+| --- | --- | --- | --- | --- |
+| AC-1 | AUTO | Fixture computes 42 | Run approved check | Exit 0 |
+
+CHECKS:
+- AC-1: {json.dumps(verify)}
+
+{locked}
+- DELIVERABLES: candidate and evidence
+- STOP_RULES: stop after 2 rounds without progress
+""")
+        self.work(repo, "prepare", name)
+        self.assertEqual(git(worker, "rev-parse", "HEAD"), base)
+        self.assertTrue((worker / ".codex" / "hooks.json").is_file())
+        self.assertEqual(git(worker, "status", "--porcelain"), "")
+        self.work(repo, "dispatch", name, code=2)
+        text(state / "reviews" / "WO-001-SPEC_REVIEW.md", "AC-1 explicitly verifies 42.\n")
+        self.work(repo, "approve-spec", name, "--reviewer", "reviewer-1", "--author", "director-1")
+        self.work(repo, "dispatch", name)
+        text(work / "PLAN.md", "AC-1: update calc.txt, then run the approved check.\n")
+        self.work(repo, "approve-plan", name)
+        self.run_script("cdx.py", "session", "--repo", repo, "new", name)
+        self.assertIn('"thread": null', self.run_script("cdx.py", "session", "--repo", repo, "status", name))
+        stamp = order_spec(state, name)["sha"]
+
+        def candidate(value):
+            text(worker / "calc.txt", value)
+            git(worker, "add", "--", "calc.txt")
+            git(worker, "commit", "-m", "WO-001 update fixture result")
+            return git(worker, "rev-parse", "HEAD")
+
+        def evidence(folder):
+            self.run_script("evidence_record.py", "run", "--cwd", worker, "--out-dir", folder, "--order", order,
+                            "--label", "AC-1", "--", *verify)
+            return next(folder.glob("*.json"))
+
+        candidate("42\nfirst\n")
+        stale = evidence(work / "stale-evidence")
+        head = candidate("42\nsecond\n")
+        shutil.copyfile(stale, work / "evidence" / "stale.json")
+        good = evidence(work / "fresh-evidence")
+        shutil.copyfile(good, work / "evidence" / "fresh.json")
+
+        def report(filename):
+            text(work / "TASK_REPORT.md", f"""# TASK REPORT
+TASK_ID: WO-001
+HEAD: {head}
+ORDER: {name} REVISION 1
+ORDER_SHA256: {stamp}
+RESULT: PASS
+ENGINEERING: ready
+PRODUCT: fixture emits 42
+DONE: committed and checked
+TESTS: verify.py exit 0
+SCOPE_CHECK: PASS
+EVIDENCE: {filename}
+UNVERIFIED: PO
+KNOWN_ISSUES: NONE
+NEXT: independent review
+ACCEPTANCE:
+| ID | actual | evidence | status |
+| --- | --- | --- | --- |
+| AC-1 | exit 0 | {filename} | PASS |
+""")
+
+        report("stale.json")
+        self.work(repo, "review", name, "--candidate", head, "--rerun", code=2)
+        report("fresh.json")
+        success = self.work(repo, "review", name, "--candidate", head, "--rerun")
+        self.assertIn("CDX_REVIEW AUTO_RERUNS=1", success)
+        receipt = read_json(state / "reviews" / f"WO-001-{head}.json")
+        self.assertEqual(receipt["candidate"], head)
+        self.assertEqual(receipt["po"], "PENDING_PO")
+        self.assertIn(f"EVIDENCE_RERUN WO-001 AC-1 candidate={head}",
+                      (state / "DIRECTOR_LOG.md").read_text(encoding="utf-8"))
+        self.assertIn("checked out", self.work(repo, "review", name, "--candidate", base, code=2))
+
+    def test_audit_distinguishes_command_and_turn_status(self):
+        log = self.root / "audit.jsonl"
+        thread = str(uuid.uuid4())
+        base = {"threadId": thread, "turnId": "turn"}
+        cdx_audit.append_app(log, {"method": "item/started", "params": dict(base, item={
+            "type": "commandExecution", "id": "cmd", "command": "python fixture.py", "status": "inProgress"})})
+        cdx_audit.append_app(log, {"method": "item/completed", "params": dict(base, item={
+            "type": "commandExecution", "id": "cmd", "command": "python fixture.py", "status": "failed", "exitCode": 7})})
+        cdx_audit.append_app(log, {"method": "turn/completed", "params": dict(base, turn={"id": "turn", "status": "completed"})})
+        items = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(items[0]["result"]["status"], "running")
+        self.assertEqual(items[1]["result"], {"status": "error", "exit_code": 7})
+        self.assertEqual(items[2]["status"], "completed")
+        for count in (80, 160):
+            totals = {"inputTokens": count, "cachedInputTokens": 60, "outputTokens": 5, "totalTokens": count + 5}
+            cdx_audit.append_app(log, {"method": "thread/tokenUsage/updated", "params": dict(base, tokenUsage={
+                "total": totals, "last": totals, "modelContextWindow": 1000})})
+        self.assertEqual(summarize_app(log)["threads"][thread]["total"]["inputTokens"], 160)
+        self.assertIn("CDX_AUDIT OK", self.run_script("cdx.py", "audit", "verify", log))
+        log.write_text(log.read_text(encoding="utf-8").replace('"exit_code":7', '"exit_code":0'), encoding="utf-8")
+        self.assertIn("hash does not match", self.run_script("cdx.py", "audit", "verify", log, code=2))
+
+    def test_hook_role_and_restore(self):
+        repo = self.git_project("hook project")
+        self.run_script("cdx.py", "setup", "--repo", repo, "--apply", "--hooks")
+        _, state, _ = load_project(repo)
+        session = str(uuid.uuid4())
+        director = str(uuid.uuid4())
+        self.run_script("cdx.py", "session", "--repo", repo, "register-director", director)
+        self.assertEqual(read_json(state / "sessions" / (director + ".json"))["role"], "director")
+        role = {"role": "worker", "worktree": str(repo), "order": "WO-001"}
+        atomic_write(state / "sessions" / (session + ".json"), json_bytes(role))
+        base = {"session_id": session, "cwd": str(repo)}
+        reply = cdx_hook.handle(dict(base, hook_event_name="SessionStart", source="compact"))
+        self.assertIn("RESUME_STATE.md", reply["hookSpecificOutput"]["additionalContext"])
+        self.assertNotIn("PROGRESS:", reply["hookSpecificOutput"]["additionalContext"])
+        patch = f"*** Begin Patch\n*** Update File: {state / 'DIRECTOR_LOG.md'}\n*** End Patch"
+        denied = cdx_hook.handle(dict(base, hook_event_name="PreToolUse", tool_name="apply_patch", tool_input={"command": patch}))
+        self.assertEqual(denied["hookSpecificOutput"]["permissionDecision"], "deny")
+        okay = "*** Begin Patch\n*** Add File: calc.txt\n+42\n*** End Patch"
+        self.assertEqual(cdx_hook.handle(dict(base, hook_event_name="PreToolUse", tool_name="apply_patch",
+                                              tool_input={"command": okay})), {})
+
+    def test_reconcile_ambiguous_acceptance(self):
+        attempt = str(uuid.uuid4())
+        file = self.root / "binding.json"
+        record = {"thread": str(uuid.uuid4()), "state": "starting", "attempt": attempt, "prior_turn": "previous"}
+
+        class RecordedServer:
+            def call(self, method, params):
+                return {"data": [{"id": "accepted", "status": "completed", "items": [{"type": "userMessage",
+                    "content": [{"type": "text", "text": f"CDX_ATTEMPT: {attempt}\nfixture"}]}]}]}
+
+        cdx_session.reconcile(RecordedServer(), record, file, reset_empty=False)
+        self.assertEqual(read_json(file)["turn"], "accepted")
+        self.assertEqual(read_json(file)["state"], "completed")
+
+    def test_published_bundle_is_self_contained(self):
+        for name in ("VERSION", "CHANGELOG.md", "CODEX-PORT.md", "BOOTSTRAP.md", "PURPOSE.md", "LICENSE"):
+            self.assertTrue((ROOT / name).is_file(), name)
+        manifest = read_json(ROOT / ".agents" / "plugins" / "marketplace.json")
+        target = ROOT / manifest["plugins"][0]["source"]["path"]
+        self.assertEqual(read_json(target / "plugin.json")["version"], (ROOT / "VERSION").read_text().strip())
+        for path in ("README.md", "BOOTSTRAP.md", "CODEX-PORT.md", "tools/CDX-TOOLS.md"):
+            self.assertTrue((ROOT / path).read_text(encoding="utf-8").strip())
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--verbose", action="store_true")
+    args = parser.parse_args()
+    unittest.main(argv=[sys.argv[0]], verbosity=2 if args.verbose else 1)

@@ -1,6 +1,6 @@
 # 規格審查（派工前，subagent 用）
 
-Strict 和 Standard 工單必做（2.2.5 起 Standard 也必做：`gate_check.py --sequence` 找不到就 FAIL），Direct 不做（`docs/02`）。審查要來自和寫工單的人不同的 session（subagent 有自己的 agent id）。總監用 Agent 工具開一個只讀的 subagent（只給 Read / Glob / Grep），模型照 `docs/05` 選，預設用便宜的那一級。把下面的提示填好貼給它。結果只給總監參考，怎麼改工單由總監決定。時機：工單寫好、放上 PO 待決頁之前，在同一輪跑完（Claude Desktop 見 `docs/11`「開 worker 的限制」）；審完工單又改版，就重審。
+Strict 和 Standard 工單需要獨立規格審查。審查者的 session ID 與作者不同，輸入只提供需求、工單、風險和當前基準。記入 `reviews/WO-<ID>-SPEC_REVIEW.md`，總監用 `cdx work approve-spec` 綁定版次後再派工；工單改版時重審。
 
 ```text
 你是規格審查員，只讀不寫。審這張工單能不能直接開工：<工單路徑>

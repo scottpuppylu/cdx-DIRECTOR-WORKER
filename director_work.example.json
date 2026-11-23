@@ -1,0 +1,49 @@
+{
+  "_comment": "cdx project config copied into the project state directory. The installer chooses project skills and optional native Hooks. Shared controls are read by the upstream gate, resume, metrics and release tools.",
+  "schema_version": 1,
+  "mode": "general",
+  "window": 250000,
+  "plugins_off": [
+    "example-plugin@example-marketplace"
+  ],
+  "backup_dir": null,
+  "skip_worktrees": [],
+  "hooks": false,
+  "protect_director": null,
+  "director_worktree": null,
+  "trace_id_pattern": "^(B|DD|OD)-\\d+$",
+  "po_pending_files": [
+    "PO_PENDING.md"
+  ],
+  "po_item_pattern": "^\\s*ID\\s*:\\s*(OD|ACT)-\\w+",
+  "po_open_pattern": "^\\s*STATUS\\s*:\\s*open\\b",
+  "resume": {
+    "max_bytes": 20480,
+    "max_line_bytes": 4096,
+    "keep_recent": 10,
+    "protect_headings": [
+      "現況",
+      "未結",
+      "OPEN",
+      "BLOCKED",
+      "TODO",
+      "待辦",
+      "IN_FLIGHT",
+      "DO_NOT_REPEAT"
+    ]
+  },
+  "verdict_self_check": "warn",
+  "base_ref": {
+    "check": true,
+    "fetch": false,
+    "strict": false
+  },
+  "release": {
+    "remote": "origin",
+    "branch": "main",
+    "title": "cdx-DIRECTOR-WORKER {version}",
+    "tag_message": "cdx-DIRECTOR-WORKER {version}",
+    "selftest": "python -I -B -X utf8 tools/selftest_cdx.py",
+    "gh_repo": null
+  }
+}
