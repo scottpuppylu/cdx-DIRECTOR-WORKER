@@ -31,7 +31,7 @@
 |---|---|
 | Skill、專案指示載入 | 主 checkout 與施工 worktree 都發現已提交的 project skill。`thread/start` 的 cwd 指向施工 worktree，`instructionSources` 包含施工 worktree 的 `AGENTS.md`。 |
 | Hook 發現 | 兩個 checkout 都列出 `SessionStart`，狀態皆為 `untrusted`。目前只驗證發現與信任狀態。 |
-| 原生 thread 復工 | 伺服器關閉後，新的 App Server 以 `thread/resume` 找回相同 thread ID 和 worktree；`thread/turns/list` 讀到完成的歷史 turn。 |
+| 原生 thread 復工 | 伺服器關閉後，正式 JSON-RPC 客戶端先用 `thread/read` 和 `thread/turns/list` 唯讀查到相同 thread 與完成的回合，再以 `thread/resume` 接回原 worktree。 |
 | 用量事件 | 收到 `thread/tokenUsage/updated`。fixture 提供 `input=80, cached=60, output=5, total=85`，App Server 原樣投影。這組數字只測欄位語意，沒有實際模型用量。 |
 | 工具失敗與回合完成 | `exec_command` 收到政策拒絕，探針沒有觀測到這次命令的 `commandExecution` 完成項，但 `turn/completed` 的狀態仍是 `completed`。 |
 | 沙箱執行 | `windowsSandbox/readiness=notConfigured`。獨立 `command/exec` 指定 `readOnly` 與 `workspaceWrite` 皆以 exit 0 寫入各自的測試檔。結論限於這次新設定和測試路徑。 |

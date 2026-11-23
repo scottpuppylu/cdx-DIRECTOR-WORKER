@@ -12,6 +12,7 @@
   "protect_director": null,
   "director_worktree": null,
   "trace_id_pattern": "^(B|DD|OD)-\\d+$",
+  "cdx_require_brief_pins": true,
   "po_pending_files": [
     "PO_PENDING.md"
   ],

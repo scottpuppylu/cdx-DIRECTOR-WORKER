@@ -15,6 +15,9 @@ POINTER = "director-work-cdx.json"
 ORDER_ID = re.compile(r"WO-[0-9]+", re.ASCII)
 THREAD_ID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", re.ASCII)
 SHA = re.compile(r"[0-9a-f]{40}", re.ASCII)
+VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+-cdx\.[0-9]+", re.ASCII)
+GIT_LOCATION = {"GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX", "GIT_OBJECT_DIRECTORY",
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_QUARANTINE_PATH"}
 
 
 class Refused(RuntimeError):
@@ -22,8 +25,9 @@ class Refused(RuntimeError):
 
 
 def git(repo, *args, raw=False):
+    env = {key: value for key, value in os.environ.items() if key.upper() not in GIT_LOCATION}
     proc = subprocess.run(["git", "--no-replace-objects", "-C", str(repo), *args],
-                          capture_output=True, timeout=90)
+                          capture_output=True, timeout=90, env=env)
     if proc.returncode:
         raise Refused(proc.stderr.decode("utf-8", errors="replace").strip() or f"git {args[0]} exited {proc.returncode}")
     return proc.stdout if raw else proc.stdout.decode("utf-8", errors="replace").rstrip("\r\n")
@@ -69,6 +73,8 @@ def atomic_write(path, data):
         temp = Path(handle.name)
         try:
             handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
         except BaseException:
             handle.close()
             temp.unlink()
@@ -99,11 +105,17 @@ def stamp():
 def load_project(repo):
     root = checkout(repo)
     common = common_dir(root)
-    pointer = read_json(common / POINTER)
-    state = Path(pointer["state"]).resolve(strict=True)
-    project = read_json(state / "PROJECT.json")
+    pointer = read_json(state_path(common, POINTER))
+    state = Path(pointer["state"])
+    if not state.is_absolute() or state != state.resolve(strict=True):
+        raise Refused("cdxdw state path is not a canonical local directory")
+    project = read_json(state_path(state, "PROJECT.json"))
+    main = Path(project["repo"])
+    version = project.get("version", "")
     if (pointer.get("schema") != 1 or project.get("schema") != 1 or
-            Path(project["git_common_dir"]).resolve() != common):
+            Path(project["git_common_dir"]) != common or main != primary_checkout(root) or
+            within(state, main) or within(main, state) or within(state, common) or within(common, state) or
+            not VERSION.fullmatch(version) or Path(project["kit"]) != state_path(state, "runtime", version)):
         raise Refused("cdx project identity does not match the Git common directory")
     return root, state, project
 

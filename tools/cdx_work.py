@@ -65,9 +65,83 @@ def validate_checkout(repo, state, spec, *, fresh=False):
 def dispatch_check(state, spec):
     log = state_path(state, "DIRECTOR_LOG.md")
     records = gate_check.dispatch_records(log.read_text(encoding="utf-8-sig"))
-    if records.get(spec["order_id"]) != (str(spec["revision"]), spec["sha"]):
+    if (records.get(spec["order_id"]) != (str(spec["revision"]), spec["sha"]) or
+            gate_check.order_hash(spec["path"].read_bytes()) != spec["sha"]):
         raise Refused("Current order revision and hash are not registered in DIRECTOR_LOG.md")
     return log
+
+
+def approved_brief(state, spec):
+    text = spec["text"]
+    config = read_json(state_path(state, "director_work.json"))
+    traces, per_ac = gate_check.order_traces(text)
+    ids = [*traces, *(item for values in (per_ac or {}).values() for item in values)]
+    if not re.search(r"^[ \t]*BRIEF_(?:REVISION|FINGERPRINTS_V1)[ \t]*=", text, re.M) and not (
+            config.get("cdx_require_brief_pins") is True and any(re.fullmatch(r"B-\d+", item) for item in ids)):
+        return None
+    _, pins = gate_check.order_brief(text)
+    if not pins:
+        raise Refused("Work order needs valid BRIEF_FINGERPRINTS_V1 for its product requirements")
+    log = state_path(state, "DIRECTOR_LOG.md")
+    log_text = log.read_text(encoding="utf-8-sig")
+    locks = gate_check.brief_locks(log_text)
+    if not locks:
+        raise Refused("No approved product brief is recorded")
+    revision, digest, snapshot = locks[-1]
+    if snapshot and not re.fullmatch(r"brief-history/[\w.-]+\.md", snapshot):
+        raise Refused("Approved brief snapshot must be inside brief-history")
+    path = state_path(state, *snapshot.split("/")) if snapshot else state_path(state, "BRIEF.md")
+    raw = path.read_bytes()
+    if gate_check.order_hash(raw) != digest or gate_check.brief_revision(raw.decode("utf-8-sig")) != revision:
+        raise Refused("Approved product brief does not match its recorded revision and hash")
+    brief = gate_check.load_brief(path, log_text, log)
+    if not brief["trusted"] or brief["ambiguous"] or brief["problem"]:
+        raise Refused("Approved product brief has invalid or ambiguous requirement rows")
+    notes = []
+    gate_check.brief_notes(text, spec["path"], brief, notes)
+    if notes:
+        raise Refused("; ".join(notes))
+    return path
+
+
+def lock_brief(state):
+    current = state_path(state, "BRIEF.md")
+    raw = current.read_bytes()
+    text = raw.decode("utf-8-sig")
+    revision = gate_check.brief_revision(text)
+    rows, ambiguous, problem = gate_check.brief_table(text)
+    if not revision or not gate_check.brief_is_locked(text) or not rows or ambiguous or problem:
+        raise Refused("A LOCKED product brief needs a revision and unambiguous requirement rows")
+    digest = gate_check.order_hash(raw)
+    snapshot = state_path(state, "brief-history", f"r{revision}-{digest}.md")
+    log = state_path(state, "DIRECTOR_LOG.md")
+    with lock(state / ".dispatch.lock"):
+        locks = gate_check.brief_locks(log.read_text(encoding="utf-8-sig"))
+        if locks and revision <= locks[-1][0]:
+            if revision == locks[-1][0] and digest == locks[-1][1]:
+                return
+            raise Refused("A changed product brief needs a revision newer than the last approved revision")
+        save_snapshot(snapshot, raw, digest)
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write(f"\n{stamp()} | BRIEF_LOCKED rev={revision} sha={digest} "
+                         f"snapshot={snapshot.relative_to(state).as_posix()} | cdx\n")
+
+
+def save_snapshot(path, raw, digest):
+    if path.exists():
+        if gate_check.order_hash(path.read_bytes()) != digest:
+            raise Refused(f"A saved snapshot has changed: {path.name}")
+    else:
+        atomic_write(path, raw)
+
+
+def dispatched_copy(state, spec):
+    snapshot = state_path(state, "order-history", f"{spec['order_id']}-r{spec['revision']}-{spec['sha']}.md")
+    if not snapshot.exists():
+        return spec["path"]  # Orders dispatched by earlier releases may have no archived copy.
+    if gate_check.order_hash(snapshot.read_bytes()) != spec["sha"]:
+        raise Refused("The dispatched work order snapshot was modified")
+    return snapshot
 
 
 def locked_hash(repo, candidate, name):
@@ -166,14 +240,21 @@ def dispatch(repo, state, spec):
     spec_review(state, spec)
     log = state_path(state, "DIRECTOR_LOG.md")
     with lock(state / ".dispatch.lock"):
+        approved_brief(state, spec)
+        raw = spec["path"].read_bytes()
+        if gate_check.order_hash(raw) != spec["sha"]:
+            raise Refused("Work order changed while it was being checked")
         current = log.read_text(encoding="utf-8-sig")
         old = gate_check.dispatch_records(current).get(spec["order_id"])
-        if old == (str(spec["revision"]), spec["sha"]):
-            return
-        if old and spec["revision"] <= int(old[0]):
+        repeated = old == (str(spec["revision"]), spec["sha"])
+        if old and not repeated and spec["revision"] <= int(old[0]):
             raise Refused("A changed work order must increment REVISION before redispatch")
         if old is None:
             validate_checkout(repo, state, spec, fresh=True)
+        snapshot = state_path(state, "order-history", f"{spec['order_id']}-r{spec['revision']}-{spec['sha']}.md")
+        save_snapshot(snapshot, raw, spec["sha"])
+        if repeated:
+            return
         line = f"{stamp()} | DISPATCH {spec['order_id']} rev={spec['revision']} sha={spec['sha']} | cdx\n"
         with log.open("a", encoding="utf-8") as handle:
             handle.write(("\n" if current and not current.endswith("\n") else "") + line)
@@ -181,6 +262,8 @@ def dispatch(repo, state, spec):
 
 def review(repo, state, spec, candidate, rerun):
     log = dispatch_check(state, spec)
+    brief = approved_brief(state, spec)
+    brief_args = ["--brief", brief, "--order-history", state_path(state, "order-history")] if brief else []
     if not SHA.fullmatch(candidate) or validate_checkout(repo, state, spec) != candidate:
         raise Refused("Review requires the full candidate SHA checked out in the assigned worker worktree")
     if git(spec["checkout"], "status", "--porcelain", "--untracked-files=all"):
@@ -194,7 +277,7 @@ def review(repo, state, spec, candidate, rerun):
     report_data = report.read_bytes()
     run_tool("scope_check.py", "--order", spec["path"], "--repo", spec["checkout"], "--candidate", candidate)
     run_tool("gate_check.py", "--report", report, "--match", report, spec["path"], "--evidence-dir", folder,
-             "--dispatch-log", log, "--candidate", candidate)
+             "--dispatch-log", log, "--candidate", candidate, *brief_args)
     if not rerun:
         print("CDX_REVIEW candidate/record checks complete; AUTO reruns NOT_RUN")
         return
@@ -211,7 +294,7 @@ def review(repo, state, spec, candidate, rerun):
         record = state_path(folder, filename)
         response = run_tool("evidence_record.py", "verify", record, "--rerun", "--order", spec["path"],
                             "--dispatch-log", log, "--repo", spec["checkout"], "--candidate", candidate,
-                            "--timeout", 180, capture=True)
+                            "--timeout", 180, *brief_args, capture=True)
         verified = [line[len("LOG_LINE: "):] for line in response.splitlines()
                     if line.startswith(f"LOG_LINE: EVIDENCE_RERUN {spec['order_id']} {ac} ")]
         if len(verified) != 1 or f"candidate={candidate} result=ok " not in verified[0]:
@@ -223,6 +306,7 @@ def review(repo, state, spec, candidate, rerun):
     if logs:
         with lock(state / ".dispatch.lock"):
             dispatch_check(state, spec)
+            approved_brief(state, spec)
             existing = log.read_text(encoding="utf-8-sig").splitlines()
             additions = [line for line in logs if line not in existing]
             if additions:
@@ -233,6 +317,32 @@ def review(repo, state, spec, candidate, rerun):
                                       "report_sha256": gate_check.order_hash(report_data), "recorded": stamp(),
                                       "po": "PENDING_PO"}))
     print(f"CDX_REVIEW AUTO_RERUNS={len(logs)} receipt={receipt}; REVIEW and PO still separate")
+
+
+def final_review(repo, state, spec, candidate):
+    dispatch_check(state, spec)
+    approved_brief(state, spec)
+    if (not SHA.fullmatch(candidate) or validate_checkout(repo, state, spec) != candidate or
+            git(spec["checkout"], "status", "--porcelain", "--untracked-files=all")):
+        raise Refused("Final review needs the exact clean candidate checkout")
+    report = state_path(state, "work", spec["order_id"], "TASK_REPORT.md")
+    report_data = report.read_bytes()
+    receipt = read_json(state_path(state, "reviews", f"{spec['order_id']}-{candidate}.json"))
+    if (receipt.get("candidate") != candidate or receipt.get("order_sha256") != spec["sha"] or
+            receipt.get("report_sha256") != gate_check.order_hash(report_data)):
+        raise Refused("Independent review receipt is for a different order, report or candidate")
+    results = re.findall(r"^[ \t]*RESULT:[ \t]*(\S+)[ \t]*\r?$", report_data.decode("utf-8-sig"), re.M)
+    if results != ["PASS"]:
+        raise Refused("Final review needs a passing candidate report")
+    evidence = state_path(state, "evidence", "E2E", spec["order_id"], f"{candidate}.md")
+    raw = evidence.read_text(encoding="utf-8-sig")
+    for key, expected in (("CANDIDATE_HEAD", candidate), ("ORDER_SHA256", spec["sha"]),
+                          ("ENTRY_POINT", None), ("OBSERVED", None)):
+        matches = re.findall(rf"^{key}:[ \t]*(\S.*)$", raw, re.M)
+        if len(matches) != 1 or gate_check.blank(matches[0]) or (expected is not None and matches[0].strip() != expected):
+            raise Refused(f"E2E evidence needs the correct {key}")
+    run_tool("gate_check.py", "--final", state)
+    print(f"CDX_FINAL candidate={candidate} evidence={evidence}; PO acceptance is recorded separately")
 
 
 def plan_approval(state, spec, *, save=False):
@@ -260,11 +370,13 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default=".")
     commands = parser.add_subparsers(dest="command", required=True)
-    for command in ("prepare", "dispatch", "approve-spec", "approve-plan", "review"):
+    commands.add_parser("lock-brief", help="snapshot the product brief after the PO has approved it")
+    for command in ("prepare", "dispatch", "approve-spec", "approve-plan", "review", "final"):
         sub = commands.add_parser(command)
         sub.add_argument("order", help="filename inside DIRECTOR/orders")
-        if command == "review":
+        if command in ("review", "final"):
             sub.add_argument("--candidate", required=True)
+        if command == "review":
             sub.add_argument("--rerun", action="store_true", help="execute only the checks pinned in the order")
         elif command == "approve-spec":
             sub.add_argument("--reviewer", required=True)
@@ -283,11 +395,18 @@ def main(argv=None):
             return 0
         _, state, project = load_project(args.repo)
         repo = Path(project["repo"])
+        if args.command == "lock-brief":
+            lock_brief(state)
+            print("CDX_WORK BRIEF_LOCKED")
+            return 0
         spec = order_spec(state, args.order)
         if args.command == "review":
             review(repo, state, spec, args.candidate, args.rerun)
+        elif args.command == "final":
+            final_review(repo, state, spec, args.candidate)
         elif args.command == "approve-plan":
             dispatch_check(state, spec)
+            approved_brief(state, spec)
             if spec["revision"] == 1:
                 approval = state_path(state, "reviews", f"{spec['order_id']}-plan.json")
                 if not approval.exists():

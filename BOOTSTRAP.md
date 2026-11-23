@@ -32,12 +32,14 @@ python -I -B -X utf8 tools/cdxdw.py doctor --repo PROJECT --live --probe-sandbox
 
 審查已存在的非 cdxdw 狀態時，先決定遷移位置及保留路徑。安裝器會拒絕歸屬不同的狀態、已被本地改過的 managed Skill 或同版本 runtime。跨版本用新套件重跑 setup。舊 runtime 可做回查。
 
+`setup --no-hooks --apply` 可停用這個專案的 cdxdw Hooks 並移除主 checkout 中由 cdxdw 安裝的項目。若先前已準備指向 .1 或 .2 runtime 的工作樹，也要在 Codex 的 Hook 管理介面停用那些舊項目。
+
 ## 3. 初衷、待決和第一份回報
 
 1. 問 PO 要達到的成果及驗收方式，建立 [BRIEF.md](templates/BRIEF.md) 草稿。提出一版可用範圍、首批工作線、會改的路徑、模型和估計成本。
 2. 在 `PO_PENDING.md` 留下待決項 ID、題目、選項與建議。PO 可從聊天回答，總監逐字記下原文、卡版次和對應候選。
 3. 給一份回報，說明專案與狀態路徑、建置結果、Hook／沙箱／技能證據、和專案規則衝突的地方、待決項與下一步。靠本機探針得出的結論標清環境與版本。
-4. 確認初衷後鎖卡。使用 [WORK_ORDER](templates/WORK_ORDER.md) 記錄 `TRACES_TO`、完整 base SHA、worktree、驗收及範圍。依 [02](docs/02_work_orders_gates.md)、[13](docs/13_safety_gates.md) 檢查計畫與交件，確認 PO 授權後再啟動第一批。
+4. 初衷經 PO 核准後，把狀態改為 `LOCKED`，執行 `work --repo PROJECT lock-brief`。依工單引用的初衷條目填入 `BRIEF_FINGERPRINTS_V1`，再填完整 base SHA、worktree、驗收及範圍。依 [WORK_ORDER](templates/WORK_ORDER.md)、[02](docs/02_work_orders_gates.md)、[13](docs/13_safety_gates.md) 檢查計畫與交件。
 
 ## 4. 每次續航
 

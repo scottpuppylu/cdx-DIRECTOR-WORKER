@@ -4,76 +4,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
-import queue
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
-import time
 
 
-class AppServer:
-    def __init__(self, codex, cwd, env):
-        self.process = subprocess.Popen(
-            [codex, "app-server", "--listen", "stdio://"],
-            cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, text=True, encoding="utf-8",
-        )
-        self.messages = queue.Queue()
-        self.request_id = 0
-        threading.Thread(target=self.read_stdout, daemon=True).start()
-
-    def read_stdout(self):
-        try:
-            for line in self.process.stdout:
-                self.messages.put(json.loads(line))
-        except (UnicodeError, ValueError) as error:
-            self.messages.put(error)
-        finally:
-            self.messages.put(None)
-
-    def send(self, message):
-        self.process.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
-        self.process.stdin.flush()
-
-    def call(self, method, params):
-        self.request_id += 1
-        self.send({"id": self.request_id, "method": method, "params": params})
-        return self.wait_for(lambda message: message.get("id") == self.request_id, method)
-
-    def wait_for(self, matches, description):
-        deadline = time.monotonic() + 25
-        while True:
-            try:
-                message = self.messages.get(timeout=max(0, deadline - time.monotonic()))
-            except queue.Empty as error:
-                raise RuntimeError(f"Timed out waiting for {description}") from error
-            if message is None:
-                raise RuntimeError(f"App Server closed before {description}")
-            if isinstance(message, Exception):
-                raise RuntimeError(f"Invalid App Server response during {description}") from message
-            if matches(message):
-                return message
-
-    def result(self, method, params):
-        response = self.call(method, params)
-        if "error" in response:
-            raise RuntimeError(f"{method}: {response['error']}")
-        return response["result"]
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_):
-        self.process.stdin.close()
-        try:
-            self.process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            self.process.kill()
-            self.process.wait(timeout=5)
-        finally:
-            self.process.stdout.close()
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+from cdx_rpc import AppServer, RPCError
 
 
 def git(repo, *args):
@@ -108,14 +47,12 @@ def sandbox_check(server, worker, policy_type):
     marker = worker / (policy_type + ".txt")
     command = [sys.executable, "-I", "-c",
                "import pathlib, sys; pathlib.Path(sys.argv[1]).write_text('probe')", str(marker)]
-    response = server.call("command/exec", {
-        "command": command, "cwd": str(worker), "timeoutMs": 10000,
-        "sandboxPolicy": {"type": policy_type},
-    })
-    return {"exit": response.get("result", {}).get("exitCode"),
-            "marker_written": marker.is_file(),
-            "detail": (response.get("error", {}).get("message")
-                       or response.get("result", {}).get("stderr", "").strip().splitlines()[-1:])}
+    try:
+        response = server.call("command/exec", {"command": command, "cwd": str(worker),
+                               "timeoutMs": 10000, "sandboxPolicy": {"type": policy_type}})
+    except RPCError as error:
+        return {"rpc_code": error.code, "marker_written": marker.is_file()}
+    return {"exit": response["exitCode"], "marker_written": marker.is_file()}
 
 
 class FixtureProvider(BaseHTTPRequestHandler):
@@ -172,34 +109,39 @@ class FixtureProvider(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
-def event_check(server, thread_id):
-    result = server.result("turn/start", {"threadId": thread_id, "input": [
+def event_check(server, thread_id, events):
+    result = server.call("turn/start", {"threadId": thread_id, "input": [
         {"type": "text", "text": "Return the disposable fixture result."},
     ]})
     turn_id = result["turn"]["id"]
+    def completed(message):
+        params = message.get("params", {})
+        return (message.get("method") == "turn/completed" and params.get("threadId") == thread_id and
+                params.get("turn", {}).get("id") == turn_id)
+
+    if not any(completed(message) for message in events):
+        server.receive(completed, 25, "fixture turn events")
     summary = {}
-    while True:
-        event = server.wait_for(
-            lambda message: message.get("params", {}).get("threadId") == thread_id
-            and message.get("method") in ("item/completed", "thread/tokenUsage/updated", "turn/completed"),
-            "fixture turn events",
-        )
-        params = event["params"]
-        if event["method"] == "turn/completed":
-            if params["turn"]["id"] != turn_id:
-                raise RuntimeError("Unexpected fixture turn ID")
-            return dict(summary, status=params["turn"]["status"])
-        if params.get("turnId") != turn_id:
+    for event in events:
+        if completed(event):
+            summary["status"] = event["params"]["turn"]["status"]
+            continue
+        params = event.get("params", {})
+        if params.get("threadId") != thread_id or params.get("turnId") != turn_id:
             continue
         if event["method"] == "thread/tokenUsage/updated":
             totals = params["tokenUsage"]["last"]
             summary["usage"] = {name: totals.get(name) for name in
                                 ("inputTokens", "cachedInputTokens", "outputTokens", "totalTokens")}
-        elif params["item"]["type"] == "agentMessage":
-            summary["fixture_message"] = params["item"].get("text") == "DW_PROBE_OK"
-        elif params["item"]["type"] == "commandExecution":
+        elif event["method"] == "item/completed":
             item = params["item"]
-            summary["command_execution"] = {"status": item.get("status"), "exit": item.get("exitCode")}
+            if item["type"] == "agentMessage":
+                summary["fixture_message"] = item.get("text") == "DW_PROBE_OK"
+            elif item["type"] == "commandExecution":
+                summary["command_execution"] = {"status": item.get("status"), "exit": item.get("exitCode")}
+    if summary.get("status") != "completed" or not summary.get("fixture_message"):
+        raise RuntimeError("Loopback fixture did not finish successfully")
+    return summary
 
 
 def probe(codex, root, port):
@@ -218,11 +160,11 @@ def probe(codex, root, port):
     # Give this subprocess its own Codex configuration and thread store.
     env = dict(os.environ, CODEX_HOME=str(codex_data))
     env["NO_PROXY"] = ",".join(filter(None, [env.get("NO_PROXY"), "127.0.0.1"]))
-    with AppServer(codex, repo, env) as server:
-        initialize(server)
-        skills = server.result("skills/list", {"cwds": [str(repo), str(worker)], "forceReload": True})
-        hooks = server.result("hooks/list", {"cwds": [str(repo), str(worker)]})
-        thread = server.result("thread/start", {"cwd": str(worker), "ephemeral": False,
+    observed = []
+    with AppServer(codex, repo, observed.append, env=env) as server:
+        skills = server.call("skills/list", {"cwds": [str(repo), str(worker)], "forceReload": True})
+        hooks = server.call("hooks/list", {"cwds": [str(repo), str(worker)]})
+        thread = server.call("thread/start", {"cwd": str(worker), "ephemeral": False,
                                                 "sandbox": "read-only", "approvalPolicy": "never"})
         worker_thread_id = thread["thread"]["id"]
         summary = {
@@ -235,27 +177,23 @@ def probe(codex, root, port):
             "thread_cwd_is_worker": Path(thread["thread"]["cwd"]).resolve() == worker.resolve(),
             "worker_agents_loaded": any(Path(path).resolve() == (worker / "AGENTS.md").resolve()
                                         for path in thread.get("instructionSources", [])),
-            "windows_sandbox_readiness": (server.result("windowsSandbox/readiness", {})
+            "windows_sandbox_readiness": (server.call("windowsSandbox/readiness", {})
                                            if os.name == "nt" else None),
             "sandbox": {mode: sandbox_check(server, worker, mode)
                         for mode in ("readOnly", "workspaceWrite")},
-            "loopback_turn": event_check(server, worker_thread_id),
+            "loopback_turn": event_check(server, worker_thread_id, observed),
         }
-    with AppServer(codex, repo, env) as server:
-        initialize(server)
-        resumed = server.result("thread/resume", {"threadId": worker_thread_id, "excludeTurns": True})
-        history = server.result("thread/turns/list", {"threadId": worker_thread_id, "limit": 1})
+    with AppServer(codex, repo, env=env) as server:
+        read = server.call("thread/read", {"threadId": worker_thread_id, "includeTurns": False})
+        history = server.call("thread/turns/list", {"threadId": worker_thread_id, "limit": 1, "itemsView": "full"})
+        resumed = server.call("thread/resume", {"threadId": worker_thread_id, "excludeTurns": True})
         summary["resume_from_new_server"] = {
+            "read_only_lookup": read["thread"]["id"] == worker_thread_id,
             "same_thread": resumed["thread"]["id"] == worker_thread_id,
             "same_worktree": Path(resumed["thread"]["cwd"]).resolve() == worker.resolve(),
             "latest_turn_status": history["data"][0]["status"] if history["data"] else None,
         }
     return summary
-
-
-def initialize(server):
-    server.result("initialize", {"clientInfo": {"name": "director_work_probe", "version": "0.1.0"}})
-    server.send({"method": "initialized"})
 
 
 def main():

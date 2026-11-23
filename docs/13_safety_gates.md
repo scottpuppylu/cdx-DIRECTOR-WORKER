@@ -8,6 +8,7 @@
 | 規劃 | 核准的 PLAN、工單 SHA、Git base | `cdxdw work approve-plan` 記錄檔案和工單指紋，App Server 施工前核對 |
 | 施工 | 具名 worktree、短斷點、隔離沙箱、選用 Hook | `cdxdw doctor`、工單與工作線對帳、`scope_check` |
 | 交件 | 完整候選 SHA、worker 報告、可重跑證據、總監裁決 | `cdxdw work review --candidate … --rerun`、`gate_check --verdict` |
+| 最終驗收 | 工單 SHA、候選 SHA、實際公開入口與觀察結果 | `cdxdw work final --candidate …` 核對該候選的讀取與重跑證據 |
 
 ## 先鎖驗收條件
 

@@ -14,8 +14,11 @@ from cdx_audit import append_app
 from cdx_common import (SHA, THREAD_ID, Refused, atomic_write, git, json_bytes, load_project, lock, read_json,
                         report_error, state_path)
 from cdx_doctor import certified, sandbox_probe
-from cdx_rpc import AppServer
-from cdx_work import dispatch_check, order_spec, plan_approval, validate_checkout
+from cdx_rpc import AppServer, RPCError, RPCTimeout
+from cdx_work import approved_brief, dispatch_check, dispatched_copy, order_spec, plan_approval, validate_checkout
+
+
+TERMINAL = ("completed", "interrupted", "failed")
 
 
 def latest(server, thread_id, *, full=False):
@@ -24,11 +27,14 @@ def latest(server, thread_id, *, full=False):
     return next(iter(result["data"]), {})
 
 
-def resume(server, record, spec):
-    result = server.call("thread/resume", {"threadId": record["thread"], "excludeTurns": True})
+def thread_info(server, record, *, load=False):
+    method = "thread/resume" if load else "thread/read"
+    options = {"excludeTurns": True} if load else {"includeTurns": False}
+    result = server.call(method, dict(options, threadId=record["thread"]))
     thread = result["thread"]
-    if thread.get("id") != record["thread"] or Path(thread["cwd"]).resolve() != spec["checkout"]:
+    if thread.get("id") != record["thread"] or Path(thread["cwd"]).resolve() != Path(record["worktree"]):
         raise Refused("App Server resumed a different thread or checkout")
+    return thread
 
 
 def validate_record(record, spec, role):
@@ -78,8 +84,9 @@ def run_turn(server, state, spec, record, session_file, phase, timeout, observe)
     if record["state"] in ("starting", "running"):
         raise Refused("Previous turn may still be active. Run session reconcile first.")
     plan_file = plan_approval(state, spec) if phase == "implement" else None
-    if phase == "review" and git(spec["checkout"], "rev-parse", "HEAD") != record["candidate"]:
-        raise Refused("Reviewer candidate moved since thread registration")
+    if phase == "review" and (git(spec["checkout"], "rev-parse", "HEAD") != record["candidate"] or
+                              git(spec["checkout"], "status", "--porcelain", "--untracked-files=all")):
+        raise Refused("Reviewer requires the same clean candidate as thread registration")
     windows_preflight(server)
     if not certified(sandbox_probe(server, state), phase):
         raise Refused("This Codex executor did not prove the requested filesystem boundary")
@@ -87,10 +94,19 @@ def run_turn(server, state, spec, record, session_file, phase, timeout, observe)
     if fresh:
         create_thread(server, state, spec, record)
     else:
-        resume(server, record, spec)
-    previous = None if fresh else latest(server, record["thread"]).get("id")
+        thread = thread_info(server, record, load=True)
+        if thread.get("status", {}).get("type") == "active":
+            raise Refused("This thread already has an active turn")
+    last = {} if fresh else latest(server, record["thread"])
+    if last and (last.get("id") != record.get("turn") or last.get("status") not in TERMINAL):
+        raise Refused("Latest turn is unmanaged or unfinished; inspect the saved binding before starting another")
+    dispatch_check(state, spec)
+    approved_brief(state, spec)
+    if plan_file:
+        plan_approval(state, spec)
+    previous = last.get("id")
     attempt = str(uuid.uuid4())
-    prompt = phase_request(spec, record, phase, attempt, plan_file)
+    prompt = phase_request(dict(spec, path=dispatched_copy(state, spec)), record, phase, attempt, plan_file)
     policy = {"type": "readOnly", "networkAccess": False}
     if phase == "implement":
         policy = {"type": "workspaceWrite", "writableRoots": [str(spec["work"])], "networkAccess": False,
@@ -103,9 +119,21 @@ def run_turn(server, state, spec, record, session_file, phase, timeout, observe)
     turn_id = response["turn"]["id"]
     record.update(state="running", turn=turn_id)
     atomic_write(session_file, json_bytes(record))
-    if turn_id not in observe["completed"]:
-        server.receive(lambda _: turn_id in observe["completed"], timeout, "turn completion")
-    record["state"] = observe["completed"][turn_id]
+    completed = lambda _: turn_id in observe["completed"]
+    try:
+        if not completed(None):
+            server.receive(completed, timeout, "turn completion")
+    except (RPCTimeout, KeyboardInterrupt):
+        try:
+            server.call("turn/interrupt", {"threadId": record["thread"], "turnId": turn_id}, timeout=8)
+            if not completed(None):
+                server.receive(completed, 8, "turn interruption")
+        except RuntimeError as error:
+            raise Refused("Interruption could not be confirmed; the journal still requires reconciliation") from error
+    status = observe["completed"][turn_id]
+    if status not in TERMINAL:
+        raise Refused("App Server did not report a recognized terminal turn status")
+    record["state"] = status
     atomic_write(session_file, json_bytes(record))
     for message in observe["text"].get(turn_id, []):
         print(message)
@@ -115,23 +143,56 @@ def run_turn(server, state, spec, record, session_file, phase, timeout, observe)
 def reconcile(server, record, session_file, reset_empty):
     if record["state"] not in ("starting", "running"):
         return
-    last = latest(server, record["thread"], full=True)
-    turn_id = last.get("id")
-    if not turn_id or turn_id == record.get("prior_turn"):
-        if reset_empty and not record.get("turn"):
-            record["state"] = "ready"
-            atomic_write(session_file, json_bytes(record))
-        return
     marker = f"CDX_ATTEMPT: {record['attempt']}\n"
-    attached = any(element.get("text", "").startswith(marker)
-                   for item in last.get("items", []) if item.get("type") == "userMessage"
-                   for element in item.get("content", []) if element.get("type") == "text")
-    if turn_id != record.get("turn") and not (record.get("turn") is None and attached):
-        raise Refused("Latest App Server turn does not match the cdx launch record")
-    status = last.get("status")
-    if status in ("completed", "interrupted", "failed"):
-        record.update(state=status, turn=turn_id)
+    params = {"threadId": record["thread"], "limit": 10, "itemsView": "summary" if record.get("turn") else "full"}
+    count = 0
+    seen = set()
+    reached_prior = False
+    for _ in range(5):
+        page = server.call("thread/turns/list", params)
+        for turn in page["data"]:
+            turn_id = turn.get("id")
+            if not turn_id or turn_id in seen:
+                continue
+            if turn_id == record.get("prior_turn"):
+                reached_prior = True
+                break
+            seen.add(turn_id)
+            count += 1
+            attached = any(element.get("text", "").startswith(marker)
+                           for item in turn.get("items", []) if item.get("type") == "userMessage"
+                           for element in item.get("content", []) if element.get("type") == "text")
+            if turn_id == record.get("turn") or (not record.get("turn") and attached):
+                status = turn.get("status")
+                if status in TERMINAL:
+                    record.update(state=status, turn=turn_id)
+                    atomic_write(session_file, json_bytes(record))
+                return
+        cursor = page.get("nextCursor")
+        if reached_prior or not cursor:
+            break
+        params["cursor"] = cursor
+    else:
+        raise Refused("Recovery did not reach the recorded attempt within 50 history entries")
+    if count or record.get("turn") or (record.get("prior_turn") and not reached_prior):
+        raise Refused("No App Server turn matches the saved launch record")
+    if reset_empty:
+        record["state"] = "ready"
         atomic_write(session_file, json_bytes(record))
+
+
+def reconcile_saved(server, record, session_file, reset_empty):
+    try:
+        thread_info(server, record)
+    except RPCError as error:
+        # New Codex threads need a first turn before a rollout is persisted. Never recycle an acknowledged turn.
+        if not (reset_empty and error.missing_rollout and record.get("state") == "starting"
+                and not record.get("turn") and not record.get("prior_turn")):
+            raise
+        record.update(state="ready", thread=None)
+        atomic_write(session_file, json_bytes(record))
+        return
+    reconcile(server, record, session_file, reset_empty)
 
 
 def event_observer(path, record, observed):
@@ -171,7 +232,7 @@ def main(argv=None):
             entry.add_argument("--reset-empty", action="store_true")
     args = parser.parse_args(argv)
     try:
-        _, state, project = load_project(args.repo)
+        active_checkout, state, project = load_project(args.repo)
         repo = Path(project["repo"])
         if args.command == "register-director":
             if not THREAD_ID.fullmatch(args.thread):
@@ -180,18 +241,25 @@ def main(argv=None):
             with lock(path.with_suffix(".lock")):
                 if path.exists() and read_json(path).get("role") != "director":
                     raise Refused("That thread is already bound to a different role")
-                atomic_write(path, json_bytes({"role": "director", "thread": args.thread}))
+                atomic_write(path, json_bytes({"role": "director", "thread": args.thread,
+                                               "worktree": str(active_checkout)}))
             print(f"CDX_SESSION DIRECTOR {args.thread}")
             return 0
         spec = order_spec(state, args.order)
         dispatch_check(state, spec)
-        head = validate_checkout(repo, state, spec)
+        head = validate_checkout(repo, state, spec) if args.command in ("new", "run") else None
         if args.command == "new" and args.role == "reviewer" and (
                 not SHA.fullmatch(args.candidate or "") or args.candidate != head or
                 git(spec["checkout"], "status", "--porcelain", "--untracked-files=all")):
             raise Refused("Review requires the exact full candidate SHA and a clean checkout")
+        if args.command in ("new", "run"):
+            approved_brief(state, spec)
         session_file = state_path(state, "sessions", f"{spec['order_id']}-{args.role}.json")
         audit = state_path(state, "audit", f"{spec['order_id']}-{args.role}.jsonl")
+        if args.command == "status" and not args.live:
+            record = read_json(session_file)
+            print(json.dumps(record, ensure_ascii=False, indent=2))
+            return 0
         with lock(session_file.with_suffix(".lock")):
             if args.command == "new":
                 if session_file.exists():
@@ -223,11 +291,11 @@ def main(argv=None):
                 else:
                     if not record.get("thread"):
                         raise Refused("No turn has been launched for this binding")
-                    resume(server, record, spec)
                     if args.command == "status":
+                        thread_info(server, record)
                         record = dict(record, latest_turn=latest(server, record["thread"]).get("status"))
                     else:
-                        reconcile(server, record, session_file, args.reset_empty)
+                        reconcile_saved(server, record, session_file, args.reset_empty)
             print(json.dumps(record, ensure_ascii=False, indent=2))
             return 1 if args.command == "run" and record["state"] != "completed" else 0
     except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError) as error:

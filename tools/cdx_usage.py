@@ -6,17 +6,13 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import audit_log
+from cdx_audit import verified_entries
 from cdx_common import report_error
 
 
 def summarize_app(path):
-    entries, problem = audit_log.load(path)
-    problem = problem or audit_log.chain_problem(entries)
-    if problem:
-        raise RuntimeError(problem)
     threads = {}
-    for _, item in entries:
+    for item in verified_entries(path):
         if item.get("kind") != "usage":
             continue
         key = item["session_id"]
@@ -62,7 +58,7 @@ def main(argv=None):
         summarize = summarize_app if args.format == "app-server" else summarize_cli
         print(json.dumps(summarize(args.file), ensure_ascii=False, indent=2))
         return 0
-    except (OSError, ValueError, RuntimeError, KeyError, audit_log.CannotRun) as error:
+    except (OSError, ValueError, RuntimeError, KeyError) as error:
         return report_error(error)
 
 

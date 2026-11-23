@@ -1,6 +1,6 @@
 # cdx-DIRECTOR-WORKER
 
-這是 **cdx-DIRECTOR-WORKER**（簡稱 **cdxdw**，版本 `2.6.0-cdx.2`）。讓 Codex 當專案總監，把你的需求拆成工單，讓每條施工線在獨立 Git worktree 工作，最後由總監針對交件 commit 重跑驗收。關掉對話或重啟程式後，可以用工單、thread ID 和續航檔接回進度。
+這是 **cdx-DIRECTOR-WORKER**（簡稱 **cdxdw**，版本 `2.6.0-cdx.3`）。讓 Codex 當專案總監，把你的需求拆成工單，讓每條施工線在獨立 Git worktree 工作，最後由總監針對交件 commit 重跑驗收。關掉對話或重啟程式後，可以用工單、thread ID 和續航檔接回進度。
 
 cdxdw 是 [DIRECTOR-WORK v2.6.0](https://github.com/scottpuppylu/DIRECTOR-WORK/tree/v2.6.0) 的獨立 Codex 移植。它與 [dshdw](https://github.com/scottpuppylu/dsh-DIRECTOR-WORKER)、[agydw](https://github.com/scottpuppylu/agy-DIRECTOR-WORKER) 共用工單、閘門和證據格式，各自使用平台的原生能力。平台工具和版本後綴用 `cdx`。用 Git、Python 和 Codex 就能開始。
 
@@ -67,6 +67,12 @@ Worker 交出 `TASK_REPORT.md`、報告中的候選 commit 及 `work/WO-001/evid
 
 ```powershell
 python -I -B -X utf8 tools/cdxdw.py work --repo PROJECT review WO-001-export.md --candidate FULL_COMMIT_SHA --rerun
+```
+
+總監再走一次產品的公開入口，將實際結果記到該候選的 [E2E 紀錄](tools/CDX-TOOLS.md#初衷與最終驗收)，然後核對收據與候選。
+
+```powershell
+python -I -B -X utf8 tools/cdxdw.py work --repo PROJECT final WO-001-export.md --candidate FULL_COMMIT_SHA
 ```
 
 `REVIEW` 條件由獨立審查與成品檢查處理。`PO` 條件由你確認後記入裁決。測試、審查和 PO 驗收各有自己的證據。

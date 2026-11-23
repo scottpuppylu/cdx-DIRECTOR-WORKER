@@ -7,9 +7,10 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import re
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from cdx_common import (POINTER, ROOT, Refused, atomic_write, checkout, common_dir, git, json_bytes,
+from cdx_common import (POINTER, ROOT, VERSION, Refused, atomic_write, checkout, common_dir, json_bytes,
                         lock, primary_checkout, read_json, report_error, stamp, state_path, within)
 
 
@@ -44,62 +45,98 @@ def initial_files(state, repo, mode):
     }
 
 
-def config_with_hooks(path, kit):
-    data = read_json(path) if path.exists() else {"hooks": {}}
-    events = data.setdefault("hooks", {})
-    if not isinstance(events, dict):
-        raise Refused("Existing .codex/hooks.json has no hooks object")
+def hook_commands(kit):
     entry = str(kit / "tools" / "cdx_hook.py")
     if os.name == "nt" and any(char in entry for char in '"%$`!\r\n'):
         raise Refused("The Windows hook path contains shell metacharacters. Choose another state path.")
-    command = shlex.join(["python3", "-I", "-B", "-X", "utf8", entry])
+    if os.name == "nt":
+        command = f'python -I -B -X utf8 "{entry}"'
+        return {"command": command, "commandWindows": command}
+    return {"command": shlex.join(["python3", "-I", "-B", "-X", "utf8", entry])}
+
+
+def config_with_hooks(path, kit, enabled=True):
+    raw = path.read_bytes() if path.exists() else None
+    data = read_json(path) if raw is not None else {"hooks": {}}
+    if not enabled and raw is not None and "hooks" not in data:
+        return raw
+    before = json_bytes(data)
+    events = data.setdefault("hooks", {})
+    if not isinstance(events, dict):
+        raise Refused("Existing .codex/hooks.json has no hooks object")
+    commands = hook_commands(kit)
+    known = [commands]
+    if kit.parent.is_dir():
+        known.extend(hook_commands(state_path(kit.parent, path.name)) for path in kit.parent.iterdir()
+                     if VERSION.fullmatch(path.name) and path.is_dir() and not path.is_symlink())
     for event, matcher in {"SessionStart": "^(startup|resume|compact)$", "PreToolUse": ".*",
                            "PostToolUse": ".*"}.items():
         label = f"cdx DIRECTOR-WORK {event}"
-        item = {"type": "command", "command": command, "timeout": 8, "statusMessage": label}
-        if os.name == "nt":
-            item["commandWindows"] = f'python -I -B -X utf8 "{entry}"'
-            item["command"] = item["commandWindows"]
-        groups = events.setdefault(event, [])
+        item = {"type": "command", "timeout": 8, "statusMessage": label, **commands}
+        groups = events.get(event, [])
         if not isinstance(groups, list):
             raise Refused(f"Existing Hook groups are invalid: {event}")
+        owned = []
         for group in groups:
             if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
                 raise Refused(f"Existing Hook handlers are invalid: {event}")
-        generated = {"matcher": matcher, "hooks": [item]}
-        owned = [i for i, group in enumerate(groups) if len(group["hooks"]) == 1
-                 and isinstance(group["hooks"][0], dict) and group["hooks"][0].get("statusMessage") == label]
+            owned.extend((group, handler) for handler in group["hooks"]
+                         if isinstance(handler, dict) and handler.get("statusMessage") == label)
         if len(owned) > 1:
             raise Refused(f"There are multiple cdx Hook groups: {event}")
         if owned:
-            groups[owned[0]] = generated
-        else:
-            groups.append(generated)
-    return json_bytes(data)
+            group, handler = owned[0]
+            actual = {key: handler[key] for key in ("command", "commandWindows") if key in handler}
+            if handler.get("type") != "command" or actual not in known:
+                raise Refused(f"Existing cdx Hook command is locally modified: {path} ({event})")
+            if enabled:
+                handler.update(commands)
+            else:
+                group["hooks"].remove(handler)
+                if not group["hooks"]:
+                    groups.remove(group)
+        elif enabled:
+            events.setdefault(event, []).append({"matcher": matcher, "hooks": [item]})
+    updated = json_bytes(data)
+    return raw if raw is not None and before == updated else updated
 
 
-def plan(args):
+def destination(args):
     repo = checkout(args.repo)
     common = common_dir(repo)
     if primary_checkout(repo) != repo:
         raise Refused("Run setup from the main checkout; linked worktrees share its configuration")
-    pointer = common / POINTER
+    pointer = state_path(common, POINTER)
     registered = read_json(pointer) if pointer.exists() else None
     previous = Path(registered["state"]).resolve() if registered else None
     state = Path(args.state).resolve() if args.state else previous or repo.with_name(f"DIRECTOR-{repo.name}")
     if previous and previous != state:
         raise Refused(f"Project already uses {previous}; preserve it before changing its location")
-    if within(state, repo) or within(repo, state) or within(state, common):
+    if within(state, repo) or within(repo, state) or within(state, common) or within(common, state):
         raise Refused("State and the project checkout must be separate directories")
+    return repo, common, pointer, state
+
+
+def version_key(version):
+    if not VERSION.fullmatch(version):
+        raise Refused("Invalid cdxdw runtime version")
+    return tuple(map(int, re.findall(r"[0-9]+", version)))
+
+
+def plan(args, target=None):
+    repo, common, pointer, state = target or destination(args)
     owner = state_path(state, "PROJECT.json")
     existing = read_json(owner) if owner.exists() else None
     if (state.exists() and not existing and any(state.iterdir())) or (
-            existing and (existing.get("schema") != 1 or Path(existing["git_common_dir"]).resolve() != common)):
+            existing and (existing.get("schema") != 1 or Path(existing["git_common_dir"]) != common
+                          or Path(existing["repo"]) != repo)):
         raise Refused(f"State belongs to another workflow or project: {state}")
 
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    if existing and version_key(version) < version_key(existing["version"]):
+        raise Refused(f"Installed runtime {existing['version']} is newer than this kit")
     kit = state_path(state, "runtime", version)
-    use_hooks = args.hooks or bool(existing and existing.get("hooks"))
+    use_hooks = args.hooks if args.hooks is not None else bool(existing and existing.get("hooks"))
     mode = (existing or {}).get("mode", args.mode)
     manifest = dict((existing or {}).get("managed_skills", {}))
     files = []
@@ -129,9 +166,11 @@ def plan(args):
         if BEGIN not in current:
             section = (ROOT / "templates" / "AGENTS_PROJECT_SECTION.md").read_bytes()
             files.append((target, current + (b"\n\n" if current else b"") + section))
-    if use_hooks:
+    if use_hooks or args.hooks is False:
         target = state_path(repo, ".codex", "hooks.json")
-        files.append((target, config_with_hooks(target, kit)))
+        if use_hooks or target.is_file():
+            files.append((target, config_with_hooks(target, kit, enabled=use_hooks)))
+    if use_hooks:
         # Generated commands point to this machine's runtime. Keep new Hook configs local to Git.
         exclude = state_path(common, "info", "exclude")
         rules = exclude.read_bytes() if exclude.exists() else b""
@@ -158,7 +197,10 @@ def main(argv=None):
     parser.add_argument("--repo", default=".")
     parser.add_argument("--state", help="existing or new cdx state path, outside the checkout")
     parser.add_argument("--mode", choices=("general", "beginner"), default="general")
-    parser.add_argument("--hooks", action="store_true", help="configure project hooks for user review and trust")
+    hooks = parser.add_mutually_exclusive_group()
+    hooks.add_argument("--hooks", dest="hooks", action="store_true", default=None,
+                       help="configure project hooks for user review and trust")
+    hooks.add_argument("--no-hooks", dest="hooks", action="store_false", help="remove only managed hooks at this checkout")
     parser.add_argument("--agents", action="store_true", help="add the managed section to project AGENTS.md")
     parser.add_argument("--apply", action="store_true", help="create files; default is a dry run")
     args = parser.parse_args(argv)
@@ -169,19 +211,25 @@ def main(argv=None):
             return 0
         common = common_dir(checkout(args.repo))
         with lock(common / "cdx-setup.lock"):
-            state, owner, pointer, meta, files = plan(args)
-            # Reserve the state for this project before writing the kit. Interrupted installs are retryable.
-            if not owner.exists():
-                atomic_write(owner, json_bytes(meta))
-            for folder in FOLDERS:
-                state_path(state, folder).mkdir(parents=True, exist_ok=True)
-            changed = 0
-            for path, data in files:
-                if not path.exists() or path.read_bytes() != data:
-                    atomic_write(path, data)
-                    changed += 1
-            atomic_write(owner, json_bytes(meta))
-            atomic_write(pointer, json_bytes({"schema": 1, "state": str(state)}))
+            target = destination(args)
+            state = target[3]
+            state.parent.mkdir(parents=True, exist_ok=True)
+            identity = hashlib.sha256(os.path.normcase(str(state)).encode("utf-8")).hexdigest()[:24]
+            with lock(state.parent / f".cdx-install-{identity}.lock"):
+                state, owner, pointer, meta, files = plan(args, target)
+                # Reserve the state before the first scaffold write, even when another repo uses --state.
+                if not owner.exists():
+                    atomic_write(owner, json_bytes(meta))
+                for folder in FOLDERS:
+                    state_path(state, folder).mkdir(parents=True, exist_ok=True)
+                changed = 0
+                for path, data in files:
+                    if not path.exists() or path.read_bytes() != data:
+                        atomic_write(path, data)
+                        changed += 1
+                for path, data in ((owner, json_bytes(meta)), (pointer, json_bytes({"schema": 1, "state": str(state)}))):
+                    if not path.exists() or path.read_bytes() != data:
+                        atomic_write(path, data)
         print(f"CDX_SETUP COMPLETE state={state} version={meta['version']} changed={changed} hooks={meta['hooks']}")
         return 0
     except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError) as error:

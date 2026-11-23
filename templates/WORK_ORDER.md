@@ -20,7 +20,7 @@ HEAVY_RESOURCE = <無 | 需先 TEST REQUEST：類型、預估分鐘>
 WORKER_LIMIT   = <80 輪或 context 60%，先到先停（預設，可改）>   # 到上限就停：寫 HANDOFF.md、回報 lead，lead 開新的 worker 接續（docs/02，2.2.5）
 ```
 
-兩個 `BRIEF_` 欄位是選用的：寫了以後，工單依據的初衷卡列被改掉時，`gate_check.py --order / --match --brief BRIEF.md` 印 `~ BRIEF_STALE`（舊條件驗過，新條件待重驗）；只是提示，不改結果。不寫照樣通過。
+追溯到 `B-*` 的工單，先用 `cdxdw work lock-brief` 保留 PO 核准的初衷，再填入兩個 `BRIEF_` 欄位。將此工單所引用的條目填進指紋物件。初衷條目變更時，cdxdw 要求重新確認並派工。若工單只追溯決策或沒有初衷條目，請刪除這兩個範本佔位欄位。
 
 ## A. 背景
 需求、已知事實（附證據等級）、限制。只寫 worker 需要知道的。
@@ -91,7 +91,7 @@ CHECKS:
 
 結果不寫在這裡，寫在 TASK REPORT 的 ACCEPTANCE 表。成品類交件另附常識閘門表（docs/07）。
 
-Standard 與 Strict 需鎖定驗收測試。用 `cdx work lock-tests --base <SHA> <paths>` 產生指紋，規格審查後才派工。確定沒有可鎖的測試時，填 `- NONE` 並附原因。
+Standard 與 Strict 需鎖定驗收測試。用 `cdxdw work lock-tests --base <SHA> <paths>` 產生指紋，規格審查後才派工。確定沒有可鎖的測試時，填 `- NONE` 並附原因。
 
 ```text
 TESTS_LOCKED:

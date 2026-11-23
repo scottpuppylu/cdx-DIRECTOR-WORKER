@@ -85,11 +85,15 @@ def handle(call):
         return {}
     cwd = Path(call["cwd"]).resolve()
     try:
-        _, state, _ = load_project(cwd)
+        worktree, state, project = load_project(cwd)
     except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError):
+        return {}
+    if not project.get("hooks"):
         return {}
     entry = state_path(state, "sessions", session + ".json")
     role = read_json(entry) if entry.is_file() else {}
+    if role and Path(role.get("worktree") or project["repo"]) != worktree:
+        return deny("cdx: session is registered to a different checkout") if event == "PreToolUse" else {}
     if event == "SessionStart":
         if role.get("role") in ("worker", "reviewer"):
             if role.get("role") == "reviewer":
