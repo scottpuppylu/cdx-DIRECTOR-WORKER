@@ -1,4 +1,4 @@
-name: cdx verification
+name: cdxdw verification
 
 on:
   push:

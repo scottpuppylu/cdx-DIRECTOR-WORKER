@@ -1,6 +1,6 @@
 # 10 教訓
 
-> 上游歷史教訓照錄。Claude 相關案例是發生當時的環境，cdx 實作與驗證見 [Codex 操作](11_codex_operations.md)。
+> 上游歷史教訓照錄。Claude 相關案例是發生當時的環境，cdxdw 實作與驗證見 [Codex 操作](11_codex_operations.md)。
 
 原專案幾週實戰中，每一條都真的發生過。寫新規則前先看這裡，避免重犯。
 

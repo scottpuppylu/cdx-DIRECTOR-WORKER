@@ -2,9 +2,9 @@
 
 ## 看得到的數字
 
-`cdx usage <audit.jsonl>` 讀 App Server 的 tokenUsage，依 thread 保留最新累計、最近一次輸入峰值、可用時的上下文視窗。輸入 token 已包含快取的輸入部分。按會話累計取最新紀錄，避免把每個累計通知重複相加。缺少欄位時保留未知。
+`cdxdw usage <audit.jsonl>` 讀 App Server 的 tokenUsage，依 thread 保留最新累計、最近一次輸入峰值、可用時的上下文視窗。輸入 token 已包含快取的輸入部分。按會話累計取最新紀錄，避免把每個累計通知重複相加。缺少欄位時保留未知。
 
-`codex exec --json` 可輸出單次執行的 JSONL。用 `cdx usage <file> --format exec` 累計完成回合。這些數據用於任務診斷。方案配額、帳單和部分失敗請求的用量以官方介面為準。 [非互動模式](https://learn.chatgpt.com/docs/non-interactive-mode)
+`codex exec --json` 可輸出單次執行的 JSONL。用 `cdxdw usage <file> --format exec` 累計完成回合。這些數據用於任務診斷。方案配額、帳單和部分失敗請求的用量以官方介面為準。 [非互動模式](https://learn.chatgpt.com/docs/non-interactive-mode)
 
 ## 決定上下文與工作線大小
 

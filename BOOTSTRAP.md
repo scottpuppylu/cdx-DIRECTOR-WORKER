@@ -1,4 +1,4 @@
-# BOOTSTRAP — cdx 總監的第一輪
+# BOOTSTRAP — cdxdw 總監的第一輪
 
 先讀 [PURPOSE](PURPOSE.md) 與這頁。確認專案與使用者的既有規則、資料路徑及授權。工具的 dry run 會顯示要使用的狀態位置。每輪開始先收集本機待決帳和未處理的聊天回答。
 
@@ -8,14 +8,14 @@
 
 檢查 `git status --short --branch`、主 checkout、`git worktree list`、Git/Python 和 `codex --version`。確認哪些未提交修改是現有工作。專案外的目錄受 Codex 沙箱限制時，用該專案已授權的路徑，或請 PO 決定狀態位置。
 
-## 1. 建置 cdx
+## 1. 建置 cdxdw
 
-從 cdx checkout 執行。先跑 plan，檢查專案歸屬與路徑，再加 `--apply`。
+從 cdxdw checkout 執行。先跑 plan，檢查專案歸屬與路徑，再加 `--apply`。
 
 ```powershell
-python -I -B -X utf8 tools/cdx.py setup --repo PROJECT --mode general
-python -I -B -X utf8 tools/cdx.py setup --repo PROJECT --mode general --agents --apply
-python -I -B -X utf8 tools/cdx.py doctor --repo PROJECT --live --probe-sandbox
+python -I -B -X utf8 tools/cdxdw.py setup --repo PROJECT --mode general
+python -I -B -X utf8 tools/cdxdw.py setup --repo PROJECT --mode general --agents --apply
+python -I -B -X utf8 tools/cdxdw.py doctor --repo PROJECT --live --probe-sandbox
 ```
 
 `--state` 指定現有或新狀態目錄，預設 `PROJECT` 旁的 `DIRECTOR-<repo>`。`--agents` 追加簡短 `AGENTS.md` 段落。`--hooks` 合併 `.codex/hooks.json`。有 Hook 時，PO 可以在 Codex 內審查並信任它，狀態以 `doctor` 顯示為準。`.agents/skills/` 由安裝器部署。由 Codex Desktop 讀取時，可以開新對話重新載入。若同時選本機 plugin 和 project skills，會出現同名項目，專案安裝只需一種入口。
@@ -30,7 +30,7 @@ python -I -B -X utf8 tools/cdx.py doctor --repo PROJECT --live --probe-sandbox
 | 派工與證據 | `ACTIVE_WORKSTREAMS.md`、`orders/`、`work/`、`reviews/`、`evidence/`、`sessions/`、`audit/` |
 | 安裝 runtime | `runtime/<VERSION>/` 保存可運行的 tools、範本、Skill 與手冊 |
 
-審查已存在的非 cdx 狀態時，先決定遷移位置及保留路徑。安裝器會拒絕歸屬不同的狀態、已被本地改過的 managed Skill 或同版本 runtime。跨版本用新套件重跑 setup。舊 runtime 可做回查。
+審查已存在的非 cdxdw 狀態時，先決定遷移位置及保留路徑。安裝器會拒絕歸屬不同的狀態、已被本地改過的 managed Skill 或同版本 runtime。跨版本用新套件重跑 setup。舊 runtime 可做回查。
 
 ## 3. 初衷、待決和第一份回報
 

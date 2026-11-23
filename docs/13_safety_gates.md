@@ -4,10 +4,10 @@
 
 | 閘門 | 記錄 | 驗證 |
 |---|---|---|
-| 規格與派工 | 原需求、工單版次、獨立規格審查、SCOPE／FORBIDDEN、AUTO 指令 | `gate_check --order`、cdx 工單雜湊及 DIRECTOR_LOG |
-| 規劃 | 核准的 PLAN、工單 SHA、Git base | `cdx work approve-plan` 記錄檔案和工單指紋，App Server 施工前核對 |
-| 施工 | 具名 worktree、短斷點、隔離沙箱、選用 Hook | `cdx doctor`、工單與工作線對帳、`scope_check` |
-| 交件 | 完整候選 SHA、worker 報告、可重跑證據、總監裁決 | `cdx work review --candidate … --rerun`、`gate_check --verdict` |
+| 規格與派工 | 原需求、工單版次、獨立規格審查、SCOPE／FORBIDDEN、AUTO 指令 | `gate_check --order`、cdxdw 工單雜湊及 DIRECTOR_LOG |
+| 規劃 | 核准的 PLAN、工單 SHA、Git base | `cdxdw work approve-plan` 記錄檔案和工單指紋，App Server 施工前核對 |
+| 施工 | 具名 worktree、短斷點、隔離沙箱、選用 Hook | `cdxdw doctor`、工單與工作線對帳、`scope_check` |
+| 交件 | 完整候選 SHA、worker 報告、可重跑證據、總監裁決 | `cdxdw work review --candidate … --rerun`、`gate_check --verdict` |
 
 ## 先鎖驗收條件
 

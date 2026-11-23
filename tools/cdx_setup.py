@@ -1,4 +1,4 @@
-"""Install cdx in a Git project without changing its user-level Codex settings."""
+"""Install cdxdw in a Git project using project-level Codex settings."""
 
 import argparse
 import hashlib
@@ -32,14 +32,14 @@ def initial_files(state, repo, mode):
         state / "DIRECTOR_LOG.md": f"# DIRECTOR_LOG\n\n{stamp()} | CDX_SETUP | {mode}\n",
         state / "DIRECTOR_STATE.md": (f"# DIRECTOR_STATE\n\nPROJECT: {repo}\nMODE: {mode}\n"
                                        "PENDING_METHOD: chat + PO_PENDING.md\n"),
-        state / "RESUME_STATE.md": ("PROGRESS: cdx initialized\nDOING: confirm project requirements\n"
+        state / "RESUME_STATE.md": ("PROGRESS: cdxdw initialized\nDOING: confirm project requirements\n"
                                    "NEXT_STEP: read PO_PENDING.md and confirm BRIEF.md\nCOMMS: NONE\n\n"
                                    f"# RESUME_STATE — DIRECTOR\nUPDATED: {stamp()}\n"),
         state / "PO_PENDING.md": "# PO 待決與回覆\n\n## 未結\n\n## 已結\n",
         state / "ACTIVE_WORKSTREAMS.md": "# 工作線\n\n| WO | Branch | Thread | Status |\n|---|---|---|---|\n",
         state / "PENDING_SENDS.md": "# 待送訊息\n",
-        state / "MECHANISMS.md": ("# 機制\n\n- `cdx.py doctor` 查看專案、Hook 信任、沙箱狀態。\n"
-                                  "- `cdx.py session status` 對帳工單、Git worktree 和 thread。\n"),
+        state / "MECHANISMS.md": ("# 機制\n\n- `cdxdw.py doctor` 查看專案、Hook 信任、沙箱狀態。\n"
+                                  "- `cdxdw.py session status` 對帳工單、Git worktree 和 thread。\n"),
         state / "DECISION_REGISTER.md": (ROOT / "templates" / "DECISION_REGISTER.md").read_text(encoding="utf-8"),
     }
 

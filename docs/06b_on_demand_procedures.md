@@ -20,7 +20,7 @@ PO 手動停止後再讓它繼續，也要先完整跑一次這個程序：停�
 
 總監每次喚醒、壓縮或恢復後只有一個第一步：**先唯讀檢查並收集輸入，再處理待決頁**。收集完之前不改檔、不派工、不重建。
 
-1. 唯讀收集：跑 `cdx doctor`，讀本機待決帳、未處理的 PO 聊天回答、`DIRECTOR_LOG.md` 最新段落和工作線。對帳不清楚時用 `cdx session status … --live` 和 `reconcile`；保留找不到的來源和原因。
+1. 唯讀收集：跑 `cdxdw doctor`，讀本機待決帳、未處理的 PO 聊天回答、`DIRECTOR_LOG.md` 最新段落和工作線。對帳不清楚時用 `cdxdw session status … --live` 和 `reconcile`；保留找不到的來源和原因。
 2. 處理待決頁：照收件帳本套用 PO 的回覆和新留言，同輪執行或派工並關閉；未能完成寫續辦紀錄（`docs/03`）。
 3. 檢查腳本報缺的才重建；補發被中斷的工單或決定。
 4. 巡查時（2.2.2）量一次所有工作線的 RESUME_STATE：`tools/memory_size_check.py --kind resume --workstreams <DIRECTOR>/ACTIVE_WORKSTREAMS.md`（或 `--glob "<根>/**/RESUME_STATE*.md"`），只讀。OVER 的工作線，由總監叫它照下面「RESUME_STATE 瘦身」做；巡查本身不搬檔。
@@ -36,7 +36,7 @@ PO 手動停止後再讓它繼續，也要先完整跑一次這個程序：停�
 ### git 細節（2.1.0 從 `docs/08` 移來）
 
 - stash 是所有 worktree 共用的，可能拿到別的 session 的修改。真的要 stash，用 `git stash push -u -m "<唯一標記>"`，記下 SHA，用 `git stash apply <sha>` 還原。
-- 選用 `cdx setup --hooks` 提供 Codex 工具護欄。用 `cdx doctor --live` 分別查配置、信任與適用版本。
+- 選用 `cdxdw setup --hooks` 提供 Codex 工具護欄。用 `cdxdw doctor --live` 分別查配置、信任與適用版本。
 - 子代理承接父線權限，Hook 覆蓋逐種工具驗證。獨立唯讀 reviewer 使用新 root thread 與寫入探針。
 - PO 授權了私人備份推送時，用一支會拒絕大檔與疑似秘密、只做一般 push、事後核對遠端 SHA 的腳本；腳本拒絕就停下回報，不繞過。
 
@@ -56,15 +56,15 @@ PO 手動停止後再讓它繼續，也要先完整跑一次這個程序：停�
 
 - 每條工作線一支 `status.py`：`tools/status_gen.py --config <設定> --out <線的資料夾>/status.py` 產生，一次印出 log 尾段、雜湊、磁碟（GiB）、git 摘要、最新輸出，總長有上限。在每輪第一步跑它，不逐項重查（L-042）。
 - 總監版從 `templates/status_director.json` 改起：多印待決頁的計數（PO 已回覆 / 新的）、未結案工單、還沒送出的訊息、每份動作紀錄最近 1 小時的筆數 / 被擋次數 / 讀 log 次數 / session 數，以及該常駐的程序（例如閒置監看）有沒有在跑。讀不到待決頁或程序沒在跑就 exit 1；路徑換成專案自己的。
-- cdx 以 Git common directory 綁定狀態。Hook 按已註冊的 session ID 讀角色，App Server 稽核按 thread ID 記。
-- 用 `cdx doctor --live` 查工作區的設定與 Hook 信任；用 `cdx session status` 檢查當前工單的分支及 thread。
+- cdxdw 以 Git common directory 綁定狀態。Hook 按已註冊的 session ID 讀角色，App Server 稽核按 thread ID 記。
+- 用 `cdxdw doctor --live` 查工作區的設定與 Hook 信任；用 `cdxdw session status` 檢查當前工單的分支及 thread。
 - 每週用 `tools/poll_hint.py report --log <動作紀錄> --days 7` 看各線手動讀 log 的次數，次數高的線提醒它等完成通知（L-041）。
 - 單一工作線的摘要（2.3.0）：`tools/line_brief.py <線名> --config <status 設定>` 一次印那條線的看板行、git 狀態和最後一個 commit、最新結果檔的開頭、log 尾段；設定寫在 status 設定的 `"lines"`（`templates/status_director.json`）。要看某條線時跑它，不逐項查；不是每輪必讀。
 - 授權快到期（2.3.0）：`tools/doctor.py --licenses <授權清單>` 列出剩不到 3 天（`--license-days`）的授權和是哪個工具持有的；只檢查授權用 `--licenses-only`。清單是 JSON 或 Markdown 表（tool / license / expires）。
 
 ### 用量中斷後復工
 
-保存待決、目前候選 SHA 和回合結果。額度恢復時間以使用者介面為準。重新開啟時先對帳，從 P0 和最接近交付的線處理；cdx 的復工不依賴排程。只有 PO 明確需要定期提醒時才設定宿主排程。
+保存待決、目前候選 SHA 和回合結果。額度恢復時間以使用者介面為準。重新開啟時先對帳，從 P0 和最接近交付的線處理；cdxdw 的復工不依賴排程。只有 PO 明確需要定期提醒時才設定宿主排程。
 
 ### RESUME_STATE 瘦身（2.2.2）
 

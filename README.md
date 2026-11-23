@@ -1,8 +1,8 @@
 # cdx-DIRECTOR-WORKER
 
-**cdx `2.6.0-cdx.1`**。讓 Codex 當專案總監，把你的需求拆成工單，讓每條施工線在獨立 Git worktree 工作，最後由總監針對交件 commit 重跑驗收。關掉對話或重啟程式後，可以用工單、thread ID 和續航檔接回進度。
+這是 **cdx-DIRECTOR-WORKER**（簡稱 **cdxdw**，版本 `2.6.0-cdx.2`）。讓 Codex 當專案總監，把你的需求拆成工單，讓每條施工線在獨立 Git worktree 工作，最後由總監針對交件 commit 重跑驗收。關掉對話或重啟程式後，可以用工單、thread ID 和續航檔接回進度。
 
-cdx 是 [DIRECTOR-WORK v2.6.0](https://github.com/scottpuppylu/DIRECTOR-WORK/tree/v2.6.0) 的獨立 Codex 移植。它與 [dsh 版](https://github.com/scottpuppylu/dsh-DIRECTOR-WORKER)、[agy 版](https://github.com/scottpuppylu/agy-DIRECTOR-WORKER) 共用工單和證據概念，各自使用平台的原生能力。用 Git、Python 和 Codex 就能開始。
+cdxdw 是 [DIRECTOR-WORK v2.6.0](https://github.com/scottpuppylu/DIRECTOR-WORK/tree/v2.6.0) 的獨立 Codex 移植。它與 [dshdw](https://github.com/scottpuppylu/dsh-DIRECTOR-WORKER)、[agydw](https://github.com/scottpuppylu/agy-DIRECTOR-WORKER) 共用工單、閘門和證據格式，各自使用平台的原生能力。平台工具和版本後綴用 `cdx`。用 Git、Python 和 Codex 就能開始。
 
 ## 它怎麼運作
 
@@ -39,12 +39,12 @@ https://github.com/scottpuppylu/cdx-DIRECTOR-WORKER
 公開、推送、付費、刪除、覆寫或修改帳號設定，依我對本專案的授權處理。
 ```
 
-也可以手動開始。從 **cdx 的目錄** 執行，將 `PROJECT` 改成既有 Git 專案的完整路徑。
+也可以手動開始。從 **cdxdw 的目錄** 執行，將 `PROJECT` 改成既有 Git 專案的完整路徑。
 
 ```powershell
-python -I -B -X utf8 tools/cdx.py setup --repo PROJECT
-python -I -B -X utf8 tools/cdx.py setup --repo PROJECT --apply --agents
-python -I -B -X utf8 tools/cdx.py doctor --repo PROJECT --live
+python -I -B -X utf8 tools/cdxdw.py setup --repo PROJECT
+python -I -B -X utf8 tools/cdxdw.py setup --repo PROJECT --apply --agents
+python -I -B -X utf8 tools/cdxdw.py doctor --repo PROJECT --live
 ```
 
 預設在專案旁建立 `DIRECTOR-<repo>/`。`--agents` 追加一個有標記的區塊到專案 `AGENTS.md`。需要工具守門、Hook 稽核與壓縮後提示時，執行 setup 加 `--hooks`，再在 Codex 的 Hook 審查介面信任它。完整的安裝選項、首輪回報和路徑見 [BOOTSTRAP.md](BOOTSTRAP.md)。
@@ -54,11 +54,11 @@ python -I -B -X utf8 tools/cdx.py doctor --repo PROJECT --live
 總監以 [WORK_ORDER](templates/WORK_ORDER.md) 建立 `WO-001-export.md`，列出 `BASE_REF`、具名分支、絕對 worktree、工作目錄、可改檔案、禁止路徑及 AUTO 指令。環境或專案適合 Desktop 手動施工時，把這份工單交給那個 checkout 的 Codex 對話。App Server 也有可程式化的路徑。
 
 ```powershell
-python -I -B -X utf8 tools/cdx.py work --repo PROJECT prepare WO-001-export.md
-python -I -B -X utf8 tools/cdx.py work --repo PROJECT approve-spec WO-001-export.md --reviewer REVIEWER_ID --author DIRECTOR_ID
-python -I -B -X utf8 tools/cdx.py work --repo PROJECT dispatch WO-001-export.md
-python -I -B -X utf8 tools/cdx.py session --repo PROJECT new WO-001-export.md
-python -I -B -X utf8 tools/cdx.py session --repo PROJECT run WO-001-export.md --phase plan
+python -I -B -X utf8 tools/cdxdw.py work --repo PROJECT prepare WO-001-export.md
+python -I -B -X utf8 tools/cdxdw.py work --repo PROJECT approve-spec WO-001-export.md --reviewer REVIEWER_ID --author DIRECTOR_ID
+python -I -B -X utf8 tools/cdxdw.py work --repo PROJECT dispatch WO-001-export.md
+python -I -B -X utf8 tools/cdxdw.py session --repo PROJECT new WO-001-export.md
+python -I -B -X utf8 tools/cdxdw.py session --repo PROJECT run WO-001-export.md --phase plan
 ```
 
 總監把核准計畫記為 `work/WO-001/PLAN.md`，執行 `work approve-plan`，再以 `session run … --phase implement` 施工。中斷後用 `session status … --live` 和 `session reconcile …` 檢查是否曾經啟動，並讀取 `RESUME_STATE.md`。
@@ -66,7 +66,7 @@ python -I -B -X utf8 tools/cdx.py session --repo PROJECT run WO-001-export.md --
 Worker 交出 `TASK_REPORT.md`、報告中的候選 commit 及 `work/WO-001/evidence/`。總監用以下入口綁定候選，檢查範圍、報告及證據，並重新執行工單中核准的 AUTO 檢查：
 
 ```powershell
-python -I -B -X utf8 tools/cdx.py work --repo PROJECT review WO-001-export.md --candidate FULL_COMMIT_SHA --rerun
+python -I -B -X utf8 tools/cdxdw.py work --repo PROJECT review WO-001-export.md --candidate FULL_COMMIT_SHA --rerun
 ```
 
 `REVIEW` 條件由獨立審查與成品檢查處理。`PO` 條件由你確認後記入裁決。測試、審查和 PO 驗收各有自己的證據。
@@ -100,7 +100,7 @@ python -I -B -X utf8 tools/cdx.py work --repo PROJECT review WO-001-export.md --
 
 **沙箱與 Hooks 怎麼確認？** `doctor --live --probe-sandbox` 分別查 Hook 信任與可寫測試。Windows 尚未配置沙箱時，App Server 自動施工會停止。Hooks 的工具覆蓋依宿主版本與工具路徑而異。詳見 [Codex 操作](docs/11_codex_operations.md) 與 [移植報告](CODEX-PORT.md)。
 
-**原有設定與資料放哪？** cdx 的狀態、報告和版本化工具留在專案旁。安裝只寫此專案的設定與 Git 共用目錄指標。再次安裝保留既有工作狀態，升級以新版 runtime 目錄存放工具。
+**原有設定與資料放哪？** cdxdw 的狀態、報告和版本化工具留在專案旁。安裝只寫此專案的設定與 Git 共用目錄指標。再次安裝保留既有工作狀態，升級以新版 runtime 目錄存放工具。
 
 **會自動花額度嗎？** 安裝、doctor、work 和 `session new` 可在沒有模型回合的情況下執行。`session run` 才送模型回合，所用模型和方案由該 Codex 環境決定。需選擇額外成本時由你決定。
 

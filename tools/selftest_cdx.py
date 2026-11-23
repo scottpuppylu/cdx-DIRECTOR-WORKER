@@ -51,7 +51,7 @@ class CDX(unittest.TestCase):
         return repo
 
     def work(self, repo, *args, code=0):
-        return self.run_script("cdx.py", "work", "--repo", repo, *args, code=code)
+        return self.run_script("cdxdw.py", "work", "--repo", repo, *args, code=code)
 
     def test_install_is_idempotent_and_preserves_existing_files(self):
         repo = self.git_project("主 project")
@@ -62,9 +62,9 @@ class CDX(unittest.TestCase):
         text(hook_path, json.dumps({"hooks": {"SessionStart": [custom_hook]}}))
         state = self.root / "DIRECTOR 外部"
         args = ("setup", "--repo", repo, "--state", state, "--agents", "--hooks")
-        self.assertIn("CDX_SETUP PLAN", self.run_script("cdx.py", *args))
+        self.assertIn("CDX_SETUP PLAN", self.run_script("cdxdw.py", *args))
         self.assertFalse(state.exists())
-        self.assertIn("CDX_SETUP COMPLETE", self.run_script("cdx.py", *args, "--apply"))
+        self.assertIn("CDX_SETUP COMPLETE", self.run_script("cdxdw.py", *args, "--apply"))
         self.assertTrue(agents.read_bytes().startswith(b"# existing\nKeep this text.\n"))
         self.assertEqual(read_json(hook_path)["hooks"]["SessionStart"][0], custom_hook)
         _, loaded, info = load_project(repo)
@@ -73,13 +73,13 @@ class CDX(unittest.TestCase):
         kit = Path(info["kit"])
         self.assertTrue((kit / "tools" / "gate_check.py").is_file())
         (state / "PO_PENDING.md").write_bytes(b"PO draft in progress\n")
-        self.assertIn("changed=0", self.run_script("cdx.py", *args, "--apply"))
+        self.assertIn("changed=0", self.run_script("cdxdw.py", *args, "--apply"))
         self.assertEqual((state / "PO_PENDING.md").read_bytes(), b"PO draft in progress\n")
         conflict = self.git_project("other")
-        self.assertIn("belongs", self.run_script("cdx.py", "setup", "--repo", conflict, "--state", state, code=2))
+        self.assertIn("belongs", self.run_script("cdxdw.py", "setup", "--repo", conflict, "--state", state, code=2))
         managed = repo / ".agents" / "skills" / "cdx-resume" / "SKILL.md"
         managed.write_bytes(b"local customization\n")
-        self.assertIn("contains local edits", self.run_script("cdx.py", *args, "--apply", code=2))
+        self.assertIn("contains local edits", self.run_script("cdxdw.py", *args, "--apply", code=2))
         self.assertEqual(managed.read_bytes(), b"local customization\n")
 
     def test_work_order_full_flow_and_wrong_candidate(self):
@@ -89,7 +89,7 @@ class CDX(unittest.TestCase):
         git(repo, "add", "--", "calc.txt", "verify.py")
         git(repo, "commit", "-m", "baseline")
         base = git(repo, "rev-parse", "HEAD")
-        self.run_script("cdx.py", "setup", "--repo", repo, "--apply", "--hooks")
+        self.run_script("cdxdw.py", "setup", "--repo", repo, "--apply", "--hooks")
         _, state, _ = load_project(repo)
         worker = self.root / "worker line"
         work = state / "work" / "WO-001"
@@ -136,8 +136,8 @@ CHECKS:
         self.work(repo, "dispatch", name)
         text(work / "PLAN.md", "AC-1: update calc.txt, then run the approved check.\n")
         self.work(repo, "approve-plan", name)
-        self.run_script("cdx.py", "session", "--repo", repo, "new", name)
-        self.assertIn('"thread": null', self.run_script("cdx.py", "session", "--repo", repo, "status", name))
+        self.run_script("cdxdw.py", "session", "--repo", repo, "new", name)
+        self.assertIn('"thread": null', self.run_script("cdxdw.py", "session", "--repo", repo, "status", name))
         stamp = order_spec(state, name)["sha"]
 
         def candidate(value):
@@ -210,17 +210,17 @@ ACCEPTANCE:
             cdx_audit.append_app(log, {"method": "thread/tokenUsage/updated", "params": dict(base, tokenUsage={
                 "total": totals, "last": totals, "modelContextWindow": 1000})})
         self.assertEqual(summarize_app(log)["threads"][thread]["total"]["inputTokens"], 160)
-        self.assertIn("CDX_AUDIT OK", self.run_script("cdx.py", "audit", "verify", log))
+        self.assertIn("CDX_AUDIT OK", self.run_script("cdxdw.py", "audit", "verify", log))
         log.write_text(log.read_text(encoding="utf-8").replace('"exit_code":7', '"exit_code":0'), encoding="utf-8")
-        self.assertIn("hash does not match", self.run_script("cdx.py", "audit", "verify", log, code=2))
+        self.assertIn("hash does not match", self.run_script("cdxdw.py", "audit", "verify", log, code=2))
 
     def test_hook_role_and_restore(self):
         repo = self.git_project("hook project")
-        self.run_script("cdx.py", "setup", "--repo", repo, "--apply", "--hooks")
+        self.run_script("cdxdw.py", "setup", "--repo", repo, "--apply", "--hooks")
         _, state, _ = load_project(repo)
         session = str(uuid.uuid4())
         director = str(uuid.uuid4())
-        self.run_script("cdx.py", "session", "--repo", repo, "register-director", director)
+        self.run_script("cdxdw.py", "session", "--repo", repo, "register-director", director)
         self.assertEqual(read_json(state / "sessions" / (director + ".json"))["role"], "director")
         role = {"role": "worker", "worktree": str(repo), "order": "WO-001"}
         atomic_write(state / "sessions" / (session + ".json"), json_bytes(role))
@@ -254,7 +254,13 @@ ACCEPTANCE:
             self.assertTrue((ROOT / name).is_file(), name)
         manifest = read_json(ROOT / ".agents" / "plugins" / "marketplace.json")
         target = ROOT / manifest["plugins"][0]["source"]["path"]
-        self.assertEqual(read_json(target / "plugin.json")["version"], (ROOT / "VERSION").read_text().strip())
+        plugin = read_json(target / "plugin.json")
+        version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+        self.assertEqual(plugin["version"], version)
+        self.assertTrue(plugin["extensions"]["com.openai"]["interface"]["displayName"].startswith("cdxdw "))
+        self.assertEqual(self.run_script("cdxdw.py", "--version").strip(), version)
+        self.assertEqual(self.run_script("cdx.py", "--version").strip(), version)
+        self.assertEqual(self.run_script("cdx.py", "work", "--help"), self.run_script("cdxdw.py", "work", "--help"))
         for path in ("README.md", "BOOTSTRAP.md", "CODEX-PORT.md", "tools/CDX-TOOLS.md"):
             self.assertTrue((ROOT / path).read_text(encoding="utf-8").strip())
 

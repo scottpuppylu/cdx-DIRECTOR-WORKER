@@ -23,7 +23,7 @@
 
 ### 機制與重置喚醒
 
-機制的配置與重建方式存 `MECHANISMS.md`。App Server 的 thread 可恢復，未確認的啟動先用 `cdx session reconcile` 對帳。
+機制的配置與重建方式存 `MECHANISMS.md`。App Server 的 thread 可恢復，未確認的啟動先用 `cdxdw session reconcile` 對帳。
 
 ## 為什麼
 

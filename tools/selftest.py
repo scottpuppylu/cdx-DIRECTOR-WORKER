@@ -1012,8 +1012,8 @@ def test_purpose():
 def test_readme_prompt_first():
     root = TOOLS.parent
     text = (root / "README.md").read_text(encoding="utf-8")
-    check("cdx README identifies its setup command and bootstrap", "tools/cdx.py setup" in text and "(BOOTSTRAP.md)" in text)
-    check("cdx README describes verification before full operation", "doctor --repo" in text and "--candidate FULL_COMMIT_SHA --rerun" in text)
+    check("cdxdw README identifies its setup command and bootstrap", "tools/cdxdw.py setup" in text and "(BOOTSTRAP.md)" in text)
+    check("cdxdw README describes verification before full operation", "doctor --repo" in text and "--candidate FULL_COMMIT_SHA --rerun" in text)
 
 
 def test_chat_to_product(tmp):

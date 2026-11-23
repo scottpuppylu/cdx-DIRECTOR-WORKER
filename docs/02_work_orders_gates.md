@@ -13,7 +13,7 @@
 
 - 一律落檔：`DIRECTOR/orders/WO-<編號>-<短名>.md`，格式見 `templates/WORK_ORDER.md`。訊息只附路徑、一句摘要和必要的決定。
 - 必填：`PRIMARY_WORKER / MODEL / EFFORT / FALLBACK / GOVERNANCE / BASE_REF / SCOPE / FORBIDDEN / ACCEPTANCE / DELIVERABLES / STOP_RULES`。
-- BASE_REF 寫 `origin/main @ <commit>`：派工前先 `git fetch`，填 fetch 後遠端分支的最新 commit（2.2.2）。`gate_check.py --order <工單> --repo <專案>` 依設定比對本地遠端追蹤 ref 或 fetch：commit 不存在或落後遠端時印 `~ WARN BASE_REF`，加 `--strict-base` 判不過；fetch 失敗或不是 git checkout 會印「not compared with the remote」，不當作通過。故意從舊版開工就在工單寫明理由。開關在 `director_work.json` 的 `"base_ref"`（`check`、`fetch`、`strict`，cdx 預設 true／false／false）。
+- BASE_REF 寫 `origin/main @ <commit>`：派工前先 `git fetch`，填 fetch 後遠端分支的最新 commit（2.2.2）。`gate_check.py --order <工單> --repo <專案>` 依設定比對本地遠端追蹤 ref 或 fetch：commit 不存在或落後遠端時印 `~ WARN BASE_REF`，加 `--strict-base` 判不過；fetch 失敗或不是 git checkout 會印「not compared with the remote」，不當作通過。故意從舊版開工就在工單寫明理由。開關在 `director_work.json` 的 `"base_ref"`（`check`、`fetch`、`strict`，cdxdw 預設 true／false／false）。
 - 內容分段：A 背景、B 目標（MUST / OPTIONAL / OUT OF SCOPE，加上 SCOPE / FORBIDDEN 路徑清單）、C 執行前檢查、D 實作要求、E 驗收條件、F 安全與版控、G 完成定義。
 - 驗收條件每項有：ID、類型、要求、驗證方法、預期。結果（實際、證據、狀態）寫在 TASK REPORT 的 ACCEPTANCE 表，不寫回工單。Mock 和單元測試不能當成真實環境的驗收。
 - 類型 `AUTO / REVIEW / PO`：

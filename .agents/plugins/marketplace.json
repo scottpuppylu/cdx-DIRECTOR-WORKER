@@ -1,6 +1,6 @@
 {
   "name": "cdx-director-work",
-  "interface": {"displayName": "cdx DIRECTOR-WORK"},
+  "interface": {"displayName": "cdxdw DIRECTOR-WORK"},
   "plugins": [
     {
       "name": "cdx",

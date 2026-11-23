@@ -60,7 +60,7 @@ def main(argv=None):
         files = ("PO_PENDING.md", "RESUME_STATE.md", "DIRECTOR_LOG.md", "DECISION_REGISTER.md", "director_work.json")
         missing = [name for name in files if not state_path(state, name).is_file()]
         kit = Path(project["kit"])
-        if not (kit / "tools" / "cdx.py").is_file():
+        if not any((kit / "tools" / name).is_file() for name in ("cdxdw.py", "cdx.py")):
             missing.append("installed runtime")
         codex = args.codex or shutil.which("codex")
         summary = {"project": str(repo), "state": str(state), "kit": str(kit), "version": project["version"],
