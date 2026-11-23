@@ -9,7 +9,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gate_check
-from cdx_common import (ORDER_ID, SHA, ROOT, Refused, atomic_write, checkout, common_dir, git, json_bytes,
+from cdx_common import (SHA, ROOT, Refused, atomic_write, checkout, common_dir, git, json_bytes,
                         load_project, lock, read_json, report_error, stamp, state_path, within)
 from cdx_setup import config_with_hooks
 
@@ -21,16 +21,21 @@ def field(text, key):
     return found[0].split(" #", 1)[0].strip()
 
 
-def order_spec(state, filename):
-    name = Path(filename).name
-    if name != filename or not re.fullmatch(r"WO-[0-9]+(?:-[A-Za-z0-9_.-]+)?\.md", name):
+def order_file_id(filename):
+    match = re.fullmatch(r"(WO-[0-9]+)(?:-[A-Za-z0-9_.-]+)?\.md", filename)
+    if not match:
         raise Refused("Use an order filename such as WO-001-export.md")
-    path = state_path(state, "orders", name)
+    return match[1]
+
+
+def order_spec(state, filename):
+    file_id = order_file_id(filename)
+    path = state_path(state, "orders", filename)
     data = path.read_bytes()
     text = data.decode("utf-8-sig")
     names, problem = gate_check.order_identity(text, path)
     order_id = gate_check.order_key(names)
-    if problem or not order_id or not ORDER_ID.fullmatch(order_id):
+    if problem or order_id != file_id:
         raise Refused(problem or "Order does not have a WO-n ID")
     base = field(text, "BASE_REF").rsplit("@", 1)[-1].strip().lower()
     if not SHA.fullmatch(base):
@@ -42,7 +47,7 @@ def order_spec(state, filename):
     worker_path = Path(field(text, "WORKTREE"))
     if not worker_path.is_absolute() or Path(field(text, "WORK_DIR")) != work:
         raise Refused(f"WORKTREE must be absolute, and WORK_DIR must be {work}")
-    return {"order_id": order_id, "file": name, "path": path, "text": text, "sha": gate_check.order_hash(data),
+    return {"order_id": order_id, "file": filename, "path": path, "text": text, "sha": gate_check.order_hash(data),
             "revision": int(rev), "base": base, "branch": field(text, "NEW_BRANCH"), "work": work,
             "checkout": worker_path.resolve(), "governance": field(text, "GOVERNANCE")}
 

@@ -15,7 +15,8 @@ from cdx_common import (SHA, THREAD_ID, Refused, atomic_write, git, json_bytes, 
                         report_error, state_path)
 from cdx_doctor import certified, sandbox_probe
 from cdx_rpc import AppServer, RPCError, RPCTimeout
-from cdx_work import approved_brief, dispatch_check, dispatched_copy, order_spec, plan_approval, validate_checkout
+from cdx_work import (approved_brief, dispatch_check, dispatched_copy, order_file_id, order_spec,
+                      plan_approval, validate_checkout)
 
 
 TERMINAL = ("completed", "interrupted", "failed")
@@ -37,10 +38,17 @@ def thread_info(server, record, *, load=False):
     return thread
 
 
-def validate_record(record, spec, role):
-    if (record.get("order_sha256") != spec["sha"] or record.get("role") != role or
-            record.get("worktree") != str(spec["checkout"]) or
-            (record.get("thread") is not None and not THREAD_ID.fullmatch(record["thread"]))):
+def validate_binding(record, order_id, filename, role):
+    thread = record.get("thread")
+    worktree = record.get("worktree")
+    if (record.get("order") != order_id or record.get("order_file") != filename or record.get("role") != role or
+            not isinstance(worktree, str) or not Path(worktree).is_absolute() or
+            (thread is not None and not (isinstance(thread, str) and THREAD_ID.fullmatch(thread)))):
+        raise Refused("Saved session does not match the requested order or role")
+
+
+def validate_record(record, spec):
+    if record.get("order_sha256") != spec["sha"] or record.get("worktree") != str(spec["checkout"]):
         raise Refused("Saved thread does not match the current work order, role or worktree")
 
 
@@ -98,7 +106,7 @@ def run_turn(server, state, spec, record, session_file, phase, timeout, observe)
         if thread.get("status", {}).get("type") == "active":
             raise Refused("This thread already has an active turn")
     last = {} if fresh else latest(server, record["thread"])
-    if last and (last.get("id") != record.get("turn") or last.get("status") not in TERMINAL):
+    if last.get("id") != record.get("turn") or (last and last.get("status") not in TERMINAL):
         raise Refused("Latest turn is unmanaged or unfinished; inspect the saved binding before starting another")
     dispatch_check(state, spec)
     approved_brief(state, spec)
@@ -177,7 +185,7 @@ def reconcile(server, record, session_file, reset_empty):
     if count or record.get("turn") or (record.get("prior_turn") and not reached_prior):
         raise Refused("No App Server turn matches the saved launch record")
     if reset_empty:
-        record["state"] = "ready"
+        record.update(state="ready", turn=record.get("prior_turn"))
         atomic_write(session_file, json_bytes(record))
 
 
@@ -186,7 +194,7 @@ def reconcile_saved(server, record, session_file, reset_empty):
         thread_info(server, record)
     except RPCError as error:
         # New Codex threads need a first turn before a rollout is persisted. Never recycle an acknowledged turn.
-        if not (reset_empty and error.missing_rollout and record.get("state") == "starting"
+        if not (reset_empty and error.missing_rollout and record.get("state") in ("starting", "ready")
                 and not record.get("turn") and not record.get("prior_turn")):
             raise
         record.update(state="ready", thread=None)
@@ -245,19 +253,21 @@ def main(argv=None):
                                                "worktree": str(active_checkout)}))
             print(f"CDX_SESSION DIRECTOR {args.thread}")
             return 0
-        spec = order_spec(state, args.order)
-        dispatch_check(state, spec)
-        head = validate_checkout(repo, state, spec) if args.command in ("new", "run") else None
-        if args.command == "new" and args.role == "reviewer" and (
-                not SHA.fullmatch(args.candidate or "") or args.candidate != head or
-                git(spec["checkout"], "status", "--porcelain", "--untracked-files=all")):
-            raise Refused("Review requires the exact full candidate SHA and a clean checkout")
-        if args.command in ("new", "run"):
+        order_id = order_file_id(args.order)
+        spec = order_spec(state, args.order) if args.command in ("new", "run") else None
+        if spec:
+            dispatch_check(state, spec)
+            head = validate_checkout(repo, state, spec)
             approved_brief(state, spec)
-        session_file = state_path(state, "sessions", f"{spec['order_id']}-{args.role}.json")
-        audit = state_path(state, "audit", f"{spec['order_id']}-{args.role}.jsonl")
+            if args.command == "new" and args.role == "reviewer" and (
+                    not SHA.fullmatch(args.candidate or "") or args.candidate != head or
+                    git(spec["checkout"], "status", "--porcelain", "--untracked-files=all")):
+                raise Refused("Review requires the exact full candidate SHA and a clean checkout")
+        session_file = state_path(state, "sessions", f"{order_id}-{args.role}.json")
+        audit = state_path(state, "audit", f"{order_id}-{args.role}.jsonl")
         if args.command == "status" and not args.live:
             record = read_json(session_file)
+            validate_binding(record, order_id, args.order, args.role)
             print(json.dumps(record, ensure_ascii=False, indent=2))
             return 0
         with lock(session_file.with_suffix(".lock")):
@@ -275,7 +285,9 @@ def main(argv=None):
                 print(json.dumps(record, ensure_ascii=False, indent=2))
                 return 0
             record = read_json(session_file)
-            validate_record(record, spec, args.role)
+            validate_binding(record, order_id, args.order, args.role)
+            if spec:
+                validate_record(record, spec)
             if args.command == "status" and (not args.live or not record.get("thread")):
                 print(json.dumps(record, ensure_ascii=False, indent=2))
                 return 0

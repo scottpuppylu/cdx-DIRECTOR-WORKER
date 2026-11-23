@@ -184,6 +184,12 @@ CHECKS:
         self.work(repo, "approve-plan", name)
         self.run_script("cdxdw.py", "session", "--repo", repo, "new", name)
         self.assertIn('"thread": null', self.run_script("cdxdw.py", "session", "--repo", repo, "status", name))
+        dispatched = order.read_bytes()
+        order.write_bytes(dispatched + b"\nDraft for the next revision.\n")
+        self.assertIn('"state": "ready"', self.run_script("cdxdw.py", "session", "--repo", repo, "status", name))
+        closed = self.run_script("cdxdw.py", "session", "--repo", repo, "run", name, "--phase", "plan", code=2)
+        self.assertIn("not registered", closed)
+        order.write_bytes(dispatched)
         stamp = order_spec(state, name)["sha"]
 
         def candidate(value):
@@ -331,6 +337,12 @@ ACCEPTANCE:
         cdx_session.reconcile(RecordedServer(), record, file, reset_empty=False)
         self.assertEqual(read_json(file)["turn"], "accepted")
         self.assertEqual(read_json(file)["state"], "completed")
+
+        record.update(state="starting", turn=None)
+        with patch.object(RecordedServer, "call", return_value={"data": [{"id": "previous", "status": "completed"}]}):
+            cdx_session.reconcile(RecordedServer(), record, file, reset_empty=True)
+        self.assertEqual(read_json(file)["turn"], "previous")
+        self.assertEqual(read_json(file)["state"], "ready")
 
     def test_timeout_interrupts_only_the_recorded_turn(self):
         file = self.root / "binding.json"
