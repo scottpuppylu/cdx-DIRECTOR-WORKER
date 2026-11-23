@@ -1,5 +1,5 @@
 {
-  "_comment": "cdx project config copied into the project state directory. The installer chooses project skills and optional native Hooks. Shared controls are read by the upstream gate, resume, metrics and release tools.",
+  "_comment": "cdx project config copied into the project state directory. The installer chooses project skills and optional native Hooks. Shared controls are read by the upstream gate, resume, metrics and release tools. verdict_self_check=warn reports a missing director rerun; fail makes that a gate failure.",
   "schema_version": 1,
   "mode": "general",
   "window": 250000,

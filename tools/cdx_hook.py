@@ -1,5 +1,6 @@
 """Codex project Hook adapter for resume, tool guardrails, and audit."""
 
+import argparse
 import json
 import os
 from pathlib import Path
@@ -119,6 +120,7 @@ def handle(call):
 
 
 def main():
+    argparse.ArgumentParser(description=__doc__).parse_args()
     try:
         payload = json.load(sys.stdin)
         result = handle(payload) if isinstance(payload, dict) else {}

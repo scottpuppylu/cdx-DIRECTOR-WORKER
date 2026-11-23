@@ -79,6 +79,13 @@ python -I -B -X utf8 tools/cdx.py work --repo PROJECT review WO-001-export.md --
 
 ## 檔案導覽
 
+| 每輪讀取的檔案 | 用途 |
+|---|---|
+| `docs/01_roles_authority.md` | **每輪必讀**。總監、worker 和 PO 的權限 |
+| `docs/03_communication.md` | **每輪必讀**。待決帳、工單與訊息 |
+| `docs/06_resume_lossless.md` | **每輪必讀**。檢查點與復工 |
+| `docs/08_safety_rules.md` | **每輪必讀**。專案核准及資料保留 |
+
 | 入口 | 用途 |
 |---|---|
 | [BOOTSTRAP](BOOTSTRAP.md) · [PURPOSE](PURPOSE.md) | 啟動及總監的基本責任 |
