@@ -8,6 +8,8 @@
 - 選用 `E2E_RUN_PLAN` 將上游 run-plan 接到實際候選，核對程式參照及入口輸出的啟動參數。
 - `work sync-worker` 可更新既有工作樹的 cdxdw Skill 與 Hook。 `session native-review` 可預覽或啟動封存候選的 Codex 原生審查。
 
+對齊初衷（PURPOSE.md）讓總監能核對候選的實際驗收，並保留升級前的工作與證據。
+
 ## 2.6.0-cdx.4 — 2026-11-24
 
 - 記錄每次候選重跑、公開入口執行及人工判定。最新嘗試的失敗、未知、待審與 PO 要求修改會阻擋放行。

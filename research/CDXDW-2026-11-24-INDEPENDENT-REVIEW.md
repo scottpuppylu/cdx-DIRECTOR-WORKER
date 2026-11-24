@@ -100,6 +100,8 @@ python -I -B -X utf8 research/probe_app_server.py --native-review
 
 cdxdw 自檢在 Windows Git 2.55.0／Python 3.11.9 和 WSL Ubuntu Git 2.43.0／Python 3.12.3 都是 12/12 通過。隔離專案完成真實打包的 `.3 → .4 → .5` 升級和備份還原 `.5 → .4`，比對 PO 原文、journal、工單、候選 ref 及未提交工作。現場升級仍要在結束執行中的舊指令後部署。保留下來的舊 runtime 可以用於回查，回到舊閘門也會恢復舊判定行為。
 
+WSL 的上游全量測試首跑抓到新版 changelog 漏了「對齊初衷」，以及本機 `/usr/local/bin/ps` 遮蔽系統 `ps`，造成原版狀態工具拿不到程序資料。補齊 changelog，並用單次測試指令的 `PATH=/usr/bin:/bin` 重跑後，3,140/3,140 通過，另有一項 Windows junction／8.3 測試按平台略過。
+
 發版演練以實作提交 `b9b88a380f1ed0f02f06f188d63aea1695c5f6f2` 從暫存 clone 調用 `tools/release.py`，bare remote 的 main 固定在正式 `.3`。實測分支可快轉、版號與 changelog 對齊、cdxdw selftest 成功、工具內建掃描通過，輸出三個預計遠端步驟。執行前後比較 bare remote 的全部 refs，一致。當地 PATH 沒有 Gitleaks，遠端 CI 發版驗收仍待實際候選環境。
 
 ## 剩餘優先順序
