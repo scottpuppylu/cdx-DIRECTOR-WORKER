@@ -1,6 +1,7 @@
 """Exercise the cdx setup, work-order, evidence, and recovery contract offline."""
 
 import argparse
+import base64
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
@@ -10,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import uuid
@@ -17,12 +19,14 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cdx_audit
 import cdx_hook
+import cdx_release
 import cdx_session
+import audit_log
 import gate_check
 from cdx_acceptance import attempt
 from cdx_common import ROOT, Refused, atomic_write, git, json_bytes, load_project, lock, read_json
 from cdx_usage import summarize_app
-from cdx_work import order_spec
+from cdx_work import integration_series, order_spec, run_integration
 
 
 def text(path, value):
@@ -58,6 +62,237 @@ class CDX(unittest.TestCase):
 
     def work(self, repo, *args, code=0):
         return self.run_script("cdxdw.py", "work", "--repo", repo, *args, code=code)
+
+    def test_preflight_ruler_and_handoff(self):
+        repo = self.git_project("preflight")
+        worker = self.root / "worker preflight"
+        peer = self.root / "destination worktree"
+        seed = b"approved seed\n"
+        pinned = hashlib.sha256(seed).hexdigest()
+        config = {"schema": "pre-tr-v1", "inputs": [{"path": "seed.txt", "source": "fixture", "sha256": pinned}],
+                  "classes": {"output": {"paths": ["mode.txt"], "checks": [
+                      {"cmd": ["{python}", "-c", "from pathlib import Path; assert Path('seed.txt').is_file()"]}]}}}
+        text(repo / "pre-tr.json", json.dumps(config))
+        text(repo / "entry.py", "from pathlib import Path\nassert Path('seed.txt').is_file()\n"
+             "print(Path('mode.txt').read_text().strip())\n")
+        text(repo / "mode.txt", "base\n")
+        git(repo, "add", "--", ".")
+        git(repo, "commit", "-m", "Baseline controls")
+        base = git(repo, "rev-parse", "HEAD")
+        self.run_script("cdxdw.py", "setup", "--repo", repo, "--apply")
+        _, state, _ = load_project(repo)
+        name = "WO-001-display.md"
+        work = state / "work" / "WO-001"
+        gates = {"feasibility": True, "pre_tr": "pre-tr.json", "pack": "frames", "po_reply": True,
+                 "ruler": {"pattern": "^READING=", "real_line": "READING=ok"}}
+        text(state / "orders" / name, f"""# WO-001 — Measure output
+ISSUED_BY = director 2026-01-02 10:00
+REVISION = 1
+TRACES_TO = NONE
+PRIMARY_WORKER = fixture
+MODEL / EFFORT = configured / standard
+FALLBACK = manual
+GOVERNANCE = Direct
+BASE_REF = main @ {base}
+NEW_BRANCH = codex/display
+WORKTREE = {worker}
+WORK_DIR = {work}
+CDX_GATES = {json.dumps(gates)}
+E2E_COMMAND = {json.dumps([sys.executable, "-B", "entry.py"])}
+
+SCOPE:
+- mode.txt
+FORBIDDEN:
+- pre-tr.json
+
+| ID | type | req | how | expected |
+| --- | --- | --- | --- | --- |
+| AC-1 | REVIEW | Valid output | Read public entry | Measured |
+
+- DELIVERABLES: candidate
+- STOP_RULES: stop if fixture fails
+""")
+        self.work(repo, "prepare", name)
+        self.work(repo, "dispatch", name)
+        text(work / "PLAN.md", "Update the output sample and verify it.\n")
+        self.work(repo, "approve-plan", name, code=2)
+        feasibility = f"""ORDER: {name} REVISION 1
+BASELINE: {base}
+CHECKED_BY: director
+| AC-1 | tool | `baseline.py` exit=0 at=10:00 | captured | feasible | FEASIBLE |
+LOOSENED_RULE: 無
+FEASIBILITY: FEASIBLE
+"""
+        text(work / "GATE_FEASIBILITY.md", feasibility.replace("exit=0 at=10:00", "NOT_RUN"))
+        self.assertIn("missing measurable", self.work(repo, "approve-plan", name, code=2))
+        text(work / "GATE_FEASIBILITY.md", feasibility)
+        self.work(repo, "approve-plan", name)
+        stage = self.root / "inputs"
+
+        def candidate(reading):
+            text(worker / "mode.txt", reading + "\n")
+            git(worker, "add", "--", "mode.txt")
+            git(worker, "commit", "-m", "Change output fixture")
+            self.work(repo, "seal", name)
+            return git(worker, "rev-parse", "HEAD")
+
+        head = candidate("noise")
+        call = ("e2e", name, "--candidate", head)
+        missing = json.loads(self.work(repo, *call, code=2))
+        self.assertIn("MISSING_INPUT", missing["preflight_error"])
+        text(stage / "seed.txt", "wrong\n")
+        changed = json.loads(self.work(repo, *call, "--input-root", stage, code=2))
+        self.assertIn("INPUT_CHANGED", changed["preflight_error"])
+        self.assertNotIn("exit_code", changed)
+        (stage / "seed.txt").write_bytes(seed)
+        invalid = json.loads(self.work(repo, *call, "--input-root", stage, code=2))
+        self.assertEqual((invalid["outcome"], invalid["exit_code"]), ("INVALID", 0))
+        self.assertIn("ZERO_MATCH", invalid["ruler"]["observation"])
+        head = candidate("READING=ok")
+        passing = json.loads(self.work(repo, "e2e", name, "--candidate", head, "--input-root", stage))
+        self.assertEqual(passing["outcome"], "PASS")
+        self.assertEqual(passing["pre_tr"]["inputs"], [{"path": "seed.txt", "sha256": pinned}])
+        self.assertFalse((worker / "seed.txt").exists())
+
+        pack = work / "evidence" / "frames"
+        pack.mkdir()
+        image = pack / "camera.png"
+        image.write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jWl0AAAAASUVORK5CYII="))
+        pack_data = {"schema": "review-pack-v1", "sampled_frames": [0],
+                     "images": [{"file": "camera.png", "camera": "a", "frame": 0, "subject_bbox": [0, 0, 1, 1]}],
+                     "render": {"motion_blur": False, "dof": False, "resolution_percent": 100, "file_format": "PNG"}}
+        text(pack / "manifest.json", json.dumps(pack_data))
+        verified = json.loads(self.work(repo, "verify-evidence", name, "--candidate", head))
+        self.assertEqual(verified["outcome"], "PASS")
+        text(pack / "camera-extra.png", "")
+        self.assertIn("FAIL", self.work(repo, "verify-evidence", name, "--candidate", head, code=2))
+        reply = self.root / "owner-original.txt"
+        raw = "PO：保留原始條件。\r\n".encode()
+        reply.write_bytes(raw)
+        observed = ("record", name, "--candidate", head, "--kind", "po", "--outcome", "CHANGES_REQUESTED",
+                    "--actor", "owner", "--environment", "fixture", "--entry", "entry",
+                    "--expected", "scope", "--observed", "recheck")
+        self.assertIn("need both", self.work(repo, *observed, code=2))
+        self.work(repo, *observed, "--reply-file", reply, "--reply-ref", "chat/message-7")
+        self.assertEqual((state / "po-replies" / (hashlib.sha256(raw).hexdigest() + ".txt")).read_bytes(), raw)
+
+        text(worker / "notes.txt", "uncommitted fixture note\n")
+        git(repo, "worktree", "add", "--detach", str(peer), head)
+        manifest = self.root / "handoff.json"
+        handoff = ("cdxdw.py", "handoff", "--repo", repo)
+        self.run_script(*handoff, "export", name, "--out", manifest)
+        failure = json.loads(self.run_script(*handoff, "verify", manifest, "--worktree", peer, code=2))
+        self.assertEqual(failure["checkout_mismatches"], ["untracked"])
+        text(peer / "notes.txt", "uncommitted fixture note\n")
+        attached = json.loads(self.run_script(*handoff, "attach", manifest, "--worktree", peer))
+        self.assertEqual(attached["outcome"], "ATTACHED")
+        status = json.loads(self.work(repo, "status", name))
+        self.assertEqual(status["checkout"], str(peer))
+        self.assertEqual((worker / "notes.txt").read_bytes(), (peer / "notes.txt").read_bytes())
+
+        # Simulate the receiving host with a distinct Git common dir and a copied state.
+        git(repo, "remote", "add", "origin", "https://github.com/example/cdxdw-fixture.git")
+        moved_manifest = self.root / "peer-handoff.json"
+        self.run_script(*handoff, "export", name, "--out", moved_manifest)
+        clone = self.root / "portable checkout"
+        git(self.root, "clone", "--no-local", "--", str(repo), str(clone))
+        git(clone, "remote", "set-url", "origin", "https://github.com/example/cdxdw-fixture")
+        for ref in json.loads(moved_manifest.read_text(encoding="utf-8"))["refs"]:
+            git(clone, "fetch", str(repo), f"{ref}:{ref}")
+        git(clone, "switch", "--detach", head)
+        text(clone / "notes.txt", "uncommitted fixture note\n")
+        state_copy = self.root / "portable state"
+        shutil.copytree(state, state_copy, ignore=shutil.ignore_patterns("runtime"))
+        verified = self.run_script("cdxdw.py", "handoff", "--repo", clone, "verify", moved_manifest,
+                                   "--worktree", clone, "--state", state_copy)
+        self.assertEqual(json.loads(verified)["outcome"], "MATCH")
+        receiving = self.root / "installed peer state"
+        self.run_script("cdxdw.py", "setup", "--repo", clone, "--state", receiving, "--apply")
+        shutil.copytree(state, receiving, dirs_exist_ok=True, ignore=shutil.ignore_patterns("runtime", "PROJECT.json"))
+        linked = self.root / "peer linked checkout"
+        git(clone, "worktree", "add", "--detach", str(linked), head)
+        text(linked / "notes.txt", "uncommitted fixture note\n")
+        self.run_script("cdxdw.py", "handoff", "--repo", clone, "attach", moved_manifest, "--worktree", linked)
+        received_status = json.loads(self.work(clone, "status", name))
+        self.assertEqual(received_status["checkout"], str(linked))
+        self.assertEqual(received_status["order_sha256"], status["order_sha256"])
+
+    def test_github_receipt_requires_current_exact_sha(self):
+        repo = self.git_project("github-proof")
+        workflow = ".github/workflows/ci.yml"
+        raw = b"name: fixture\n"
+        text(repo / workflow, raw.decode())
+        git(repo, "add", "--", ".")
+        git(repo, "commit", "-m", "Pinned workflow")
+        head = git(repo, "rev-parse", "HEAD")
+        slug = "fixture/project"
+        policy = {"workflow": workflow, "workflow_sha256": hashlib.sha256(raw).hexdigest(), "jobs": ["delivery"]}
+        meta = {"id": 17, "run_attempt": 1, "workflow_id": 3, "event": "merge_group",
+                "repository": {"full_name": slug}, "head_repository": {"full_name": slug},
+                "path": workflow, "head_sha": head, "status": "completed", "conclusion": "success",
+                "created_at": "2026-11-24T00:00:00Z"}
+        row = {"name": "delivery", "head_sha": head, "status": "completed", "conclusion": "success"}
+        with patch.object(cdx_release, "github", side_effect=[meta, [{"jobs": [row]}], {"workflow_runs": [meta]}]):
+            self.assertEqual(cdx_release.check_ci(repo, slug, head, 17, policy)["head"], head)
+        with patch.object(cdx_release, "github", return_value=dict(meta, head_sha="a" * 40)):
+            with self.assertRaisesRegex(Refused, "exact SHA"):
+                cdx_release.check_ci(repo, slug, head, 17, policy)
+        newer = dict(meta, id=18, conclusion="failure")
+        with patch.object(cdx_release, "github", side_effect=[meta, [{"jobs": [row]}],
+                                                             {"workflow_runs": [meta, newer]}]):
+            with self.assertRaisesRegex(Refused, "supersedes"):
+                cdx_release.check_ci(repo, slug, head, 17, policy)
+        artifact = {"name": "build", "id": 12, "expired": False, "digest": "sha256:" + "a" * 64}
+        with patch.object(cdx_release, "github", side_effect=[meta, [{"jobs": [row]}],
+                                                             {"workflow_runs": [meta]}, [{"artifacts": [artifact]}]]):
+            with self.assertRaisesRegex(Refused, "expected GitHub digest"):
+                cdx_release.check_ci(repo, slug, head, 17, dict(policy, artifact_name="build"), "b" * 64)
+
+    def test_integration_conflict_keeps_release_target_and_no_passing_receipt(self):
+        repo = self.git_project("conflicting")
+        text(repo / "settings.txt", "base\n")
+        git(repo, "add", ".")
+        git(repo, "commit", "-m", "Base")
+        base = git(repo, "rev-parse", "HEAD")
+        members = []
+        for number in (1, 2):
+            git(repo, "switch", "-c", f"fixture/{number}", base)
+            text(repo / "settings.txt", f"change {number}\n")
+            git(repo, "commit", "-am", "Fixture conflict")
+            members.append({"order": f"WO-{number:03d}", "order_sha256": str(number) * 64,
+                            "candidate": git(repo, "rev-parse", "HEAD"), "artifact": None})
+        git(repo, "switch", "main")
+        state = self.root / "integration records"
+        state.mkdir()
+        target = "refs/heads/main"
+        series = integration_series(state, target, base, members)
+        series.parent.mkdir(parents=True)
+        result = run_integration(repo, state, SimpleNamespace(target=target, base=base), members, [], series)
+        self.assertEqual(result, 2)
+        identifier = read_json(series)["id"]
+        receipt = read_json(state / "integrations" / f"{identifier}.json")
+        self.assertEqual(receipt["outcome"], "MERGE_FAILED")
+        self.assertEqual(receipt["failed_member"], "WO-002")
+        self.assertEqual(git(repo, "rev-parse", target), base)
+        self.assertEqual(git(repo, "status", "--porcelain"), "")
+
+    def test_report_requires_a_current_external_audit_anchor(self):
+        log, anchor, report = (self.root / name for name in ("audit.jsonl", "anchor.md", "TASK_REPORT.md"))
+        session = str(uuid.uuid4())
+        fields = {"session_id": session, "turn_id": "first-turn", "tool_use_id": "command-1",
+                  "source": "codex-app-server", "tool": "Bash", "input": audit_log.summary({"command": "python check.py"})}
+        audit_log.append_entry(log, dict(fields, kind="call", result={"status": "running"}))
+        audit_log.append_entry(log, dict(fields, kind="result", result={"status": "ok", "exit_code": 0}))
+        saved = list(cdx_audit.verified_entries(log))[-1]
+        text(anchor, f"AUDIT_HEAD file={log} seq={saved['seq']} sha={saved['hash']}\n")
+        observed = saved["ts"][:16] + saved["ts"][-6:]
+        text(report, f"SESSION_ID: {session}\nRAN: `python check.py` exit=0 at={observed}\n")
+        args = ("cdxdw.py", "audit", "report", "--log", log, "--anchor", anchor, "--report", report, "--session", session)
+        self.assertTrue(json.loads(self.run_script(*args))["claims_verified"])
+        text(report, f"SESSION_ID: {session}\nRAN: `python other.py` exit=0 at={observed}\n")
+        self.assertEqual(json.loads(self.run_script(*args, code=2))["outcome"], "FAIL")
+        audit_log.append_entry(log, dict(fields, kind="result", result={"status": "error", "exit_code": 2}))
+        self.assertIn("complete current audit prefix", self.run_script(*args, code=2))
 
     def test_install_is_idempotent_and_preserves_existing_files(self):
         repo = self.git_project("主 project")

@@ -95,6 +95,8 @@ Standard 與 Strict 需鎖定驗收測試。用 `cdxdw work lock-tests --base <S
 
 若公開入口能由命令執行，在派工前加一行 `E2E_COMMAND = ["python", "-m", "your_app", "--smoke-test"]`。命令在候選的暫存副本執行。需要核對發行版的開關或輸出時，加上 `E2E_RUN_PLAN = {"file": "tests/run-plan.json", "run": "smoke"}`，讓驗收依 base 內的 run-plan-v1、候選內程式位置及實際 stdout 的啟動行判定。瀏覽器或人工驗收使用 `work record --kind e2e` 保存實際操作與結果。
 
+付費、裝置或對量測條件敏感的驗收，可選用 `CDX_GATES = {"feasibility": true, "pre_tr": "ci/pre_tr.json"}`，並用 `work preflight` 在正式測試前核對。也可指定量尺、審查包、外部稽核及 PO 原文。 [cdxdw 工具手冊](../tools/CDX-TOOLS.md#量測裝置與外部證據)
+
 ```text
 TESTS_LOCKED:
 - <repo 相對路徑> sha256=<64 位>

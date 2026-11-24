@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 
 import evidence_record
+from cdx_gates import cpu_checks, feasibility, ruler_check
 from cdx_common import (ROOT, SHA, Refused, atomic_write, check_environment, executor, git_environment, json_bytes,
                         lock, read_json, stamp, state_path)
 
@@ -71,7 +72,7 @@ def latest_attempts(state, spec, candidate, artifact=None):
         # .4 wrote operator observations and actual executions under the same kind.
         if kind == "e2e" and row.get("source") == "operator-recorded":
             kind = "manual_e2e"
-        if kind in ("auto", "e2e") or row.get("artifact") == artifact:
+        if kind in ("auto", "e2e", "preflight") or row.get("artifact") == artifact:
             latest[kind] = row
     return latest
 
@@ -97,8 +98,10 @@ def run_plan(repo, candidate, plan, record, stdout=None):
     return result.returncode == 0
 
 
-def run_entry(repo, candidate, command, timeout, record, artifact_path=None, *, plan=None):
-    if not command or not all(isinstance(arg, str) and arg.strip() and "\0" not in arg for arg in command):
+def run_entry(repo, candidate, command, timeout, record, artifact_path=None, *, plan=None, gates=None,
+              input_root=None, preflight_only=False):
+    if not preflight_only and (not command or not all(isinstance(arg, str) and arg.strip() and "\0" not in arg
+                                                    for arg in command)):
         raise Refused("The entry point must be an argv array")
     record["executor"] = executor()
     record["command"] = command
@@ -111,6 +114,19 @@ def run_entry(repo, candidate, command, timeout, record, artifact_path=None, *, 
             evidence_record.materialize(repo, candidate, root)
         except evidence_record.Refused as error:
             raise Refused(str(error)) from error
+        if gates:
+            state, spec = gates
+            try:
+                record["feasibility_sha256"] = feasibility(state, spec)
+                if not cpu_checks(repo, spec, candidate, root.resolve(), input_root, record):
+                    record["outcome"] = "FAIL"
+                    return
+            except (Refused, OSError, ValueError) as error:
+                record.update(outcome="INVALID", preflight_error=str(error))
+                return
+        if preflight_only:
+            record["outcome"] = "PASS"
+            return
         result = subprocess.run(command, cwd=root, env=check_environment(), timeout=timeout, capture_output=True)
         if result.returncode == 0 and artifact_path:
             if Path(artifact_path).is_absolute():
@@ -125,4 +141,6 @@ def run_entry(repo, candidate, command, timeout, record, artifact_path=None, *, 
     record["exit_code"] = result.returncode
     record["outcome"] = "PASS" if result.returncode == 0 else "FAIL"
     if plan and not run_plan(repo, candidate, plan, record, result.stdout):
+        record["outcome"] = "INVALID"
+    if gates and not ruler_check(gates[1]["gates"].get("ruler"), result.stdout, record):
         record["outcome"] = "INVALID"

@@ -7,12 +7,14 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import audit_log
-from cdx_common import report_error
+from cdx_common import Refused, THREAD_ID, report_error
+from cdx_gates import invoke, tail
 
 
 def number(value):
@@ -156,6 +158,40 @@ def audit_status(path):
             "error": counts["error"], "unverified": counts["unverified"]}
 
 
+def check_report(report, log, session, anchor, *, strict=False):
+    if not THREAD_ID.fullmatch(session):
+        raise Refused("Supply the worker's complete session UUID")
+    with tempfile.TemporaryDirectory(prefix="cdxdw-audit-proof-") as folder:
+        root = Path(folder)
+        raw = log.read_bytes()
+        copy = root / "audit.jsonl"
+        copy.write_bytes(raw)
+        entries = list(verified_entries(copy))
+        text = anchor.read_text(encoding="utf-8-sig")
+        problems, matches = audit_log.anchor_problems(list(enumerate(entries, 1)), text, log)
+        head = entries[-1] if entries else {"seq": 0, "hash": audit_log.GENESIS}
+        pinned = any(audit_log.same_file(name, log) and int(sequence) == head["seq"] and digest == head["hash"]
+                     for name, sequence, digest in audit_log.HEAD_LINE.findall(text))
+        if problems or not matches or not pinned:
+            raise Refused("Outside anchor must verify the complete current audit prefix: " + ", ".join(problems))
+        report_bytes = report.read_bytes()
+        sessions = re.findall(r"^[ \t]*SESSION_ID[ \t]*:[ \t]*(\S+)[ \t]*\r?$",
+                              report_bytes.decode("utf-8-sig"), re.M)
+        if sessions != [session]:
+            raise Refused("Task report must name the same observed worker session")
+        report_copy = root / "report.md"
+        report_copy.write_bytes(report_bytes)
+        result = invoke("report_vs_audit.py", ["--report", str(report_copy), "--log", str(copy), "--session", session])
+        output = result.stdout.decode("utf-8", errors="replace")
+    ledger = re.findall(r"^REPORT_VS_AUDIT: PASS claims=(\d+) ok=(\d+).*?\bunverified=(\d+)", output, re.M)
+    complete = (len(ledger) == 1 and int(ledger[0][0]) > 0 and ledger[0][0] == ledger[0][1] and
+                ledger[0][2] == "0")
+    return {"outcome": "PASS" if result.returncode == 0 and (complete or not strict) else "FAIL",
+            "claims_verified": complete, "observation": tail(result), "session": session, "audit_head": head["hash"],
+            "audit_sha256": hashlib.sha256(raw).hexdigest(), "report_sha256": hashlib.sha256(report_bytes).hexdigest(),
+            "anchor_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -166,6 +202,10 @@ def main(argv=None):
     build = sub.add_parser("build", help="project App Server JSONL events into a new audit file")
     build.add_argument("events", type=Path)
     build.add_argument("--out", type=Path, required=True)
+    compare = sub.add_parser("report", help="compare claims against a hash-chained, externally anchored log")
+    for name in ("report", "log", "anchor"):
+        compare.add_argument("--" + name, type=Path, required=True)
+    compare.add_argument("--session", required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "verify":
@@ -174,6 +214,10 @@ def main(argv=None):
         if args.command == "status":
             print(json.dumps(audit_status(args.log), indent=2))
             return 0
+        if args.command == "report":
+            result = check_report(args.report, args.log, args.session, args.anchor, strict=True)
+            print(json.dumps(result, ensure_ascii=False))
+            return 0 if result["outcome"] == "PASS" else 2
         count = build_log(args.events, args.out)
         print(f"CDX_AUDIT imported={count} out={args.out}")
         return 0

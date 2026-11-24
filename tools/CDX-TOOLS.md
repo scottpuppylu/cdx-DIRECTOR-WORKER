@@ -47,6 +47,41 @@
 
 `session status --live` 讀取 thread 與最新回合。`session reconcile` 透過原始 turn ID 或啟動標記找回紀錄，遇到未知回合時保留原狀。工單改版後，仍可用原工單檔名查詢、對帳既有回合。要啟動新版回合，先完成新版派工，再用 `session new --replace` 登記已結束的工作線。只有啟動未獲確認且宿主沒有記錄該次回合時，才用 `reconcile --reset-empty`。
 
+## 量測裝置與外部證據
+
+在派工前，於工單的 `CDX_GATES` 指定需要的檢查，例如下列組合。
+
+```text
+CDX_GATES = {"feasibility": true, "pre_tr": "ci/pre_tr.json", "ruler": {"pattern": "^reading=", "real_line": "reading=42", "expect_min": 10, "cap_key": "skippedOverCap"}, "pack": "render-pack", "audit": true, "po_reply": true}
+```
+
+- `feasibility` 使用 [GATE_FEASIBILITY](../templates/GATE_FEASIBILITY.md)。填實際工單檔名、`REVISION`、完整 base、每個 AC 的基準試跑及結論。量法放寬時，要由另一位審查者測試已知缺陷。核准計畫與驗收會綁定檔案內容。
+- `pre_tr` 指向 base 內已提交的 `pre-tr-v1`。外部輸入需相對路徑、來源及 SHA-256。把實際輸入放在 `--input-root PATH` 下，執行 `work preflight ORDER --candidate SHA`。工具驗內容後放進暫存副本，缺檔或改動會在 CPU 檢查及公開入口前停止。`work e2e` 也會執行這些前置檢查。
+- `ruler` 核對命令 E2E 的 stdout。人工或裝置入口用 `work verify-evidence ORDER --candidate SHA --ruler-log LOG`。零筆、未達門檻或截斷會依上游 ruler 判為 `INVALID`。真實樣本請從實際輸出擷取。
+- `pack` 是 `work/<WO>/evidence/` 下的相對資料夾。`work verify-evidence` 用 `pack_check.py check` 驗檔案和覆蓋，並將內容指紋綁到候選。包內容更新後重驗。
+- `audit` 用已登記的 worker session 或 Desktop chat，以及 `audit/<WO>-worker.jsonl` 核對報告。先用 `audit_log.py head --log LOG` 取得 `AUDIT_HEAD`，由總監保存在獨立位置，再提供 `work verify-evidence --anchor FILE`。也可用 `audit report --report FILE --log LOG --session UUID --anchor FILE` 單獨對帳。核對範圍只涵蓋可觀察且有終態的命令宣稱。
+- `po_reply` 要求 `work record --kind po` 提供 `--reply-file` 和原始訊息定位 `--reply-ref`。保存原始 bytes 與雜湊，後續改判會增加一筆記錄。操作者依專案規則確認帳號及回覆身分。
+
+## 受控發版
+
+在目標專案的 `director_work.json` 設定 `cdx_release_ci.workflow`、`workflow_sha256` 和 `jobs`。使用由發版者確認的 Git workflow blob 計算 SHA-256，填入 CI job 顯示名稱。需交付 CI 建置包可加 `artifact_name`，再以 `--artifact HASH` 比對 GitHub 的 archive SHA-256。重跑 workflow 時，工件名稱須附 `-attempt-N`。
+
+```text
+cdxdw release --repo PROJECT --integration INTEGRATION_UUID --head FULL_DELIVERY_SHA --ci-run RUN_ID
+```
+
+需安裝並登入 GitHub CLI。工具核對 fetch、push 及 GitHub repo 一致，並查同一個 SHA 的最新 workflow run、attempt 和必要工作。遠端合併或 rebase 產生新 SHA 時，交付 tree 要和驗過的整合結果相同、base 可追且自身 CI 通過。預設為 dry run，取得發布授權後可加 `--execute`。推送使用驗證過的完整 SHA。
+
+## Desktop 交接核對
+
+```text
+cdxdw handoff --repo PROJECT export ORDER.md --out HANDOFF.json
+cdxdw handoff --repo PROJECT verify HANDOFF.json --worktree DESTINATION
+cdxdw handoff --repo PROJECT attach HANDOFF.json --worktree ISOLATED_DESTINATION --chat THREAD_UUID
+```
+
+停止原工作線的寫入後匯出清單，在目的地核對候選 refs、暫存／未暫存變更、未追蹤檔及工作線狀態。跨主機時用既有交接方式搬移 Git 資料和狀態備份，以 `verify --state PATH` 核對副本。準備正式接手時，在目的地初始化專屬的 cdxdw 狀態，將確認過的工作紀錄複製到新狀態，使用目的地安裝產生的 `PROJECT.json` 和 `runtime/`。再在同專案的隔離工作樹執行 `attach`。工具保留已派工文件的原 bytes，另記目的地的工作樹與狀態位置。Desktop Local checkout 也可做唯讀核對。原 App Server thread 仍以原路徑及回合對帳。
+
 ## 升級
 
 先結束舊版正在執行的命令，以同一 runtime 操作同一份工單。.3 的鎖目錄可保留作為紀錄，.4 起使用由作業系統釋放的 `.guard` 鎖。.3 舊版收據和文字 E2E 可回查，缺少結構化嘗試時顯示 `LEGACY_NEEDS_VERIFICATION`，重跑或補登後用新版 `final` 核對。

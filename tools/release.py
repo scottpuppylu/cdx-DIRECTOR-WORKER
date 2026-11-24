@@ -220,6 +220,8 @@ class Release:
         self.remote, self.branch = config["remote"], config["branch"]
         self.upstream = f"{self.remote}/{self.branch}"
         self.planned = []
+        self.delivery_head = None
+        self.delivery_base = None
 
     def step(self, name, status, detail=""):
         print(f"STEP {name}: {status}" + (f" {detail}" if detail else ""))
@@ -396,15 +398,18 @@ class Release:
         self.step("scan", "OK", f"{self.upstream}..HEAD: {files} changed file(s), commits, authors: nothing private")
 
     def push(self):
-        head = self.head()
+        head = self.delivery_head or self.head()
         remote_sha = self.remote_branch_sha()
+        if self.delivery_head and remote_sha not in (head, self.delivery_base):
+            raise Stop("The remote release target moved after verification", "recheck integration and CI against the new target")
         if remote_sha == head:
             self.step("push", "SKIP", f"{self.remote} {self.branch} is already {head[:10]}")
             return
         if not self.execute:
             self.planned.append(f"git push {self.remote} HEAD:refs/heads/{self.branch}  (fast-forward, no --force)")
             return
-        proc = git(self.repo, "push", self.remote, f"HEAD:refs/heads/{self.branch}", check=False)
+        source = self.delivery_head or "HEAD"
+        proc = git(self.repo, "push", self.remote, f"{source}:refs/heads/{self.branch}", check=False)
         if proc.returncode != 0:
             raise Stop(f"push rejected: {(proc.stderr or proc.stdout).strip()[-300:]}",
                        "someone pushed meanwhile: run release.py again (it fetches and compares again); never --force")
@@ -418,7 +423,7 @@ class Release:
         return out.split("\t")[0] if out else None
 
     def tag_step(self, version):
-        head = self.head()
+        head = self.delivery_head or self.head()
         if self.tag_done:
             self.step("tag", "SKIP", f"{self.tag} is already on the remote at HEAD")
             return
@@ -494,7 +499,7 @@ def use_work_temp():
     return folder
 
 
-def main(argv=None):
+def main(argv=None, *, delivery_check=None):
     use_work_temp()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--repo", default=".", help="the repository to release (default: current folder)")
@@ -523,6 +528,8 @@ def main(argv=None):
         version = job.check_version()
         job.selftest()
         job.scan()
+        if delivery_check:
+            delivery_check(job)
         if state == "diverged" and not a.execute:
             job.planned.insert(0, f"git switch -c release/{version} {job.upstream}; git merge --no-ff <current branch>")
             job.planned.append(f"git push {job.remote} HEAD:refs/heads/{job.branch}  (the merge, fast-forward)")

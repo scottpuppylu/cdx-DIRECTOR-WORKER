@@ -95,6 +95,14 @@ def handle(call):
     if role and Path(role.get("worktree") or project["repo"]) != worktree:
         return deny("cdx: session is registered to a different checkout") if event == "PreToolUse" else {}
     if event == "SessionStart":
+        origin = call.get("source")
+        if role and origin in ("startup", "resume", "compact"):
+            try:
+                audit_log.append_entry(state_path(state, "audit", session + "-hooks.jsonl"),
+                                       {"source": "codex-hook", "kind": "session-start", "session_id": session,
+                                        "origin": origin, "role": role.get("role")})
+            except (OSError, ValueError, audit_log.CannotRun):
+                print("cdx: unable to record SessionStart observation", file=sys.stderr)
         if role.get("role") in ("worker", "reviewer"):
             if role.get("role") == "reviewer":
                 return context(event, f"cdx 唯讀審查。工單 {role['order']}，候選 {role['candidate']}。")

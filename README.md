@@ -2,7 +2,7 @@
 
 **cdxdw** 是 [DIRECTOR-WORK v2.6.0](https://github.com/scottpuppylu/DIRECTOR-WORK/tree/v2.6.0) 的獨立 Codex 版。你提出需求和驗收方式，Codex 總監把工作交給隔離的工作線，最後拿實際候選和驗收證據回來。中斷後可從工單、工作樹和紀錄接回。
 
-**本文件適用於 `2.6.0-cdx.5` 候選。** 已發行版本可從 GitHub Releases 取得。用 `python -I -B -X utf8 tools/cdxdw.py --version` 核對你手上的套件，再選用對應文件。 [GitHub Releases](https://github.com/scottpuppylu/cdx-DIRECTOR-WORKER/releases) · [版本紀錄](CHANGELOG.md)
+**本文件適用於 `2.6.0-cdx.6` 候選。** 已發行版本可從 GitHub Releases 取得。用 `python -I -B -X utf8 tools/cdxdw.py --version` 核對你手上的套件，再選用對應文件。 [GitHub Releases](https://github.com/scottpuppylu/cdx-DIRECTOR-WORKER/releases) · [版本紀錄](CHANGELOG.md)
 
 [五分鐘開始](#五分鐘開始) · [從交辦到驗收](#從交辦到驗收) · [中斷後怎麼接手](#中斷後怎麼接手) · [升級與回復](#升級與回復) · [指令速查](#指令速查) · [已知限制](#驗證與已知限制)
 
@@ -39,7 +39,7 @@ flowchart LR
 
 ### 方法一　在 Codex 貼上啟動提示詞
 
-在 Codex 打開**你要開發的 Git 專案**，貼上下面這段。若要試候選功能，一併提供你手上 `.5` 套件或 checkout 的路徑。
+在 Codex 打開**你要開發的 Git 專案**，貼上下面這段。若要試候選功能，一併提供你手上 `.6` 套件或 checkout 的路徑。
 
 ```text
 你是這個專案的 DIRECTOR-WORK 總監。使用 cdx-DIRECTOR-WORKER。
@@ -179,7 +179,7 @@ python -I -B -X utf8 tools/cdxdw.py work --repo $project integrate `
   --member "WO-002-report.md=$secondSha" --argv $entry
 ```
 
-發版前用 `work integration-status UUID --expect-head FULL_DELIVERY_SHA` 比對待交付提交。若遠端合併、rebase 或合併佇列產生新的 SHA，對該實際提交重跑驗收和 CI。用 [發版工具](tools/release.py) 之前也可先跑 dry run，核對預計的遠端操作。 [整合與發版手冊](tools/CDX-TOOLS.md#初衷與最終驗收) · [共用工具說明](tools/README.md)
+發版前用 `work integration-status UUID --expect-head FULL_DELIVERY_SHA` 比對待交付提交。`.6` 的 `cdxdw release` 可核對同一交付 SHA 的 GitHub CI、workflow 指紋及所需工作，並沿用發版工具的 dry run。若遠端合併、rebase 或合併佇列產生新的 SHA，需該 SHA 的最新 CI，且交付 tree 必須符合已驗證組合。 [受控發版](tools/CDX-TOOLS.md#受控發版) · [共用工具說明](tools/README.md)
 
 ## 中斷後怎麼接手
 
@@ -189,6 +189,8 @@ python -I -B -X utf8 tools/cdxdw.py work --repo $project integrate `
 4. 根據對帳結果繼續待做步驟。若要選用 `--reset-empty`，先核對宿主確實未接受該次啟動。工作樹已清理時，仍可從封存 ref 重建候選。
 
 [續航手冊](docs/06_resume_lossless.md) · [交接範本](templates/HANDOFF.md) · [回合對帳](tools/CDX-TOOLS.md#中斷後對帳)
+
+`.6` 可在 Desktop 交接前用 `handoff export` 保存清單，到目的地用 `handoff verify` 核對未提交工作、候選 refs 和外部狀態。換到同一專案的隔離工作樹後可使用 `handoff attach`。 [交接指令](tools/CDX-TOOLS.md#desktop-交接核對)
 
 ## Codex 特化與同系列比較
 
@@ -234,9 +236,13 @@ python -I -B -X utf8 tools/cdxdw.py work --repo $project integrate `
 | 審草稿、派工、核准計畫 | `work approve-spec`、`work dispatch`、`work approve-plan` |
 | 看工單及續接位置 | `work status ORDER` |
 | 同步既有 worker 與封存候選 | `work sync-worker ORDER`、`work seal ORDER` |
-| 審查指定候選 | `work review ORDER --candidate SHA --rerun` 或 `session native-review ORDER --candidate SHA` |
+| 審查指定候選 | `work review ORDER --candidate FULL_COMMIT_SHA --rerun` 或 `session native-review ORDER --candidate SHA` |
 | 執行入口、登錄判定和放行 | `work e2e`、`work record`、`work final` |
 | 驗收多線組合 | `work integrate`、`work integration-status UUID --expect-head SHA` |
+| 開啟付費／裝置前檢查 | `work preflight ORDER --candidate SHA` |
+| 驗交付包、外部稽核頭或裝置量尺 | `work verify-evidence ORDER --candidate SHA` |
+| 核對 Desktop 交接 | `handoff export`、`handoff verify`、`handoff attach` |
+| 核對實際交付 SHA 和 GitHub CI | `release --repo PROJECT --integration UUID --head SHA --ci-run RUN_ID` |
 | 對帳 App Server 回合 | `session status ORDER --live`、`session reconcile ORDER` |
 | 查稽核鏈和用量 | `audit verify LOG`、`audit status LOG`、`usage LOG` |
 
@@ -247,7 +253,10 @@ python -I -B -X utf8 tools/cdxdw.py work --repo $project integrate `
 | 路徑 | 讀者會在這裡找到 |
 |---|---|
 | [PURPOSE](PURPOSE.md) · [BOOTSTRAP](BOOTSTRAP.md) | 初衷、角色責任與第一輪建置。 |
-| [角色與權限](docs/01_roles_authority.md) · [溝通與待決](docs/03_communication.md) · [續航](docs/06_resume_lossless.md) · [安全](docs/08_safety_rules.md) | 每輪應核對的工作規則。 |
+| `docs/01_roles_authority.md` | **每輪必讀**。 [角色與權限](docs/01_roles_authority.md) |
+| `docs/03_communication.md` | **每輪必讀**。 [溝通與待決](docs/03_communication.md) |
+| `docs/06_resume_lossless.md` | **每輪必讀**。 [斷點與續航](docs/06_resume_lossless.md) |
+| `docs/08_safety_rules.md` | **每輪必讀**。 [安全規則](docs/08_safety_rules.md) |
 | [用量](docs/04_quota_efficiency.md) · [模型](docs/05_models_effort.md) · [按需程序](docs/06b_on_demand_procedures.md) · [品質](docs/07_quality_gates.md) | 選型、成本、觸發的特殊流程和審查標準。 |
 | [記憶](docs/09_memory.md) · [教訓](docs/10_lessons_learned.md) · [Codex 操作](docs/11_codex_operations.md) · [需求到成品](docs/12_chat_to_product.md) · [安全閘門](docs/13_safety_gates.md) | 知識沉澱、平台操作與實務驗收。 |
 | [範本](templates/) · [平台工具](tools/CDX-TOOLS.md) · [共用工具](tools/README.md) · [外掛](plugin/cdx/) | 人與自動化共同採用的輸入、命令和 Skill。 |
@@ -255,6 +264,8 @@ python -I -B -X utf8 tools/cdxdw.py work --repo $project integrate `
 | `DIRECTOR-<repo>/` | 專案狀態、PO 帳、派工與版本快照、工作線、證據、收據、稽核及 runtime。 |
 
 ## 驗證與已知限制
+
+`.6` 依工單選用可行性、pre-TR 輸入、量尺、交付包、稽核及原始 PO 回覆。每一項需要匹配當前候選的證據。 [候選驗收補強](tools/CDX-TOOLS.md#量測裝置與外部證據)
 
 | `.5` 候選驗證項目 | 已取得的證據 |
 |---|---|
@@ -272,6 +283,8 @@ python -I -B -X utf8 research/probe_app_server.py --native-review
 ```
 
 Windows 的物理唯讀探針在研究環境未通過。真實模型審查、Desktop Handoff、受信任 Hook 的實際事件覆蓋及實際交付 SHA 的遠端 CI 仍待驗證。安裝、工單預覽與本機證據檢查可先使用。 [實驗及重現詳情](research/CDXDW-2026-11-24-INDEPENDENT-REVIEW.md)
+
+[`.6` 缺口補強與驗證範圍](research/CDXDW-2026-11-24-FOLLOWUP.md)
 
 ## 常見問題
 

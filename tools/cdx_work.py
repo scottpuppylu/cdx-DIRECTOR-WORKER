@@ -13,6 +13,8 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gate_check
 from cdx_acceptance import acceptance_lock, attempt, latest_attempts, run_entry
+from cdx_audit import check_report
+from cdx_gates import feasibility, file_hash, invoke, pack_digest, policy, ruler_check, tail
 from cdx_common import (SHA, ROOT, THREAD_ID, VERSION, Refused, atomic_write, check_environment, checkout, common_dir,
                         detached_checkout, executor, git, git_environment, json_bytes,
                         load_project, lock, read_json, report_error, stamp, state_path, within)
@@ -33,7 +35,7 @@ def order_file_id(filename):
     return match[1]
 
 
-def order_spec(state, filename, source=None):
+def order_spec(state, filename, source=None, *, location=None):
     file_id = order_file_id(filename)
     path = source or state_path(state, "orders", filename)
     data = path.read_bytes()
@@ -49,12 +51,24 @@ def order_spec(state, filename, source=None):
     if not rev.isdigit() or int(rev) < 1:
         raise Refused("Order revision must be a positive integer")
     work = state_path(state, "work", order_id)
-    worker_path = Path(field(text, "WORKTREE"))
-    if not worker_path.is_absolute() or Path(field(text, "WORK_DIR")) != work:
+    digest = gate_check.order_hash(data)
+    original_work = field(text, "WORK_DIR")
+    if location:
+        if location.get("order_sha256") != digest or location.get("source_work_dir") != original_work:
+            raise Refused("Handoff location does not match this frozen work order")
+        worker_path = Path(location["worktree"])
+        if not worker_path.is_absolute() or worker_path != worker_path.resolve():
+            raise Refused("Handoff worktree is not a canonical local path")
+    else:
+        worker_path = Path(field(text, "WORKTREE"))
+    if not worker_path.is_absolute() or (not location and Path(original_work) != work):
         raise Refused(f"WORKTREE must be absolute, and WORK_DIR must be {work}")
-    return {"order_id": order_id, "file": filename, "path": path, "text": text, "sha": gate_check.order_hash(data),
+    spec = {"order_id": order_id, "file": filename, "path": path, "text": text, "sha": digest,
             "revision": int(rev), "base": base, "branch": field(text, "NEW_BRANCH"), "work": work,
-            "checkout": worker_path.resolve(), "governance": field(text, "GOVERNANCE")}
+            "checkout": worker_path.resolve(), "governance": field(text, "GOVERNANCE"), "gates": policy(text)}
+    if location:
+        spec["handoff"] = location
+    return spec
 
 
 def validate_checkout(repo, state, spec, *, fresh=False):
@@ -64,7 +78,7 @@ def validate_checkout(repo, state, spec, *, fresh=False):
         raise Refused("Worker must be an isolated worktree of this Git project")
     branch = git(worker, "branch", "--show-current")
     registration = state_path(state, "work", spec["order_id"], "DESKTOP.json")
-    adopted = read_json(registration) if registration.is_file() else {}
+    adopted = spec.get("handoff") or (read_json(registration) if registration.is_file() else {})
     if branch != spec["branch"] and (
             branch or any(adopted.get(key) != value for key, value in desktop_identity(repo, spec).items())):
         raise Refused(f"Expected worktree branch {spec['branch']}; found {branch or 'detached HEAD'}")
@@ -79,7 +93,7 @@ def desktop_identity(repo, spec):
     return {"worktree": str(spec["checkout"]), "git_common_dir": str(common_dir(repo)), "base": spec["base"]}
 
 
-def active_order(state, filename):
+def active_order(state, filename, *, location=None):
     order_id = order_file_id(filename)
     log = state_path(state, "DIRECTOR_LOG.md")
     record = gate_check.dispatch_records(log.read_text(encoding="utf-8-sig")).get(order_id)
@@ -87,7 +101,12 @@ def active_order(state, filename):
         raise Refused("Order is not registered in DIRECTOR_LOG.md")
     revision, digest = record
     snapshot = state_path(state, "order-history", f"{order_id}-r{revision}-{digest}.md")
-    spec = order_spec(state, filename, snapshot if snapshot.is_file() else None)
+    path = state_path(state, "work", order_id, "HANDOFF.json")
+    if location is None and path.is_file():
+        bound = read_json(path)
+        if bound.get("order_sha256") == digest:
+            location = bound
+    spec = order_spec(state, filename, snapshot if snapshot.is_file() else None, location=location)
     dispatch_check(state, spec)
     return spec
 
@@ -519,6 +538,18 @@ def check_final(state, spec, candidate, artifact, *, emit=True):
         result = latest.get(kind, {}).get("outcome", "NOT_RUN")
         if result != "PASS":
             raise Refused(f"{kind}={result}. Record a current successful attempt.")
+    gates = spec.get("gates", {})
+    if gates.get("feasibility") or gates.get("pre_tr"):
+        proof_kind = "e2e" if required_e2e == "e2e" else "preflight"
+        proof = latest.get(proof_kind, {})
+        if (proof.get("outcome") != "PASS" or proof.get("feasibility_sha256") != feasibility(state, spec) or
+                (gates.get("pre_tr") and proof.get("pre_tr", {}).get("exit_code") != 0)):
+            raise Refused("The current candidate needs successful preflight evidence")
+    manual_ruler = gates.get("ruler") and required_e2e == "manual_e2e"
+    if gates.get("ruler"):
+        kind = "evidence" if manual_ruler else "e2e"
+        if latest.get(kind, {}).get("ruler", {}).get("exit_code") != 0:
+            raise Refused("The current candidate needs a valid ruler result")
     report = state_path(state, "work", spec["order_id"], "TASK_REPORT.md")
     report_data = report.read_bytes()
     receipt = read_json(state_path(state, "reviews", f"{spec['order_id']}-{candidate}.json"))
@@ -532,6 +563,24 @@ def check_final(state, spec, candidate, artifact, *, emit=True):
     types = {row.get("type") for row in gate_check.ac_table(spec["text"]).values()}
     if latest[required_e2e].get("artifact") != artifact:
         raise Refused("Latest E2E tested a different build artifact")
+    evidence = latest.get("evidence", {})
+    if gates.get("pack") or gates.get("audit") or manual_ruler:
+        if evidence.get("outcome") != "PASS":
+            raise Refused("Current candidate needs work verify-evidence")
+        if gates.get("pack") and evidence.get("pack_sha256") != pack_digest(state, spec)[1]:
+            raise Refused("Evidence pack changed after verification")
+        if gates.get("audit"):
+            log = state_path(state, "audit", f"{spec['order_id']}-worker.jsonl")
+            audit = evidence.get("audit", {})
+            if (audit.get("report_sha256") != hashlib.sha256(report_data).hexdigest() or
+                    audit.get("audit_sha256") != file_hash(log)):
+                raise Refused("Report or externally anchored audit changed after verification")
+    if gates.get("po_reply"):
+        po = latest.get("po", {})
+        digest = po.get("reply_sha256")
+        if (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest) or not po.get("reply_ref") or
+                file_hash(state_path(state, "po-replies", f"{digest}.txt")) != digest):
+            raise Refused("Current product needs the PO's original reply and source reference")
     manual = latest.get("manual_e2e")
     if manual and manual["outcome"] != "PASS":
         raise Refused(f"manual_e2e={manual['outcome']}")
@@ -552,20 +601,25 @@ def check_final(state, spec, candidate, artifact, *, emit=True):
         raise Refused(f"Product check passed. Waiting for {', '.join(pending)}")
     if emit:
         print(f"CDX_FINAL candidate={candidate} scope=single-order")
-    return {kind: latest[kind]["id"] for kind in ("auto", "e2e", "manual_e2e", "review", "po") if kind in latest}
+    return {kind: latest[kind]["id"] for kind in ("auto", "e2e", "manual_e2e", "review", "po", "preflight", "evidence")
+            if kind in latest}
 
 
 def e2e(repo, state, spec, args):
+    preflight = args.command == "preflight"
+    kind = "preflight" if preflight else "e2e"
+    input_root = Path(args.input_root).resolve() if args.input_root else None
     with acceptance_lock(state, spec, args.candidate):
-        with attempt(state, spec, args.candidate, "e2e", artifact=args.artifact) as record:
+        with attempt(state, spec, args.candidate, kind, artifact=args.artifact) as record:
             dispatch_check(state, spec)
             approved_brief(state, spec)
-            command = json.loads(field(spec["text"], "E2E_COMMAND", allow_comment=False))
-            if not isinstance(command, list):
+            command = None if preflight else json.loads(field(spec["text"], "E2E_COMMAND", allow_comment=False))
+            if not preflight and not isinstance(command, list):
                 raise Refused("E2E_COMMAND must contain an approved JSON argv array")
             with candidate_checkout(repo, state, spec, args.candidate):
-                plan = e2e_run_plan(repo, spec, args.candidate)
-                run_entry(repo, args.candidate, command, args.timeout, record, args.artifact_path, plan=plan)
+                plan = None if preflight else e2e_run_plan(repo, spec, args.candidate)
+                run_entry(repo, args.candidate, command, args.timeout, record, args.artifact_path, plan=plan,
+                          gates=(state, spec), input_root=input_root, preflight_only=preflight)
                 dispatch_check(state, spec)
         print(json.dumps(record, ensure_ascii=False))
         return 0 if record["outcome"] == "PASS" else 2
@@ -595,13 +649,77 @@ def judgment(repo, state, spec, args):
         approved_brief(state, spec)
         if not all(value.strip() for value in (args.actor, args.environment, args.entry, args.expected, args.observed)):
             raise Refused("Record actor, environment, entry point, expected and observed behavior")
+        reply = {}
+        if args.reply_file or args.reply_ref or (args.kind == "po" and spec.get("gates", {}).get("po_reply")):
+            if args.kind != "po" or not args.reply_file or not (args.reply_ref or "").strip():
+                raise Refused("PO replies need both --reply-file and --reply-ref")
+            raw = args.reply_file.read_bytes()
+            if not raw.decode("utf-8-sig").strip():
+                raise Refused("The original PO reply is empty")
+            digest = hashlib.sha256(raw).hexdigest()
+            path = state_path(state, "po-replies", f"{digest}.txt")
+            if path.is_file() and file_hash(path) != digest:
+                raise Refused("Original PO reply was changed")
+            if not path.is_file():
+                atomic_write(path, raw)
+            reply = {"reply_sha256": digest, "reply_ref": args.reply_ref}
         with candidate_checkout(repo, state, spec, args.candidate):
             kind = "manual_e2e" if args.kind == "e2e" else args.kind
             with attempt(state, spec, args.candidate, kind, source="operator-recorded", actor=args.actor,
                          environment=args.environment, entry_point=args.entry, expected=args.expected,
-                         observed=args.observed, artifact=args.artifact) as record:
+                         observed=args.observed, artifact=args.artifact, **reply) as record:
                 record["outcome"] = args.outcome
         print(json.dumps(record, ensure_ascii=False))
+
+
+def verify_evidence(repo, state, spec, args):
+    gates = spec["gates"]
+    manual_ruler = gates.get("ruler") if e2e_kind(spec) == "manual_e2e" else None
+    if not gates.get("pack") and not gates.get("audit") and not manual_ruler:
+        raise Refused("Dispatch the required pack, audit or device ruler proof in CDX_GATES first")
+    with acceptance_lock(state, spec, args.candidate):
+        dispatch_check(state, spec)
+        approved_brief(state, spec)
+        with candidate_checkout(repo, state, spec, args.candidate):
+            with attempt(state, spec, args.candidate, "evidence", artifact=args.artifact) as record:
+                record["outcome"] = "PASS"
+                if manual_ruler:
+                    if not args.ruler_log:
+                        raise Refused("Supply actual device output with --ruler-log")
+                    raw = args.ruler_log.read_bytes()
+                    record["ruler_log_sha256"] = hashlib.sha256(raw).hexdigest()
+                    if not ruler_check(manual_ruler, raw, record):
+                        record["outcome"] = "INVALID"
+                if gates.get("pack"):
+                    pack, digest = pack_digest(state, spec)
+                    result = invoke("pack_check.py", ["check", str(pack)])
+                    record["pack_sha256"] = digest
+                    record["pack_check"] = tail(result)
+                    if result.returncode or pack_digest(state, spec)[1] != digest:
+                        record["outcome"] = "FAIL"
+                if gates.get("audit"):
+                    if not args.anchor:
+                        raise Refused("Supply the independently saved audit head with --anchor")
+                    if (within(args.anchor.resolve(), state_path(state, "work")) or
+                            within(args.anchor.resolve(), spec["checkout"])):
+                        raise Refused("Keep the audit anchor outside worker-controlled directories")
+                    bound = state_path(state, "sessions", f"{spec['order_id']}-worker.json")
+                    worker = read_json(bound) if bound.is_file() else {}
+                    if worker.get("order_sha256") == spec["sha"] and worker.get("thread"):
+                        session = worker["thread"]
+                    else:
+                        desktop = state_path(state, "work", spec["order_id"], "DESKTOP.json")
+                        session = spec.get("handoff", {}).get("chat") or (
+                            read_json(desktop).get("chat") if desktop.is_file() else None)
+                    if not session:
+                        raise Refused("Register the worker session or Desktop chat before auditing its claims")
+                    report = state_path(state, "work", spec["order_id"], "TASK_REPORT.md")
+                    log = state_path(state, "audit", f"{spec['order_id']}-worker.jsonl")
+                    record["audit"] = check_report(report, log, session, args.anchor, strict=True)
+                    if record["audit"]["outcome"] != "PASS":
+                        record["outcome"] = "FAIL"
+        print(json.dumps(record, ensure_ascii=False))
+        return 0 if record["outcome"] == "PASS" else 2
 
 
 def integrate(repo, state, args):
@@ -682,9 +800,9 @@ def run_integration(repo, state, args, members, command, series):
         print(json.dumps(result, ensure_ascii=False))
 
 
-def integration_stale(repo, state, result):
+def integration_stale(repo, state, result, landed_head=None):
     try:
-        if git(repo, "rev-parse", "--verify", result["target"] + "^{commit}") != result["base"]:
+        if git(repo, "rev-parse", "--verify", result["target"] + "^{commit}") not in (result["base"], landed_head):
             return True
         integration_ref = f"refs/cdxdw/integrations/{result['id']}"
         if git(repo, "for-each-ref", "--format=%(objectname)", integration_ref) != result.get("head"):
@@ -703,7 +821,7 @@ def integration_stale(repo, state, result):
     return False
 
 
-def integration_status(repo, state, identifier, expected_head=None):
+def integration_receipt(repo, state, identifier, expected_head=None, *, landed_head=None):
     if str(uuid.UUID(identifier)) != identifier:
         raise Refused("Use the integration UUID")
     result = read_json(state_path(state, "integrations", f"{identifier}.json"))
@@ -715,7 +833,8 @@ def integration_status(repo, state, identifier, expected_head=None):
         else:
             series = integration_series(state, result["target"], result["base"], result["members"])
             with lock(series.with_suffix(".lock")):
-                if not series.is_file() or read_json(series).get("id") != identifier or integration_stale(repo, state, result):
+                if (not series.is_file() or read_json(series).get("id") != identifier or
+                        integration_stale(repo, state, result, landed_head)):
                     result["outcome"] = "STALE"
     if expected_head is not None:
         if not SHA.fullmatch(expected_head):
@@ -723,6 +842,11 @@ def integration_status(repo, state, identifier, expected_head=None):
         result["expected_head"] = expected_head
         if result["outcome"] == "PASS" and result["head"] != expected_head:
             result["outcome"] = "WRONG_DELIVERY_HEAD"
+    return result
+
+
+def integration_status(repo, state, identifier, expected_head=None):
+    result = integration_receipt(repo, state, identifier, expected_head)
     print(json.dumps(result, ensure_ascii=False))
     return 0 if result["outcome"] == "PASS" else 2
 
@@ -744,7 +868,7 @@ def order_status(repo, state, spec, candidate, artifact=None):
     desktop = state_path(state, "work", spec["order_id"], "DESKTOP.json")
     latest = latest_attempts(state, spec, candidate, artifact) if candidate else {}
     statuses = {kind: latest.get(kind, {}).get("outcome", "NOT_RUN")
-                for kind in ("auto", "e2e", "manual_e2e", "review", "po")}
+                for kind in ("auto", "e2e", "manual_e2e", "review", "po", "preflight", "evidence")}
     if statuses["e2e"] == "PASS" and latest["e2e"].get("artifact") != artifact:
         statuses["e2e"] = "DIFFERENT_ARTIFACT"
     if candidate:
@@ -755,6 +879,13 @@ def order_status(repo, state, spec, candidate, artifact=None):
                 statuses[kind] = "LEGACY_NEEDS_VERIFICATION"
     levels = {row.get("type") for row in gate_check.ac_table(spec["text"]).values()}
     required = {"auto", e2e_kind(spec)}
+    gates = spec.get("gates", {})
+    if e2e_kind(spec) == "manual_e2e" and (gates.get("feasibility") or gates.get("pre_tr")):
+        required.add("preflight")
+    if gates.get("audit") or gates.get("pack") or (gates.get("ruler") and e2e_kind(spec) == "manual_e2e"):
+        required.add("evidence")
+    if gates.get("po_reply"):
+        required.add("po")
     recorded = {"manual_e2e", "review", "po"} & latest.keys()
     needed = [kind for kind, status in statuses.items()
               if status != "PASS" and (kind in required or kind in recorded or kind.upper() in levels)]
@@ -763,6 +894,7 @@ def order_status(repo, state, spec, candidate, artifact=None):
     print(json.dumps({"order": spec["order_id"], "revision": spec["revision"], "order_sha256": spec["sha"],
                       "snapshot": str(spec["path"]), "draft": draft_status, "sessions": sessions,
                       "desktop": read_json(desktop) if desktop.is_file() else None,
+                      "checkout": str(spec["checkout"]), "handoff": spec.get("handoff"),
                       "sealed_candidates": seals, "candidate": candidate, "artifact": artifact, "acceptance": statuses,
                       "next": next_step}, ensure_ascii=False))
 
@@ -776,6 +908,8 @@ def plan_approval(state, spec, *, save=False):
     digest = hashlib.sha256(payload).hexdigest()
     snapshot = state_path(state, "reviews", f"{spec['order_id']}-PLAN-{digest}.md")
     expected = {"order_sha256": spec["sha"], "plan_sha256": digest}
+    if spec.get("gates", {}).get("feasibility"):
+        expected["feasibility_sha256"] = feasibility(state, spec)
     if save:
         if not snapshot.exists():
             atomic_write(snapshot, payload)
@@ -794,24 +928,31 @@ def main(argv=None):
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("lock-brief", help="snapshot the product brief after the PO has approved it")
     for command in ("prepare", "adopt", "dispatch", "approve-spec", "approve-plan", "sync-worker", "seal", "review", "e2e",
-                    "record", "final", "status"):
+                    "preflight", "verify-evidence", "record", "final", "status"):
         sub = commands.add_parser(command)
         sub.add_argument("order", help="filename inside DIRECTOR/orders")
-        if command in ("review", "e2e", "record", "final", "status"):
+        if command in ("review", "e2e", "preflight", "verify-evidence", "record", "final", "status"):
             sub.add_argument("--candidate", required=command != "status")
-        if command in ("record", "final", "status"):
+        if command in ("record", "verify-evidence", "final", "status"):
             sub.add_argument("--artifact", help="SHA-256 of the actual build artifact")
-        if command == "e2e":
+        if command in ("e2e", "preflight"):
             sub.add_argument("--timeout", type=int, default=180)
-            sub.add_argument("--artifact-path", help="hash this built file inside the disposable candidate tree")
-            sub.set_defaults(artifact=None)
+            sub.add_argument("--input-root", help="directory containing approved, hash-pinned pre-TR inputs")
+            sub.set_defaults(artifact=None, artifact_path=None)
+            if command == "e2e":
+                sub.add_argument("--artifact-path", help="hash this built file inside the disposable candidate tree")
         if command == "adopt":
             sub.add_argument("--chat", help="UUID of the Desktop chat for status and handoff")
         if command == "record":
+            sub.add_argument("--reply-file", type=Path, help="UTF-8 file with the exact original PO reply")
+            sub.add_argument("--reply-ref", help="original PO message reference")
             sub.add_argument("--kind", required=True, choices=("e2e", "review", "po"))
             sub.add_argument("--outcome", required=True, choices=("PASS", "FAIL", "CHANGES_REQUESTED"))
             for name in ("actor", "environment", "entry", "expected", "observed"):
                 sub.add_argument("--" + name, required=True)
+        if command == "verify-evidence":
+            sub.add_argument("--anchor", type=Path, help="independently preserved AUDIT_HEAD record")
+            sub.add_argument("--ruler-log", type=Path, help="actual device output for a manually run E2E")
         if command == "review":
             sub.add_argument("--rerun", action="store_true", help="execute only the checks pinned in the order")
         elif command == "approve-spec":
@@ -863,10 +1004,12 @@ def main(argv=None):
             review(repo, state, spec, args.candidate, args.rerun)
         elif args.command == "final":
             final_review(repo, state, spec, args.candidate, artifact)
-        elif args.command == "e2e":
+        elif args.command in ("e2e", "preflight"):
             return e2e(repo, state, spec, args)
         elif args.command == "record":
             judgment(repo, state, spec, args)
+        elif args.command == "verify-evidence":
+            return verify_evidence(repo, state, spec, args)
         elif args.command == "seal":
             seal(repo, state, spec)
         elif args.command == "status":

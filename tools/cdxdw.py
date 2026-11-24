@@ -6,7 +6,7 @@ import subprocess
 import sys
 
 
-COMMANDS = ("setup", "doctor", "work", "session", "audit", "usage")
+COMMANDS = ("setup", "doctor", "work", "session", "audit", "usage", "release", "handoff")
 
 
 def main(argv=None):
