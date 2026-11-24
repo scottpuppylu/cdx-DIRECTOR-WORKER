@@ -4,6 +4,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -18,7 +19,8 @@ import cdx_audit
 import cdx_hook
 import cdx_session
 import gate_check
-from cdx_common import ROOT, atomic_write, git, json_bytes, load_project, read_json
+from cdx_acceptance import attempt
+from cdx_common import ROOT, Refused, atomic_write, git, json_bytes, load_project, lock, read_json
 from cdx_usage import summarize_app
 from cdx_work import order_spec
 
@@ -117,7 +119,11 @@ class CDX(unittest.TestCase):
     def test_work_order_full_flow_and_wrong_candidate(self):
         repo = self.git_project("repo")
         text(repo / "calc.txt", "broken\n")
-        text(repo / "verify.py", "from pathlib import Path\nassert Path('calc.txt').read_text().startswith('42\\n')\n")
+        force_failure = self.root / "fail check"
+        text(repo / "verify.py", "from pathlib import Path\nimport os\n"
+             "assert not os.getenv('CDXDW_TEST_SECRET')\n"
+             "assert Path('calc.txt').read_text().startswith('42\\n')\n"
+             f"assert not Path({str(force_failure)!r}).exists()\n")
         git(repo, "add", "--", "calc.txt", "verify.py")
         git(repo, "commit", "-m", "baseline")
         base = git(repo, "rev-parse", "HEAD")
@@ -153,6 +159,7 @@ BASE_REF = main @ {base}
 NEW_BRANCH = codex/wo001
 WORKTREE = {worker}
 WORK_DIR = {work}
+E2E_COMMAND = {json.dumps(verify)}
 
 SCOPE:
 - calc.txt
@@ -162,6 +169,7 @@ FORBIDDEN:
 | ID | type | req | how | expected |
 | --- | --- | --- | --- | --- |
 | AC-1 | AUTO | Fixture computes 42 | Run approved check | Exit 0 |
+| AC-2 | REVIEW | Independently review the output | Read output | Output is clear |
 
 CHECKS:
 - AC-1: {json.dumps(verify)}
@@ -170,9 +178,11 @@ CHECKS:
 - DELIVERABLES: candidate and evidence
 - STOP_RULES: stop after 2 rounds without progress
 """)
-        self.work(repo, "prepare", name)
+        git(repo, "worktree", "add", "--detach", str(worker), base)
+        self.work(repo, "adopt", name)
         self.assertEqual(git(worker, "rev-parse", "HEAD"), base)
         self.assertTrue((worker / ".codex" / "hooks.json").is_file())
+        self.assertEqual(len(list((worker / ".agents" / "skills").glob("cdx-*/SKILL.md"))), 5)
         self.assertEqual(git(worker, "status", "--porcelain"), "")
         self.work(repo, "dispatch", name, code=2)
         text(state / "reviews" / "WO-001-SPEC_REVIEW.md", "AC-1 explicitly verifies 42.\n")
@@ -187,8 +197,7 @@ CHECKS:
         dispatched = order.read_bytes()
         order.write_bytes(dispatched + b"\nDraft for the next revision.\n")
         self.assertIn('"state": "ready"', self.run_script("cdxdw.py", "session", "--repo", repo, "status", name))
-        closed = self.run_script("cdxdw.py", "session", "--repo", repo, "run", name, "--phase", "plan", code=2)
-        self.assertIn("not registered", closed)
+        self.assertEqual(json.loads(self.work(repo, "status", name))["draft"], "EDITED")
         order.write_bytes(dispatched)
         stamp = order_spec(state, name)["sha"]
 
@@ -230,12 +239,14 @@ ACCEPTANCE:
 | ID | actual | evidence | status |
 | --- | --- | --- | --- |
 | AC-1 | exit 0 | {filename} | PASS |
+| AC-2 | Output available | CLI output | READY_FOR_REVIEW |
 """)
 
         report("stale.json")
         self.work(repo, "review", name, "--candidate", head, "--rerun", code=2)
         report("fresh.json")
-        success = self.work(repo, "review", name, "--candidate", head, "--rerun")
+        with patch.dict(os.environ, {"CDXDW_TEST_SECRET": "fixture-credential"}):
+            success = self.work(repo, "review", name, "--candidate", head, "--rerun")
         self.assertIn("CDX_REVIEW AUTO_RERUNS=1", success)
         receipt = read_json(state / "reviews" / f"WO-001-{head}.json")
         self.assertEqual(receipt["candidate"], head)
@@ -244,14 +255,140 @@ ACCEPTANCE:
                       (state / "DIRECTOR_LOG.md").read_text(encoding="utf-8"))
         self.assertIn("checked out", self.work(repo, "review", name, "--candidate", base, code=2))
         final = state / "evidence" / "E2E" / "WO-001" / f"{head}.md"
-        outcome = "ENTRY_POINT: verify.py\nOBSERVED: Process exited 0 with the expected value 42.\n"
-        text(final, f"CANDIDATE_HEAD: {base}\nORDER_SHA256: {stamp}\n{outcome}")
-        self.assertIn("CANDIDATE_HEAD", self.work(repo, "final", name, "--candidate", head, code=2))
-        text(final, f"CANDIDATE_HEAD: {head}\nORDER_SHA256: {stamp}\n{outcome}")
+        text(final, f"CANDIDATE_HEAD: {head}\nORDER_SHA256: {stamp}\nENTRY_POINT: verify.py\nOBSERVED: Failed\n")
+        self.assertIn("e2e=NOT_RUN", self.work(repo, "final", name, "--candidate", head, code=2))
+        self.work(repo, "e2e", name, "--candidate", head)
+        self.assertIn("Waiting for REVIEW", self.work(repo, "final", name, "--candidate", head, code=2))
+        judgment = ("--actor", "independent", "--environment", "fixture", "--entry", "verify.py",
+                    "--expected", "42", "--observed", "42")
+        self.work(repo, "record", name, "--candidate", head, "--kind", "review", "--outcome", "PASS", *judgment)
+        order.write_bytes(dispatched + b"\nAnother draft for the next revision.\n")
         self.assertIn("CDX_FINAL", self.work(repo, "final", name, "--candidate", head))
+        text(force_failure, "force a failure in this environment")
+        failure = self.work(repo, "e2e", name, "--candidate", head, code=2)
+        self.assertEqual(json.loads(failure)["exit_code"], 1)
+        self.assertIn("e2e=FAIL", self.work(repo, "final", name, "--candidate", head, code=2))
+        self.work(repo, "review", name, "--candidate", head, "--rerun", code=2)
+        self.assertEqual(read_json(state / "reviews" / f"WO-001-{head}.json"), receipt)
+        self.assertIn("auto=FAIL", self.work(repo, "final", name, "--candidate", head, code=2))
+        force_failure.unlink()
+        self.work(repo, "seal", name)
+        git(repo, "worktree", "remove", "--force", str(worker))
+        self.work(repo, "review", name, "--candidate", head, "--rerun")
+        self.work(repo, "e2e", name, "--candidate", head)
+        self.assertIn("CDX_FINAL", self.work(repo, "final", name, "--candidate", head))
+        built = json.loads(self.work(repo, "e2e", name, "--candidate", head, "--artifact-path", "calc.txt"))
+        artifact = built["artifact"]
+        self.assertEqual(artifact, hashlib.sha256(b"42\nsecond\n").hexdigest())
+        self.assertIn("different build artifact", self.work(repo, "final", name, "--candidate", head, code=2))
+        self.assertIn("Waiting for REVIEW", self.work(repo, "final", name, "--candidate", head,
+                                                     "--artifact", artifact, code=2))
+        self.work(repo, "record", name, "--candidate", head, "--kind", "review", "--outcome", "PASS",
+                  "--artifact", artifact, *judgment)
+        self.assertIn("CDX_FINAL", self.work(repo, "final", name, "--candidate", head, "--artifact", artifact))
+        self.work(repo, "e2e", name, "--candidate", head)
+        self.work(repo, "record", name, "--candidate", head, "--kind", "po", "--outcome", "CHANGES_REQUESTED",
+                  *judgment)
+        self.assertIn("po=CHANGES_REQUESTED", self.work(repo, "final", name, "--candidate", head, code=2))
         text(brief, brief_text.replace("版次：1", "版次：2").replace("42", "99"))
         self.work(repo, "lock-brief")
         self.assertIn("BRIEF_STALE", self.work(repo, "final", name, "--candidate", head, code=2))
+
+    def test_lock_releases_after_forced_process_exit(self):
+        target = self.root / "session.lock"
+        target.mkdir()  # Old interrupted run marker is kept for inspection.
+        code = ("import pathlib, sys, time\nsys.path.insert(0, sys.argv[1])\n"
+                "from cdx_common import lock\nwith lock(pathlib.Path(sys.argv[2])):\n"
+                " print('LOCKED', flush=True)\n time.sleep(30)")
+        holder = subprocess.Popen([sys.executable, "-I", "-B", "-c", code, str(ROOT / "tools"), str(target)],
+                                  stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(holder.stdout.readline().strip(), "LOCKED")
+            with self.assertRaisesRegex(Refused, "locked by another process"):
+                with lock(target):
+                    self.fail("Acquired an already-held lock")
+        finally:
+            holder.kill()
+            holder.wait(timeout=5)
+            holder.stdout.close()
+        with lock(target):
+            self.assertTrue(target.is_dir())
+
+    def test_integration_checks_the_actual_combination(self):
+        repo = self.git_project("integration-project")
+        for filename in ("left.txt", "right.txt"):
+            text(repo / filename, "1\n")
+        text(repo / "entry.py", "import pathlib, sys\n"
+             "total = sum(int(pathlib.Path(name).read_text()) for name in ('left.txt', 'right.txt'))\n"
+             "print(total)\nraise SystemExit(total > int(sys.argv[1]))\n")
+        git(repo, "add", "--", ".")
+        git(repo, "commit", "-m", "Baseline")
+        base = git(repo, "rev-parse", "HEAD")
+        self.run_script("cdxdw.py", "setup", "--repo", repo, "--apply")
+        _, state, _ = load_project(repo)
+        member_args = []
+        entry = [sys.executable, "-B", "entry.py", "3"]
+        for index, filename in enumerate(("left.txt", "right.txt"), 1):
+            order_id = f"WO-{index:03d}"
+            worker = self.root / order_id
+            name = f"{order_id}-capacity.md"
+            work = state / "work" / order_id
+            text(state / "orders" / name, f"""# {order_id} — check capacity
+ISSUED_BY = director 2026-01-02 10:00
+REVISION = 1
+TRACES_TO = NONE
+PRIMARY_WORKER = fixture
+MODEL / EFFORT = configured / standard
+FALLBACK = manual
+GOVERNANCE = Direct
+BASE_REF = main @ {base}
+NEW_BRANCH = codex/{order_id}
+WORKTREE = {worker}
+WORK_DIR = {work}
+E2E_COMMAND = {json.dumps(entry)}
+
+SCOPE:
+- {filename}
+FORBIDDEN:
+- entry.py
+
+| ID | type | req | how | expected |
+| --- | --- | --- | --- | --- |
+| AC-1 | AUTO | Capacity | Run entry | exit 0 |
+
+CHECKS:
+- AC-1: {json.dumps(entry)}
+
+- DELIVERABLES: candidate and evidence
+- STOP_RULES: stop after 2 rounds without progress
+""")
+            self.work(repo, "prepare", name)
+            self.work(repo, "dispatch", name)
+            text(worker / filename, "2\n")
+            git(worker, "add", "--", filename)
+            git(worker, "commit", "-m", f"Raise {filename}")
+            head = git(worker, "rev-parse", "HEAD")
+            self.work(repo, "seal", name)
+            self.work(repo, "e2e", name, "--candidate", head)
+            # Seed the already verified AUTO receipt. The full review flow has its own entry-point test.
+            spec = order_spec(state, name)
+            report = "RESULT: PASS\n"
+            text(work / "TASK_REPORT.md", report)
+            with attempt(state, spec, head, "auto") as record:
+                record["outcome"] = "PASS"
+            atomic_write(state / "reviews" / f"{order_id}-{head}.json",
+                         json_bytes({"candidate": head, "order_sha256": spec["sha"], "attempt": record["id"],
+                                     "report_sha256": gate_check.order_hash(report.encode())}))
+            member_args.extend(("--member", f"{name}={head}"))
+        common = ("integrate", "--target", "refs/heads/main", "--base", base, *member_args, "--argv")
+        failure = json.loads(self.work(repo, *common, json.dumps(entry), code=2))
+        self.assertEqual(failure["outcome"], "FAIL")
+        self.assertEqual(failure["stdout"]["tail"].strip(), "4")
+        self.assertEqual(git(repo, "rev-parse", "HEAD"), base)
+        success = json.loads(self.work(repo, *common, json.dumps([*entry[:-1], "4"])))
+        self.assertEqual(success["outcome"], "PASS")
+        git(repo, "commit", "--allow-empty", "-m", "Advance target")
+        self.assertEqual(json.loads(self.work(repo, "integration-status", success["id"], code=2))["outcome"], "STALE")
 
     def test_audit_distinguishes_command_and_turn_status(self):
         log = self.root / "audit.jsonl"
@@ -337,6 +474,16 @@ ACCEPTANCE:
         cdx_session.reconcile(RecordedServer(), record, file, reset_empty=False)
         self.assertEqual(read_json(file)["turn"], "accepted")
         self.assertEqual(read_json(file)["state"], "completed")
+
+        record.update(state="starting", turn=None)
+        active = {"id": "accepted", "status": "inProgress", "items": [{"type": "userMessage",
+                  "content": [{"type": "text", "text": f"CDX_ATTEMPT: {attempt}\nfixture"}]}]}
+        with patch.object(RecordedServer, "call", return_value={"data": [active]}):
+            cdx_session.reconcile(RecordedServer(), record, file, reset_empty=False)
+        self.assertEqual(read_json(file)["state"], "running")
+        self.assertEqual(read_json(file)["turn"], "accepted")
+        self.assertEqual(read_json(file.parent / "attempts" / f"{attempt}.json")["evidence_coverage"],
+                         "recovered-history-partial")
 
         record.update(state="starting", turn=None)
         with patch.object(RecordedServer, "call", return_value={"data": [{"id": "previous", "status": "completed"}]}):

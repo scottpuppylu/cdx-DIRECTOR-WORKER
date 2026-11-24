@@ -1,6 +1,6 @@
 # cdx-DIRECTOR-WORKER
 
-這是 **cdx-DIRECTOR-WORKER**（簡稱 **cdxdw**，版本 `2.6.0-cdx.3`）。讓 Codex 當專案總監，把你的需求拆成工單，讓每條施工線在獨立 Git worktree 工作，最後由總監針對交件 commit 重跑驗收。關掉對話或重啟程式後，可以用工單、thread ID 和續航檔接回進度。
+這是 **cdx-DIRECTOR-WORKER**（簡稱 **cdxdw**，版本 `2.6.0-cdx.4`）。讓 Codex 當專案總監，把需求交給獨立工作線，並能查到每個交件候選和預計交付的整合版本通過哪些驗收。
 
 cdxdw 是 [DIRECTOR-WORK v2.6.0](https://github.com/scottpuppylu/DIRECTOR-WORK/tree/v2.6.0) 的獨立 Codex 移植。它與 [dshdw](https://github.com/scottpuppylu/dsh-DIRECTOR-WORKER)、[agydw](https://github.com/scottpuppylu/agy-DIRECTOR-WORKER) 共用工單、閘門和證據格式，各自使用平台的原生能力。平台工具和版本後綴用 `cdx`。用 Git、Python 和 Codex 就能開始。
 
@@ -51,31 +51,26 @@ python -I -B -X utf8 tools/cdxdw.py doctor --repo PROJECT --live
 
 ## 一張工單
 
-總監以 [WORK_ORDER](templates/WORK_ORDER.md) 建立 `WO-001-export.md`，列出 `BASE_REF`、具名分支、絕對 worktree、工作目錄、可改檔案、禁止路徑及 AUTO 指令。環境或專案適合 Desktop 手動施工時，把這份工單交給那個 checkout 的 Codex 對話。App Server 也有可程式化的路徑。
+在 Codex Desktop 開一條 Worktree 工作線。總監用 [WORK_ORDER](templates/WORK_ORDER.md) 填入核准的 base、實際工作樹絕對路徑、可改範圍和驗收命令。若已有乾淨的 Desktop worktree，用 `adopt` 登記。由 cdxdw 建具名 Git worktree 時用 `prepare`。
 
 ```powershell
-python -I -B -X utf8 tools/cdxdw.py work --repo PROJECT prepare WO-001-export.md
+python -I -B -X utf8 tools/cdxdw.py work --repo PROJECT adopt WO-001-export.md
 python -I -B -X utf8 tools/cdxdw.py work --repo PROJECT approve-spec WO-001-export.md --reviewer REVIEWER_ID --author DIRECTOR_ID
 python -I -B -X utf8 tools/cdxdw.py work --repo PROJECT dispatch WO-001-export.md
-python -I -B -X utf8 tools/cdxdw.py session --repo PROJECT new WO-001-export.md
-python -I -B -X utf8 tools/cdxdw.py session --repo PROJECT run WO-001-export.md --phase plan
 ```
 
-總監把核准計畫記為 `work/WO-001/PLAN.md`，執行 `work approve-plan`，再以 `session run … --phase implement` 施工。中斷後用 `session status … --live` 和 `session reconcile …` 檢查是否曾經啟動，並讀取 `RESUME_STATE.md`。
+把派工命令輸出的已核准快照交給該 Codex 對話。總監在 `work/WO-001/PLAN.md` 保存計畫並執行 `work approve-plan`。接手時用 `work status ORDER` 找回工單、工作線及驗收進度。需要程式化啟動與回合事件時，可走 [App Server 路徑](docs/11_codex_operations.md)。
 
-Worker 交出 `TASK_REPORT.md`、報告中的候選 commit 及 `work/WO-001/evidence/`。總監用以下入口綁定候選，檢查範圍、報告及證據，並重新執行工單中核准的 AUTO 檢查：
+Worker 交出 `TASK_REPORT.md`、候選 commit 及 `work/WO-001/evidence/`。封存後，總監可以從 Git ref 重建候選工作樹並重跑。
 
 ```powershell
+python -I -B -X utf8 tools/cdxdw.py work --repo PROJECT seal WO-001-export.md
 python -I -B -X utf8 tools/cdxdw.py work --repo PROJECT review WO-001-export.md --candidate FULL_COMMIT_SHA --rerun
-```
-
-總監再走一次產品的公開入口，將實際結果記到該候選的 [E2E 紀錄](tools/CDX-TOOLS.md#初衷與最終驗收)，然後核對收據與候選。
-
-```powershell
+python -I -B -X utf8 tools/cdxdw.py work --repo PROJECT e2e WO-001-export.md --candidate FULL_COMMIT_SHA
 python -I -B -X utf8 tools/cdxdw.py work --repo PROJECT final WO-001-export.md --candidate FULL_COMMIT_SHA
 ```
 
-`REVIEW` 條件由獨立審查與成品檢查處理。`PO` 條件由你確認後記入裁決。測試、審查和 PO 驗收各有自己的證據。
+`E2E_COMMAND` 隨工單核准。瀏覽器、人工驗收、獨立 REVIEW 和 PO 回覆用 `work record` 記錄。多張工單共同交付時，用 `work integrate` 針對實際整合後的 commit 重驗公開入口。 [工具與升級說明](tools/CDX-TOOLS.md)
 
 ## 該從哪個模式開始
 

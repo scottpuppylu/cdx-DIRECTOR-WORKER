@@ -15,7 +15,7 @@ from cdx_common import (SHA, THREAD_ID, Refused, atomic_write, git, json_bytes, 
                         report_error, state_path)
 from cdx_doctor import certified, sandbox_probe
 from cdx_rpc import AppServer, RPCError, RPCTimeout
-from cdx_work import (approved_brief, dispatch_check, dispatched_copy, order_file_id, order_spec,
+from cdx_work import (active_order, approved_brief, dispatch_check, dispatched_copy, order_file_id,
                       plan_approval, validate_checkout)
 
 
@@ -50,6 +50,17 @@ def validate_binding(record, order_id, filename, role):
 def validate_record(record, spec):
     if record.get("order_sha256") != spec["sha"] or record.get("worktree") != str(spec["checkout"]):
         raise Refused("Saved thread does not match the current work order, role or worktree")
+
+
+def persist_attempt(session_file, record, *, binding=True):
+    identifier = record.get("attempt")
+    if identifier:
+        if not THREAD_ID.fullmatch(identifier):
+            raise Refused("Invalid saved attempt identifier")
+        path = state_path(session_file.parent, "attempts", f"{identifier}.json")
+        atomic_write(path, json_bytes(record))
+    if binding:
+        atomic_write(session_file, json_bytes(record))
 
 
 def create_thread(server, state, spec, record):
@@ -119,14 +130,15 @@ def run_turn(server, state, spec, record, session_file, phase, timeout, observe)
     if phase == "implement":
         policy = {"type": "workspaceWrite", "writableRoots": [str(spec["work"])], "networkAccess": False,
                   "excludeTmpdirEnvVar": True, "excludeSlashTmp": True}
-    record.update(state="starting", attempt=attempt, prior_turn=previous, turn=None, phase=phase)
-    atomic_write(session_file, json_bytes(record))
+    record.update(state="starting", attempt=attempt, prior_turn=previous, turn=None, phase=phase,
+                  order_revision=spec.get("revision"), evidence_coverage="live-stream")
+    persist_attempt(session_file, record)
     response = server.call("turn/start", {"threadId": record["thread"], "cwd": str(spec["checkout"]),
                            "approvalPolicy": "never", "sandboxPolicy": policy,
                            "input": [{"type": "text", "text": prompt}]})
     turn_id = response["turn"]["id"]
     record.update(state="running", turn=turn_id)
-    atomic_write(session_file, json_bytes(record))
+    persist_attempt(session_file, record)
     completed = lambda _: turn_id in observe["completed"]
     try:
         if not completed(None):
@@ -142,7 +154,7 @@ def run_turn(server, state, spec, record, session_file, phase, timeout, observe)
     if status not in TERMINAL:
         raise Refused("App Server did not report a recognized terminal turn status")
     record["state"] = status
-    atomic_write(session_file, json_bytes(record))
+    persist_attempt(session_file, record)
     for message in observe["text"].get(turn_id, []):
         print(message)
     return record
@@ -172,9 +184,9 @@ def reconcile(server, record, session_file, reset_empty):
                            for element in item.get("content", []) if element.get("type") == "text")
             if turn_id == record.get("turn") or (not record.get("turn") and attached):
                 status = turn.get("status")
-                if status in TERMINAL:
-                    record.update(state=status, turn=turn_id)
-                    atomic_write(session_file, json_bytes(record))
+                record.update(state=status if status in TERMINAL else "running", turn=turn_id,
+                              evidence_coverage="recovered-history-partial", native_status=status)
+                persist_attempt(session_file, record)
                 return
         cursor = page.get("nextCursor")
         if reached_prior or not cursor:
@@ -185,7 +197,9 @@ def reconcile(server, record, session_file, reset_empty):
     if count or record.get("turn") or (record.get("prior_turn") and not reached_prior):
         raise Refused("No App Server turn matches the saved launch record")
     if reset_empty:
+        persist_attempt(session_file, dict(record, state="not-started"), binding=False)
         record.update(state="ready", turn=record.get("prior_turn"))
+        record.pop("attempt", None)
         atomic_write(session_file, json_bytes(record))
 
 
@@ -197,7 +211,9 @@ def reconcile_saved(server, record, session_file, reset_empty):
         if not (reset_empty and error.missing_rollout and record.get("state") in ("starting", "ready")
                 and not record.get("turn") and not record.get("prior_turn")):
             raise
+        persist_attempt(session_file, dict(record, state="not-started"), binding=False)
         record.update(state="ready", thread=None)
+        record.pop("attempt", None)
         atomic_write(session_file, json_bytes(record))
         return
     reconcile(server, record, session_file, reset_empty)
@@ -254,7 +270,7 @@ def main(argv=None):
             print(f"CDX_SESSION DIRECTOR {args.thread}")
             return 0
         order_id = order_file_id(args.order)
-        spec = order_spec(state, args.order) if args.command in ("new", "run") else None
+        spec = active_order(state, args.order) if args.command in ("new", "run") else None
         if spec:
             dispatch_check(state, spec)
             head = validate_checkout(repo, state, spec)

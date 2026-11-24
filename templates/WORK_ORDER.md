@@ -93,6 +93,8 @@ CHECKS:
 
 Standard 與 Strict 需鎖定驗收測試。用 `cdxdw work lock-tests --base <SHA> <paths>` 產生指紋，規格審查後才派工。確定沒有可鎖的測試時，填 `- NONE` 並附原因。
 
+若公開入口能由命令執行，在派工前加一行 `E2E_COMMAND = ["python", "-m", "your_app", "--smoke-test"]`。命令在候選的暫存副本執行，exit 0 代表通過。瀏覽器或人工驗收使用 `work record --kind e2e`，保存實際操作與結果。
+
 ```text
 TESTS_LOCKED:
 - <repo 相對路徑> sha256=<64 位>

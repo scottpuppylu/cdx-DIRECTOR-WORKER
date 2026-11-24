@@ -1,6 +1,6 @@
 # DIRECTOR-WORK → cdx-DIRECTOR-WORKER
 
-`cdx-DIRECTOR-WORKER` 的產品簡稱是 `cdxdw`，本版 `2.6.0-cdx.3`。上游 `v2.6.0` commit `787f67bb7483cf07ac45f450a3f9e57262383359`。安裝、工單、審查和恢復由這個 repo 提供。
+`cdx-DIRECTOR-WORKER` 的產品簡稱是 `cdxdw`，本版 `2.6.0-cdx.4`。上游 `v2.6.0` commit `787f67bb7483cf07ac45f450a3f9e57262383359`。安裝、工單、審查和恢復由這個 repo 提供。
 
 ## 對照同系列移植
 
@@ -8,7 +8,7 @@
 |---|---|---|---|---|
 | `dsh-DIRECTOR-WORKER` | `dshdw` | `2.6.0-ds.6` | `dsh_` | DSH 缺少原生 Hook，以本機 session 紀錄事後稽核、獨立工作樹和安全閘門補足。 |
 | `agy-DIRECTOR-WORKER` | `agydw` | `2.6.0-agy.5` | `agy_` | Antigravity 的事前 Hook、角色權限、分支工作區、復工與 transcript 稽核。移植報告另有真實 worker 和獨立 reviewer 的 E2E。 |
-| `cdx-DIRECTOR-WORKER` | `cdxdw` | `2.6.0-cdx.3` | `cdx_` | Codex App Server 的 thread、turn 和 item 事件，配合具名 Git worktree、可選 Hook 與候選 commit 的獨立重跑。現有原生流程驗證採本機仿製模型回覆。 |
+| `cdx-DIRECTOR-WORKER` | `cdxdw` | `2.6.0-cdx.4` | `cdx_` | Desktop 工作樹登記、候選封存、證據嘗試與整合驗收。App Server 支援程式化回合、續航和稽核。 |
 
 cdxdw 採 `<上游版號>-cdx.<移植版次>`。公開入口為 `tools/cdxdw.py`，既有 `tools/cdx.py` 仍可呼叫同一入口。外掛 ID、Skill ID 與儲存指標使用平台前綴。各版本採用的治理機制與此次實作見 [DW 系列比較](research/DW-FAMILY-REVIEW.md)。
 

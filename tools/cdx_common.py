@@ -5,6 +5,7 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import subprocess
 import tempfile
@@ -17,17 +18,22 @@ THREAD_ID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", re.ASCII)
 SHA = re.compile(r"[0-9a-f]{40}", re.ASCII)
 VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+-cdx\.[0-9]+", re.ASCII)
 GIT_LOCATION = {"GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX", "GIT_OBJECT_DIRECTORY",
-                "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_QUARANTINE_PATH"}
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_QUARANTINE_PATH",
+                "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"}
 
 
 class Refused(RuntimeError):
     pass
 
 
+def git_environment():
+    return {key: value for key, value in os.environ.items() if key.upper() not in GIT_LOCATION and
+            not key.upper().startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))}
+
+
 def git(repo, *args, raw=False):
-    env = {key: value for key, value in os.environ.items() if key.upper() not in GIT_LOCATION}
     proc = subprocess.run(["git", "--no-replace-objects", "-C", str(repo), *args],
-                          capture_output=True, timeout=90, env=env)
+                          capture_output=True, timeout=90, env=git_environment())
     if proc.returncode:
         raise Refused(proc.stderr.decode("utf-8", errors="replace").strip() or f"git {args[0]} exited {proc.returncode}")
     return proc.stdout if raw else proc.stdout.decode("utf-8", errors="replace").rstrip("\r\n")
@@ -88,14 +94,47 @@ def atomic_write(path, data):
 
 @contextmanager
 def lock(path):
-    try:
-        path.mkdir()
-    except FileExistsError as error:
-        raise Refused(f"Operation in progress or interrupted. Inspect before removing lock: {path}") from error
-    try:
+    # Keep the OS lock file in place so contenders always open the same inode.
+    # The separate suffix also preserves directories left by older runtimes.
+    path = state_path(path.parent, path.name + ".guard")
+    with path.open("a+b") as handle:
+        if os.name == "nt":
+            import msvcrt
+            handle.seek(0)
+            acquire = lambda: msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            acquire = lambda: fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            acquire()
+        except OSError as error:
+            raise Refused(f"Operation is locked by another process: {path}") from error
         yield
-    finally:
-        path.rmdir()
+
+
+def executor():
+    return {"kind": "local-host", "platform": platform.system(), "machine": platform.node(),
+            "python": platform.python_version(), "filesystem_isolation": "unverified"}
+
+
+def check_environment():
+    # Toolchain discovery and OS basics. Project secrets and arbitrary session variables are excluded.
+    allowed = {"PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC", "TMPDIR", "TEMP", "TMP",
+               "LANG", "LC_ALL", "LC_CTYPE", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE"}
+    return {key: value for key, value in os.environ.items() if key.upper() in allowed}
+
+
+@contextmanager
+def detached_checkout(repo, commit):
+    with tempfile.TemporaryDirectory(prefix="cdxdw-checkout-") as folder:
+        root = Path(folder).resolve()
+        worker = root / "candidate"
+        git(repo, "-c", "core.hooksPath=" + str(root / "no-hooks"), "worktree", "add",
+            "--detach", "--", str(worker), commit)
+        try:
+            yield worker
+        finally:
+            git(repo, "worktree", "remove", "--force", "--", str(worker))
 
 
 def stamp():
