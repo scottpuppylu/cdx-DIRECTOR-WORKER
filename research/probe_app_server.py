@@ -14,7 +14,7 @@ import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from cdx_rpc import AppServer, RPCError
-from cdx_review import review_turn
+from cdx_review import review_server, review_turn
 
 
 def git(repo, *args):
@@ -164,7 +164,7 @@ def native_probe(codex, worker, env, provider):
     events = []
     result = {}
     provider.native_review = True
-    with AppServer(codex, worker, events.append, env=env) as server:
+    with review_server(codex, worker, events.append, env=env) as server:
         review_turn(server, worker, base, 25, result, lambda: None, events)
     summary = {"terminal": result.get("native_status"), "received_review": bool(result.get("review")),
                "base_in_model_input": base in getattr(provider, "review_input", ""),

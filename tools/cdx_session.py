@@ -14,7 +14,7 @@ from cdx_audit import append_app
 from cdx_common import (SHA, THREAD_ID, Refused, atomic_write, git, json_bytes, load_project, lock, read_json,
                         report_error, state_path)
 from cdx_doctor import certified, sandbox_probe
-from cdx_review import native_review, review_target
+from cdx_review import native_review, review_server, review_target
 from cdx_rpc import AppServer, RPCError, RPCTimeout
 from cdx_work import (active_order, approved_brief, dispatch_check, dispatched_copy, order_file_id,
                       plan_approval, validate_checkout)
@@ -332,7 +332,10 @@ def main(argv=None):
             if not executable:
                 raise Refused("Codex CLI was not found on PATH")
             observed = {"completed": {}, "text": {}}
-            with AppServer(executable, repo, event_observer(audit, record, observed)) as server:
+            is_review = args.command == "run" and args.phase == "review"
+            observer = event_observer(audit, record, observed)
+            connection = review_server(executable, spec["checkout"], observer) if is_review else AppServer(executable, repo, observer)
+            with connection as server:
                 if args.command == "run":
                     if args.timeout < 1:
                         raise Refused("Use a positive timeout")

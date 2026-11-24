@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cdx_audit
 import cdx_hook
 import cdx_release
+import cdx_review
 import cdx_session
 import audit_log
 import gate_check
@@ -293,6 +294,25 @@ FEASIBILITY: FEASIBLE
         self.assertEqual(json.loads(self.run_script(*args, code=2))["outcome"], "FAIL")
         audit_log.append_entry(log, dict(fields, kind="result", result={"status": "error", "exit_code": 2}))
         self.assertIn("complete current audit prefix", self.run_script(*args, code=2))
+
+    def test_review_refuses_external_connectors_before_launch(self):
+        config = {"features": {name: False for name in cdx_review.REVIEW_FEATURES},
+                  "web_search": "disabled", "mcp_servers": {}}
+
+        class Server:
+            def __init__(self, data, servers):
+                self.responses = {"config/read": {"config": data}, "mcpServerStatus/list": servers}
+
+            def call(self, method, _):
+                return self.responses[method]
+
+        cdx_review.review_connections(Server(config, {"data": []}), self.root)
+        disabled = dict(config, mcp_servers={"fixture": {"enabled": False}})
+        cdx_review.review_connections(Server(disabled, {"data": [{"name": "fixture", "tools": {}}]}), self.root)
+        with self.assertRaisesRegex(Refused, "confirmed MCP"):
+            cdx_review.review_connections(Server(dict(config, mcp_servers={"outside": {}}), None), self.root)
+        with self.assertRaisesRegex(Refused, "still exposes"):
+            cdx_review.review_connections(Server(config, {"data": [{"name": "outside"}]}), self.root)
 
     def test_install_is_idempotent_and_preserves_existing_files(self):
         repo = self.git_project("主 project")

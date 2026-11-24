@@ -1,14 +1,57 @@
 """Run Codex native review over a sealed work-order range."""
 
+from contextlib import ExitStack, contextmanager
 import hashlib
 import json
 from pathlib import Path
+import re
 import subprocess
 import uuid
 
 from cdx_common import (THREAD_ID, Refused, atomic_write, detached_checkout, git, json_bytes, stamp, state_path)
 from cdx_rpc import AppServer
 from cdx_work import approved_brief, dispatch_check, sealed_ref
+
+
+REVIEW_FEATURES = ("apps", "plugins", "hooks")
+REVIEW_OVERRIDES = (*(f"features.{name}=false" for name in REVIEW_FEATURES),
+                    'web_search="disabled"', "mcp_servers={}")
+
+
+def review_connections(server, cwd):
+    config = server.call("config/read", {"cwd": str(cwd)}).get("config") or {}
+    features = config.get("features") or {}
+    definitions = config.get("mcp_servers")
+    if (config.get("web_search") != "disabled" or not isinstance(definitions, dict) or
+            any(not isinstance(item, dict) or item.get("enabled") is not False for item in definitions.values()) or
+            any(features.get(name) is not False for name in REVIEW_FEATURES)):
+        raise Refused("Review requires confirmed MCP, plugins, Hooks, apps and web search isolation")
+    servers = server.call("mcpServerStatus/list", {"limit": 100})
+    rows = servers.get("data")
+    if (not isinstance(rows, list) or servers.get("nextCursor") or any(
+            not isinstance(row, dict) or row.get("name") not in definitions or
+            any(row.get(key) for key in ("runtimeStatus", "tools", "resources", "resourceTemplates"))
+            for row in rows)):
+        raise Refused("Review runtime still exposes an MCP server")
+
+
+@contextmanager
+def review_server(executable, cwd, observer, *, env=None):
+    with ExitStack() as stack:
+        server = stack.enter_context(AppServer(executable, cwd, observer, env=env, overrides=REVIEW_OVERRIDES))
+        config = server.call("config/read", {"cwd": str(cwd)}).get("config") or {}
+        definitions = config.get("mcp_servers")
+        if not isinstance(definitions, dict):
+            raise Refused("App Server did not disclose effective MCP settings")
+        names = [name for name, item in definitions.items() if not isinstance(item, dict) or item.get("enabled") is not False]
+        if names:
+            if not all(re.fullmatch(r"[A-Za-z0-9_-]+", name) for name in names):
+                raise Refused("Review cannot safely override a configured MCP server name")
+            stack.close()
+            overrides = (*REVIEW_OVERRIDES, *(f"mcp_servers.{name}.enabled=false" for name in names))
+            server = stack.enter_context(AppServer(executable, cwd, observer, env=env, overrides=overrides))
+        review_connections(server, cwd)
+        yield server
 
 
 def review_target(repo, state, spec, candidate):
@@ -77,7 +120,7 @@ def native_review(repo, state, spec, candidate, executable, timeout, preflight):
                     git(worker, "status", "--porcelain", "--untracked-files=all")):
                 raise Refused("Native review checkout does not match the sealed range")
             events = []
-            with AppServer(executable, worker, events.append) as server:
+            with review_server(executable, worker, events.append) as server:
                 preflight(server, state)
                 review_turn(server, worker, target["base"], timeout, record, save, events)
             if (git(worker, "rev-parse", "HEAD") != candidate or

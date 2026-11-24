@@ -11,6 +11,6 @@
 | 量測 coverage 與成品包 | CLI 入口和裝置輸出可跑上游 ruler。審查包用 pack_check 確認格式、覆蓋、檔案及內容指紋。 | 已測 exit 0 且零匹配時回 INVALID、成功樣本、pack 有列檔缺漏時失敗。 |
 | 報告宣稱與可靠稽核 | 已登記 session、報告與最新外部 AUDIT_HEAD 可交給 `audit report` 和工單證據閘門。缺終態、無法核對的宣稱或被截短的稽核不能充當通過證據。 | 測試涵蓋實際可核對、錯命令、舊 anchor。來源完整度依宿主事件。 |
 | PO 回覆和改判 | 選用保存原文與訊息引用。原始 bytes 依 SHA-256 留檔，候選、工件及改判留在 acceptance journal。 | 已驗證逐位元保存與缺引用時拒絕。操作者身分依專案的登入和授權程序。 |
-| App Server／原生 Review 與調度 | 沿用最小原生審查、回合、Hook 與用量取證。可從已留下的 receipts 量測重跑、復工及用量，再決定調度方式。 | 真實模型、實體沙箱、Desktop Local→Worktree→Local 與跨主機操作需要合格環境。 |
+| App Server／原生 Review 與調度 | 審查程序停用 MCP、Apps、Plugins、Hooks 和 web search。啟動前查有效設定及 MCP 清單。可從既有 receipts 量測重跑、復工及用量，再決定調度方式。 | 真實模型、實體沙箱、Desktop Local→Worktree→Local 與跨主機操作需要合格環境。 |
 
 工具與配置見 [工具手冊](../tools/CDX-TOOLS.md)。

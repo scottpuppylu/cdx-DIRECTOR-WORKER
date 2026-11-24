@@ -47,6 +47,8 @@
 
 `session status --live` 讀取 thread 與最新回合。`session reconcile` 透過原始 turn ID 或啟動標記找回紀錄，遇到未知回合時保留原狀。工單改版後，仍可用原工單檔名查詢、對帳既有回合。要啟動新版回合，先完成新版派工，再用 `session new --replace` 登記已結束的工作線。只有啟動未獲確認且宿主沒有記錄該次回合時，才用 `reconcile --reset-empty`。
 
+`session native-review --run` 和 App Server 的 `--phase review` 使用停用 MCP、Apps、Plugins、Hooks 及 web search 的審查程序。啟動模型前核對有效設定與 MCP 清單，並檢查實體唯讀。作業系統的讀取可見範圍仍依有效沙箱而定。
+
 ## 量測裝置與外部證據
 
 在派工前，於工單的 `CDX_GATES` 指定需要的檢查，例如下列組合。
