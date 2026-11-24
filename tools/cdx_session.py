@@ -14,6 +14,7 @@ from cdx_audit import append_app
 from cdx_common import (SHA, THREAD_ID, Refused, atomic_write, git, json_bytes, load_project, lock, read_json,
                         report_error, state_path)
 from cdx_doctor import certified, sandbox_probe
+from cdx_review import native_review, review_target
 from cdx_rpc import AppServer, RPCError, RPCTimeout
 from cdx_work import (active_order, approved_brief, dispatch_check, dispatched_copy, order_file_id,
                       plan_approval, validate_checkout)
@@ -79,6 +80,12 @@ def windows_preflight(server):
         status = server.call("windowsSandbox/readiness", {}).get("status")
         if status != "ready":
             raise Refused(f"Windows sandbox readiness is {status or 'unknown'}; use doctor before starting turns")
+
+
+def review_preflight(server, state):
+    windows_preflight(server)
+    if not certified(sandbox_probe(server, state), "review"):
+        raise Refused("This Codex executor did not prove the read-only filesystem boundary")
 
 
 def phase_request(spec, record, phase, attempt, plan_file=None):
@@ -240,6 +247,11 @@ def main(argv=None):
     commands = parser.add_subparsers(dest="command", required=True)
     registry = commands.add_parser("register-director", help="bind a director thread ID for project Hooks")
     registry.add_argument("thread")
+    native = commands.add_parser("native-review", help="preview or run a native review of a sealed candidate")
+    native.add_argument("order")
+    native.add_argument("--candidate", required=True)
+    native.add_argument("--run", action="store_true", help="launch a new native model review")
+    native.add_argument("--timeout", type=int, default=900)
     for command in ("new", "run", "status", "reconcile"):
         entry = commands.add_parser(command)
         entry.add_argument("order")
@@ -258,6 +270,15 @@ def main(argv=None):
     try:
         active_checkout, state, project = load_project(args.repo)
         repo = Path(project["repo"])
+        if args.command == "native-review":
+            spec = active_order(state, args.order)
+            if not args.run:
+                print(json.dumps(review_target(repo, state, spec, args.candidate), ensure_ascii=False))
+                return 0
+            executable = args.codex or shutil.which("codex")
+            if not executable or args.timeout < 1:
+                raise Refused("Use an installed Codex CLI and a positive timeout")
+            return native_review(repo, state, spec, args.candidate, executable, args.timeout, review_preflight)
         if args.command == "register-director":
             if not THREAD_ID.fullmatch(args.thread):
                 raise Refused("Expected a Codex thread UUID")

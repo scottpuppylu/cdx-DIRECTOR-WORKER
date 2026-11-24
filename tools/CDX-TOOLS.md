@@ -12,18 +12,20 @@
 | `work --repo PROJECT prepare ORDER` | 驗證工單，從完整 BASE_REF 建具名乾淨 worktree |
 | `work … adopt ORDER [--chat UUID]` | 登記已在核准 base 的乾淨 Desktop worktree，支援 detached HEAD |
 | `work … lock-tests --base SHA FILE…` | 依 Git base 顯示測試檔內容指紋 |
-| `work … approve-spec ORDER --reviewer ID --author ID` | 綁定獨立規格審查檔與當前工單 |
+| `work … approve-spec ORDER --reviewer ID --author ID [--active]` | 保存規格審查快照，預設綁草稿，`--active` 綁已派工版 |
 | `work … dispatch ORDER` | 在 DIRECTOR_LOG 記錄工單版次、雜湊及時間 |
 | `work … approve-plan ORDER` | 綁定工單與 PLAN 的 SHA-256 |
-| `work … seal ORDER` 與 `work … status ORDER [--candidate SHA]` | 封存已提交的候選，查派工快照、工作線、候選與驗收進度 |
+| `work … seal ORDER` 與 `work … status ORDER [--candidate SHA] [--artifact HASH]` | 封存已提交的候選，查派工快照、工作線、候選與工件驗收 |
+| `work … sync-worker ORDER` | 同步已派工工作樹內由 cdxdw 管理的 Skill／Hook |
 | `work … review ORDER --candidate SHA [--rerun]` | 核對實際候選、範圍、報告、證據；選用獨立重跑與 receipt |
 | `work … e2e ORDER --candidate SHA [--artifact-path PATH]` | 執行派工鎖定的公開入口，記退出碼、輸出及選用工件 SHA-256 |
 | `work … record ORDER --candidate SHA` | 保存人工或瀏覽器 E2E、獨立 REVIEW 或 PO 原始判定 |
 | `work … final ORDER --candidate SHA [--artifact HASH]` | 核對最近的驗收和人工判定，回報單張工單是否通過 |
-| `work … integrate` 與 `work … integration-status UUID` | 在暫存工作樹合併指定候選，驗收實際整合版本並檢查是否已過期 |
+| `work … integrate` 與 `work … integration-status UUID [--expect-head SHA]` | 驗收實際整合提交，核對收據失效與待發版 SHA |
 | `session … new ORDER [--role reviewer --candidate SHA]` | 登記角色與工單；inactive 歷史可顯式 `--replace` |
 | `session … run ORDER --phase plan/implement/review` | 原生 App Server 回合，沙箱前置實測及雜湊稽核 |
 | `session … status ORDER [--live]` 與 `session … reconcile ORDER` | 查本地或宿主對帳，確認未知項目後續接 |
+| `session … native-review ORDER --candidate SHA [--run]` | 預覽封存的 base、候選及 diff 指紋，顯式執行 Codex 原生審查 |
 | `audit verify LOG`、`audit status LOG`、`audit build EVENTS --out LOG` | 驗證雜湊鏈、對帳工具開始與終態，或由 App Server JSONL 建立摘要 |
 | `usage LOG [--format exec]` | App Server 累計記錄或 Codex exec JSONL 的用量 |
 | `cdx_hook.py` | 由 Codex 透過 stdin JSON 觸發 SessionStart、PreToolUse、PostToolUse |
@@ -35,17 +37,21 @@
 
 完成 `review --rerun` 後，使用 `work e2e` 執行派工內的 JSON 陣列 `E2E_COMMAND`。命令在候選 commit 的暫存副本執行，並記錄退出碼、輸出指紋和執行來源。AUTO 及命令 E2E 會篩選傳給測試的環境變數。這條執行路徑使用本機宿主的檔案權限，陌生來源或需要隔離的檢查須使用有權限邊界的環境。
 
-人工判定用 `work record`，指定 `--kind e2e|review|po`、`--outcome PASS|FAIL|CHANGES_REQUESTED`，以及 `--actor`、`--environment`、`--entry`、`--expected`、`--observed`。以 `--artifact HASH` 綁定實際查看的建置產物。需要放行該工件時，同一個 SHA-256 傳給 `work final`。每次舊紀錄都可回查。最新 AUTO 或 E2E 結果需要為 PASS，工單要求的 REVIEW 與 PO 須各自有判定。
+選用 `E2E_RUN_PLAN = {"file": "tests/run-plan.json", "run": "smoke"}` 時，`file` 必須與工單 base 內檔案相同，格式為上游 `run-plan-v1`。工具先驗候選內的程式參照，執行後對照 stdout 所報的啟動行。參照失效、缺少啟動行或必要參數時，該次為 `INVALID`。
 
-要驗組合，在核准後把 `--target refs/heads/main`、`--base FULL_TARGET_SHA`、兩個或更多 `--member ORDER.md=FULL_CANDIDATE_SHA`、以及批准的 `--argv` JSON 命令交給 `work integrate`。採用順序跟參數順序相同。整合版本的退出碼獨立於各工單，目標前移、工單重派或選用候選改變會使通過結果過期。
+人工判定用 `work record`，指定 `--kind e2e|review|po`、`--outcome PASS|FAIL|CHANGES_REQUESTED`，以及 `--actor`、`--environment`、`--entry`、`--expected`、`--observed`。以 `--artifact HASH` 綁定實際查看的建置產物。同一個 SHA-256 傳給 `work status` 和 `work final`。有 `E2E_COMMAND` 的工單需要該入口的最新執行結果；未指定入口命令的工單需要人工 E2E。同一工件上已記錄的人工失敗也阻擋放行。工單要求的 REVIEW 與 PO 各有獨立判定。
+
+要驗組合，在核准後把 `--target refs/heads/main`、`--base FULL_TARGET_SHA`、兩個或更多 `--member ORDER.md=FULL_CANDIDATE_SHA`、以及批准的 `--argv` JSON 命令交給 `work integrate`。採用順序跟參數順序相同。單項驗收有工件時，為該項追加 `--member-artifact ORDER.md=ARTIFACT_SHA256`。目標、工單、候選、封存 ref、單項證據或最近整合嘗試改變時，舊通過收據會失效。發版前用 `work integration-status UUID --expect-head FULL_DELIVERY_SHA` 核對實際提交。遠端產生另一個 merge/rebase SHA 時，要在實際交付提交重跑 CI。
 
 ## 中斷後對帳
 
 `session status --live` 讀取 thread 與最新回合。`session reconcile` 透過原始 turn ID 或啟動標記找回紀錄，遇到未知回合時保留原狀。工單改版後，仍可用原工單檔名查詢、對帳既有回合。要啟動新版回合，先完成新版派工，再用 `session new --replace` 登記已結束的工作線。只有啟動未獲確認且宿主沒有記錄該次回合時，才用 `reconcile --reset-empty`。
 
-## 從 .3 升級
+## 升級
 
-先結束舊版正在執行的命令，改用 .4 套件跑 `setup` 預覽和 `setup --apply`。.4 使用由作業系統釋放的 `.guard` 鎖，舊版的鎖目錄可保留作為紀錄。請以同一 runtime 操作同一份工單。舊版收據和文字 E2E 可回查，`work status` 將缺少結構化嘗試的項目顯示為 `LEGACY_NEEDS_VERIFICATION`，重跑或補登後即可使用新的 `final`。
+先結束舊版正在執行的命令，以同一 runtime 操作同一份工單。.3 的鎖目錄可保留作為紀錄，.4 起使用由作業系統釋放的 `.guard` 鎖。.3 舊版收據和文字 E2E 可回查，缺少結構化嘗試時顯示 `LEGACY_NEEDS_VERIFICATION`，重跑或補登後用新版 `final` 核對。
+
+用 .5 套件先預覽 `setup`，再加 `--apply`。已有工作中的 worktree 用 `work sync-worker ORDER` 同步，之後在宿主確認 Skill 載入和 Hook 信任。工具更新能對上保留 runtime 的檔案，遇到不認得的本機 Skill 則拒絕覆蓋。舊 spec 收據依原驗法讀取，準備下一版之前可用原報告與 `approve-spec --active` 保存生效版。舊候選 journal 原樣保留，判讀依來源區分人工與實際執行。舊整合 PASS 在新版顯示 `LEGACY_NEEDS_VERIFICATION`，可按原組合重跑。
 
 ## 上游共用工具
 

@@ -274,6 +274,9 @@ ACCEPTANCE:
         failure = self.work(repo, "e2e", name, "--candidate", head, code=2)
         self.assertEqual(json.loads(failure)["exit_code"], 1)
         self.assertIn("e2e=FAIL", self.work(repo, "final", name, "--candidate", head, code=2))
+        with self.subTest("manual success cannot erase a failed executable entry"):
+            self.work(repo, "record", name, "--candidate", head, "--kind", "e2e", "--outcome", "PASS", *judgment)
+            self.assertIn("e2e=FAIL", self.work(repo, "final", name, "--candidate", head, code=2))
         self.work(repo, "review", name, "--candidate", head, "--rerun", code=2)
         self.assertEqual(read_json(state / "reviews" / f"WO-001-{head}.json"), receipt)
         self.assertIn("auto=FAIL", self.work(repo, "final", name, "--candidate", head, code=2))
@@ -283,6 +286,17 @@ ACCEPTANCE:
         self.work(repo, "review", name, "--candidate", head, "--rerun")
         self.work(repo, "e2e", name, "--candidate", head)
         self.assertIn("CDX_FINAL", self.work(repo, "final", name, "--candidate", head))
+        with self.subTest("approving a draft spec preserves the active review"):
+            sr = state / "reviews" / "WO-001-SPEC_REVIEW.md"
+            original_spec_review = sr.read_bytes()
+            order.write_bytes(dispatched.replace(b"REVISION = 1", b"REVISION = 2", 1))
+            text(sr, "Review of the next order revision.\n")
+            self.work(repo, "approve-spec", name, "--reviewer", "reviewer-2", "--author", "director-1")
+            try:
+                self.work(repo, "review", name, "--candidate", head, "--rerun")
+            finally:
+                sr.write_bytes(original_spec_review)
+                order.write_bytes(dispatched)
         built = json.loads(self.work(repo, "e2e", name, "--candidate", head, "--artifact-path", "calc.txt"))
         artifact = built["artifact"]
         self.assertEqual(artifact, hashlib.sha256(b"42\nsecond\n").hexdigest())
@@ -393,8 +407,104 @@ CHECKS:
         self.assertEqual(git(repo, "rev-parse", "HEAD"), base)
         success = json.loads(self.work(repo, *common, json.dumps([*entry[:-1], "4"])))
         self.assertEqual(success["outcome"], "PASS")
+        with self.subTest("a superseded integrated result cannot still pass"):
+            self.work(repo, *common, json.dumps(entry), code=2)
+            self.assertEqual(json.loads(self.work(repo, "integration-status", success["id"], code=2))["outcome"], "STALE")
+        if "proofs" in success["members"][0]:
+            success = json.loads(self.work(repo, *common, json.dumps([*entry[:-1], "4"])))
+            status = ("integration-status", success["id"], "--expect-head")
+            self.assertEqual(json.loads(self.work(repo, *status, success["head"]))["outcome"], "PASS")
+            self.assertEqual(json.loads(self.work(repo, *status, base, code=2))["outcome"], "WRONG_DELIVERY_HEAD")
+            first = success["members"][0]
+            built = json.loads(self.work(repo, "e2e", first["filename"], "--candidate", first["candidate"],
+                                         "--artifact-path", "left.txt"))
+            self.assertEqual(json.loads(self.work(repo, *status, success["head"], code=2))["outcome"], "STALE")
+            with_artifact = json.loads(self.work(repo, *common, json.dumps([*entry[:-1], "4"]),
+                                                 "--member-artifact", f"{first['filename']}={built['artifact']}"))
+            self.assertEqual(with_artifact["members"][0]["artifact"], built["artifact"])
+            success = with_artifact
         git(repo, "commit", "--allow-empty", "-m", "Advance target")
         self.assertEqual(json.loads(self.work(repo, "integration-status", success["id"], code=2))["outcome"], "STALE")
+
+    def test_native_review_preview_and_worker_refresh(self):
+        repo = self.git_project("handoff-project")
+        text(repo / "sample.txt", "start\n")
+        text(repo / "entry.py", "from pathlib import Path\n"
+             "print('argv: --mode ' + ('off' if 'second' in Path('sample.txt').read_text() else 'on'))\n")
+        text(repo / "plans.json", json.dumps({"schema": "run-plan-v1",
+             "runs": {"launch": {"args": ["--mode on"], "code": {"--mode": "entry.py:2"}}}}))
+        git(repo, "add", "--", "sample.txt", "entry.py", "plans.json")
+        git(repo, "commit", "-m", "Baseline")
+        base = git(repo, "rev-parse", "HEAD")
+        self.run_script("cdxdw.py", "setup", "--repo", repo, "--hooks", "--apply")
+        _, state, project = load_project(repo)
+        worker = self.root / "worker"
+        name = "WO-001-review.md"
+        text(state / "orders" / name, f"""# WO-001 — native review
+ISSUED_BY = director 2026-01-02 10:00
+REVISION = 1
+TRACES_TO = NONE
+PRIMARY_WORKER = fixture
+MODEL / EFFORT = configured / standard
+FALLBACK = manual
+GOVERNANCE = Direct
+BASE_REF = main @ {base}
+NEW_BRANCH = codex/wo001
+WORKTREE = {worker}
+WORK_DIR = {state / 'work' / 'WO-001'}
+E2E_COMMAND = {json.dumps([sys.executable, "-B", "entry.py"])}
+E2E_RUN_PLAN = {json.dumps({"file": "plans.json", "run": "launch"})}
+
+SCOPE:
+- sample.txt
+FORBIDDEN:
+- .gitignore
+
+| ID | type | req | how | expected |
+| --- | --- | --- | --- | --- |
+| AC-1 | REVIEW | Reading | Read file | Three lines |
+
+- DELIVERABLES: candidate and evidence
+- STOP_RULES: stop after 2 rounds without progress
+""")
+        self.work(repo, "prepare", name)
+        self.work(repo, "dispatch", name)
+        rel = Path("plugin/cdx/skills/cdx-review-gate/SKILL.md")
+        target = worker / ".agents" / "skills" / rel.parent.name / rel.name
+        old = state / "runtime" / "2.6.0-cdx.1" / rel
+        text(old, "# previous version\n")
+        target.write_bytes(old.read_bytes())
+        text(worker / "sample.txt", "start\nfirst\n")
+        self.work(repo, "sync-worker", name)
+        self.assertEqual(target.read_bytes(), (Path(project["kit"]) / rel).read_bytes())
+        self.assertEqual((worker / "sample.txt").read_bytes(), b"start\nfirst\n")
+        original = target.read_bytes()
+        text(target, "# worker local edit\n")
+        self.assertIn("has local content", self.work(repo, "sync-worker", name, code=2))
+        self.assertEqual(target.read_bytes(), b"# worker local edit\n")
+        target.write_bytes(original)
+        for version in ("start\nfirst\n", "start\nfirst\nsecond\n"):
+            text(worker / "sample.txt", version)
+            git(worker, "add", "--", "sample.txt")
+            git(worker, "commit", "-m", "Update sample")
+            outcome = "INVALID" if "second" in version else "PASS"
+            result = json.loads(self.work(repo, "e2e", name, "--candidate", git(worker, "rev-parse", "HEAD"),
+                                          code=2 if outcome == "INVALID" else 0))
+            self.assertEqual(result["exit_code"], 0)
+            self.assertEqual(result["outcome"], outcome)
+        head = git(worker, "rev-parse", "HEAD")
+        self.work(repo, "seal", name)
+        git(repo, "worktree", "remove", "--force", str(worker))
+        review = ("session", "--repo", repo, "native-review", name, "--candidate")
+        self.run_script("cdxdw.py", *review, base, code=2)
+        target = json.loads(self.run_script("cdxdw.py", *review, head))
+        diff = git(repo, "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--binary", base, head, "--", raw=True)
+        self.assertIn(b"+first", diff)
+        self.assertIn(b"+second", diff)
+        self.assertEqual(target["diff_sha256"], hashlib.sha256(diff).hexdigest())
+        self.assertEqual(target["candidate"], head)
+        self.assertEqual(target["base"], base)
+        self.assertFalse((state / "reviews" / "native").exists())
 
     def test_audit_distinguishes_command_and_turn_status(self):
         log = self.root / "audit.jsonl"

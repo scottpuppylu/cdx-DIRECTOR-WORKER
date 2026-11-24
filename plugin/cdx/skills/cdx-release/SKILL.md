@@ -5,4 +5,4 @@ description: Prepare and verify a release for a cdxdw-managed project with relea
 
 # Release after verification
 
-Read the project's release policy and the cdxdw `docs/07_quality_gates.md` and `tools/CDX-TOOLS.md`. Verify the actual target, candidate ref, complete required test runs, CI for that head, and any unresolved PO acceptance. Use the existing project release path, beginning with its dry run when available. Record the version, commit, verification state, and recovery path. Perform remote publication only within the release authorization already given for the project.
+Read the project's release policy and the cdxdw `docs/07_quality_gates.md` and `tools/CDX-TOOLS.md`. Verify the actual target, candidate ref, complete required test runs, CI for that head, and any unresolved PO acceptance. When using an integration receipt, run `work integration-status ID --expect-head FULL_DELIVERY_SHA`. Use the existing project release path, beginning with its dry run when available. Record the version, commit, verification state, and recovery path. Perform remote publication only within the release authorization already given for the project.

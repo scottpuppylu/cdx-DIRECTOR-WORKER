@@ -1,6 +1,6 @@
 # cdx-DIRECTOR-WORKER
 
-這是 **cdx-DIRECTOR-WORKER**（簡稱 **cdxdw**，版本 `2.6.0-cdx.4`）。讓 Codex 當專案總監，把需求交給獨立工作線，並能查到每個交件候選和預計交付的整合版本通過哪些驗收。
+這是 **cdx-DIRECTOR-WORKER**（簡稱 **cdxdw**，版本 `2.6.0-cdx.5` 候選）。讓 Codex 當專案總監，把需求交給獨立工作線，並能查到每個交件候選和預計交付的整合版本通過哪些驗收。
 
 cdxdw 是 [DIRECTOR-WORK v2.6.0](https://github.com/scottpuppylu/DIRECTOR-WORK/tree/v2.6.0) 的獨立 Codex 移植。它與 [dshdw](https://github.com/scottpuppylu/dsh-DIRECTOR-WORKER)、[agydw](https://github.com/scottpuppylu/agy-DIRECTOR-WORKER) 共用工單、閘門和證據格式，各自使用平台的原生能力。平台工具和版本後綴用 `cdx`。用 Git、Python 和 Codex 就能開始。
 

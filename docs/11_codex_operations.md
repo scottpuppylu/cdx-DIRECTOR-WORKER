@@ -19,6 +19,7 @@
 5. 施工修改完成後，若 Codex 沙箱不允許 Git 索引寫入，總監在候選 checkout 檢查範圍並按專案規則提交；交件紀錄以最後的候選 SHA 為準。
 6. 用 `session status … --live` 核對伺服器歷史。若意外中斷，先 `session reconcile …`，對帳找不到新回合後才用 `--reset-empty`。手動開了另一個 turn 時，對帳會要求處理歸屬。
 7. 驗收前可用 `session new … --role reviewer --candidate <sha>` 和 `session run … --role reviewer --phase review`。Reviewer 使用另一個 root thread 和唯讀寫入探針。共用的父工作線子代理只做相符權限的工作。
+8. 對封存候選用 `session native-review ORDER --candidate FULL_SHA` 預覽 base、候選與 diff 指紋。加上 `--run` 才啟動原生 reviewer。新 thread 位於候選的暫存工作樹，收據在 `reviews/native/`，可與規格、REVIEW AC 和 PO 驗收並讀。
 
 App Server 會拒絕它收到的命令或檔案核准請求。遇到需要外部資源、其他專案或使用者抉擇的情況，將待決項寫入 PO 帳並把對話交回總監。做完單一回合不自動開下一回合。
 

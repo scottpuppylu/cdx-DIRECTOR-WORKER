@@ -1,5 +1,6 @@
 """Probe the installed Codex App Server against disposable local fixtures."""
 
+import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -13,6 +14,7 @@ import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from cdx_rpc import AppServer, RPCError
+from cdx_review import review_turn
 
 
 def git(repo, *args):
@@ -67,16 +69,23 @@ class FixtureProvider(BaseHTTPRequestHandler):
             return
         request = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
         functions = {tool.get("name") for tool in request.get("tools", []) if tool.get("type") == "function"}
-        self.server.shell_tools = sorted(name for name in functions if name and ("shell" in name or "exec" in name))
+        native = getattr(self.server, "native_review", False)
+        if not native:
+            self.server.shell_tools = sorted(name for name in functions if name and ("shell" in name or "exec" in name))
         tool_results = [item for item in request.get("input", []) if item.get("type") == "function_call_output"]
         has_result = bool(tool_results)
         content = {"type": "output_text", "text": "DW_PROBE_OK", "annotations": []}
+        if native:
+            self.server.review_input = json.dumps(request.get("input", []))
+            content["text"] = json.dumps({"findings": [], "overall_correctness": "patch is correct",
+                                          "overall_explanation": "DW_NATIVE_REVIEW_FIXTURE",
+                                          "overall_confidence_score": 1.0})
         item = {"id": "msg_probe", "type": "message", "role": "assistant",
                 "status": "completed", "content": [content]}
         response_id = "resp_probe_final"
         command_tools = {"exec_command": "cmd", "shell_command": "command"}
         command_tool = next((name for name in command_tools if name in functions), None)
-        if command_tool and not has_result:
+        if command_tool and not has_result and not native:
             code = 'python -c "import sys; print(42); sys.exit(7)"'
             item = {"id": "fc_probe", "call_id": "call_probe", "type": "function_call",
                     "name": command_tool, "arguments": json.dumps({command_tools[command_tool]: code}),
@@ -85,8 +94,9 @@ class FixtureProvider(BaseHTTPRequestHandler):
             output = [{"type": "response.output_item.added", "item": dict(item, status="in_progress")},
                       {"type": "response.output_item.done", "item": item}]
         else:
-            self.server.fixture_tool_results = [item.get("output") for item in tool_results
-                                                if item.get("call_id") == "call_probe"]
+            if not native:
+                self.server.fixture_tool_results = [item.get("output") for item in tool_results
+                                                    if item.get("call_id") == "call_probe"]
             output = [
                 {"type": "response.output_item.added", "item": dict(item, status="in_progress", content=[])},
                 {"type": "response.output_text.delta", "item_id": item["id"], "output_index": 0,
@@ -144,14 +154,35 @@ def event_check(server, thread_id, events):
     return summary
 
 
-def probe(codex, root, port):
+def native_probe(codex, worker, env, provider):
+    base = git(worker, "rev-parse", "HEAD")
+    for name in ("first.txt", "second.txt"):
+        (worker / name).write_text(name + "\n", encoding="utf-8")
+        git(worker, "add", "--", name)
+        git(worker, "-c", "user.name=DW Probe", "-c", "user.email=dw-probe@example.invalid",
+            "-c", "commit.gpgSign=false", "commit", "-m", name)
+    events = []
+    result = {}
+    provider.native_review = True
+    with AppServer(codex, worker, events.append, env=env) as server:
+        review_turn(server, worker, base, 25, result, lambda: None, events)
+    summary = {"terminal": result.get("native_status"), "received_review": bool(result.get("review")),
+               "base_in_model_input": base in getattr(provider, "review_input", ""),
+               "commits_from_base": int(git(worker, "rev-list", "--count", base + "..HEAD"))}
+    if summary != {"terminal": "completed", "received_review": True, "base_in_model_input": True,
+                   "commits_from_base": 2}:
+        raise RuntimeError(f"Native review protocol mismatch: {summary}")
+    return summary
+
+
+def probe(codex, root, provider, native_review=False):
     repo, worker = create_fixture(root)
     codex_data = root / "codex data"
     codex_data.mkdir()
     config = (
         'model = "dw-fixture"\nmodel_provider = "dw_fixture"\n'
         '[model_providers.dw_fixture]\nname = "Disposable loopback fixture"\n'
-        f'base_url = "http://127.0.0.1:{port}/v1"\nwire_api = "responses"\n'
+        f'base_url = "http://127.0.0.1:{provider.server_port}/v1"\nwire_api = "responses"\n'
         'requires_openai_auth = false\nrequest_max_retries = 0\nstream_max_retries = 0\n'
         + "".join(f"\n[projects.{json.dumps(str(path), ensure_ascii=False)}]\n"
                   'trust_level = "trusted"\n' for path in (repo, worker))
@@ -193,10 +224,15 @@ def probe(codex, root, port):
             "same_worktree": Path(resumed["thread"]["cwd"]).resolve() == worker.resolve(),
             "latest_turn_status": history["data"][0]["status"] if history["data"] else None,
         }
+    if native_review:
+        summary["native_review"] = native_probe(codex, worker, env, provider)
     return summary
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--native-review", action="store_true")
+    args = parser.parse_args()
     codex = shutil.which("codex")
     if not codex:
         raise RuntimeError("codex executable not found on PATH")
@@ -208,7 +244,7 @@ def main():
         with ThreadingHTTPServer(("127.0.0.1", 0), FixtureProvider) as provider:
             threading.Thread(target=provider.serve_forever, daemon=True).start()
             try:
-                result = probe(codex, root, provider.server_port)
+                result = probe(codex, root, provider, args.native_review)
                 result["loopback_turn"]["available_shell_tools"] = getattr(provider, "shell_tools", [])
                 tool_results = getattr(provider, "fixture_tool_results", [])
                 result["loopback_turn"]["tool_returned"] = bool(tool_results)

@@ -3,12 +3,13 @@
 from contextlib import contextmanager
 import hashlib
 import subprocess
+import sys
 import tempfile
 import uuid
 from pathlib import Path
 
 import evidence_record
-from cdx_common import (SHA, Refused, atomic_write, check_environment, executor, git_environment, json_bytes,
+from cdx_common import (ROOT, SHA, Refused, atomic_write, check_environment, executor, git_environment, json_bytes,
                         lock, read_json, stamp, state_path)
 
 # Keep the upstream tree materializer on the same Git environment as cdxdw.
@@ -49,7 +50,7 @@ def attempt(state, spec, candidate, kind, **metadata):
     atomic_write(path, json_bytes(data))
     try:
         yield record
-        if record["outcome"] not in ("PASS", "FAIL", "CHANGES_REQUESTED", "UNKNOWN"):
+        if record["outcome"] not in ("PASS", "FAIL", "INVALID", "CHANGES_REQUESTED", "UNKNOWN"):
             raise Refused("Attempt has no explicit outcome")
     except KeyboardInterrupt:
         record["outcome"] = "UNKNOWN"
@@ -64,15 +65,46 @@ def attempt(state, spec, candidate, kind, **metadata):
 
 def latest_attempts(state, spec, candidate, artifact=None):
     _, data = journal(state, spec, candidate)
-    return {row["kind"]: row for row in data["attempts"]
-            if row["kind"] in ("auto", "e2e") or row.get("artifact") == artifact}
+    latest = {}
+    for row in data["attempts"]:
+        kind = row["kind"]
+        # .4 wrote operator observations and actual executions under the same kind.
+        if kind == "e2e" and row.get("source") == "operator-recorded":
+            kind = "manual_e2e"
+        if kind in ("auto", "e2e") or row.get("artifact") == artifact:
+            latest[kind] = row
+    return latest
 
 
-def run_entry(repo, candidate, command, timeout, record, artifact_path=None):
+def run_plan(repo, candidate, plan, record, stdout=None):
+    with tempfile.TemporaryDirectory(prefix="cdxdw-run-plan-") as directory:
+        root = Path(directory)
+        config = root / "plan.json"
+        config.write_bytes(plan["data"])
+        args = ["--plan", str(config), "--repo", str(repo), "--commit", candidate]
+        if stdout is not None:
+            output = root / "entry.log"
+            output.write_bytes(stdout)
+            args.extend(("--log", f"{plan['run']}={output}"))
+        result = subprocess.run([sys.executable, "-I", "-B", "-X", "utf8",
+                                 str(ROOT / "tools" / "run_plan_check.py"), *args],
+                                capture_output=True, env=check_environment(), timeout=180)
+    phase = "before" if stdout is None else "after"
+    record.setdefault("run_plan", {"file": plan["file"], "run": plan["run"],
+                                    "sha256": hashlib.sha256(plan["data"]).hexdigest()})
+    record["run_plan"][phase] = {"exit_code": result.returncode,
+                                 "observation": (result.stdout + result.stderr)[-4096:].decode("utf-8", errors="replace")}
+    return result.returncode == 0
+
+
+def run_entry(repo, candidate, command, timeout, record, artifact_path=None, *, plan=None):
     if not command or not all(isinstance(arg, str) and arg.strip() and "\0" not in arg for arg in command):
         raise Refused("The entry point must be an argv array")
     record["executor"] = executor()
     record["command"] = command
+    if plan and not run_plan(repo, candidate, plan, record):
+        record["outcome"] = "INVALID"
+        return
     with tempfile.TemporaryDirectory(prefix="cdxdw-e2e-") as directory:
         root = Path(directory)
         try:
@@ -92,3 +124,5 @@ def run_entry(repo, candidate, command, timeout, record, artifact_path=None):
                           "tail": raw[-4096:].decode("utf-8", errors="replace")}
     record["exit_code"] = result.returncode
     record["outcome"] = "PASS" if result.returncode == 0 else "FAIL"
+    if plan and not run_plan(repo, candidate, plan, record, result.stdout):
+        record["outcome"] = "INVALID"

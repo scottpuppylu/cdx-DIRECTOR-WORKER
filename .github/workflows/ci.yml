@@ -3,6 +3,7 @@ name: cdxdw verification
 on:
   push:
   pull_request:
+  merge_group:
 
 permissions:
   contents: read
