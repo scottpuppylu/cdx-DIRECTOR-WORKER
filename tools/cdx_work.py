@@ -452,8 +452,17 @@ def check_review(repo, state, spec, candidate, worker, result):
                 with log.open("a", encoding="utf-8") as handle:
                     handle.write("\n" + "\n".join(additions) + "\n")
     receipt = state_path(state, "reviews", f"{spec['order_id']}-{candidate}.json")
+    if receipt.is_file():
+        previous = receipt.read_bytes()
+        digest = hashlib.sha256(previous).hexdigest()
+        history = state_path(state, "reviews", "receipt-history", spec["order_id"], f"{candidate}-{digest}.json")
+        if not history.exists():
+            atomic_write(history, previous)
+        elif history.read_bytes() != previous:
+            raise Refused("Archived review receipt does not match its digest")
+    result["report_sha256"] = gate_check.order_hash(report_data)
     atomic_write(receipt, json_bytes({"candidate": candidate, "order_sha256": spec["sha"], "auto": logs,
-                                      "report_sha256": gate_check.order_hash(report_data), "recorded": stamp(),
+                                      "report_sha256": result["report_sha256"], "recorded": stamp(),
                                       "attempt": result["id"],
                                       "po": "PENDING_PO"}))
     print(f"CDX_REVIEW AUTO_RERUNS={len(logs)} receipt={receipt}; REVIEW and PO still separate")

@@ -245,8 +245,14 @@ ACCEPTANCE:
         report("stale.json")
         self.work(repo, "review", name, "--candidate", head, "--rerun", code=2)
         report("fresh.json")
+        legacy_receipt = b'{"old_receipt": true}\r\n'
+        receipt_path = state / "reviews" / f"WO-001-{head}.json"
+        receipt_path.write_bytes(legacy_receipt)
         with patch.dict(os.environ, {"CDXDW_TEST_SECRET": "fixture-credential"}):
             success = self.work(repo, "review", name, "--candidate", head, "--rerun")
+        copied = (receipt_path.parent / "receipt-history" / "WO-001" /
+                  f"{head}-{hashlib.sha256(legacy_receipt).hexdigest()}.json")
+        self.assertEqual(copied.read_bytes(), legacy_receipt)
         self.assertIn("CDX_REVIEW AUTO_RERUNS=1", success)
         receipt = read_json(state / "reviews" / f"WO-001-{head}.json")
         self.assertEqual(receipt["candidate"], head)
