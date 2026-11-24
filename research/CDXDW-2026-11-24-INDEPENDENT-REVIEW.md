@@ -15,7 +15,7 @@
 | dshdw | GitHub `v2.6.0-ds.7` 和 main 是 `ea3107caff43f44576f5af18230f6aa3db0ea2bc`。既有本機 main 在 `v2.5.0-ds.6` `00cd1f6`。遠端另有歷史工作線 `claude/ds-224` `cb336ee`。 | 另建 clone，從 `v2.6.0-ds.6` `df53e79` 追 `.7`，尤其 run-plan、會話稽核、Windows 路徑及 CI 狀態。[正式發版](https://github.com/scottpuppylu/dsh-DIRECTOR-WORKER/releases/tag/v2.6.0-ds.7) |
 | agydw | `v2.6.0-agy.6` 和 main 是 `2df34836c8afa35b07c4a898900312bef1063b99`。遠端未見另外的候選分支。 | 比對 `.3` 到 `.6` 的工作樹、證據、升級與測試。 `.5` 基線 `7d75362`。[正式發版](https://github.com/scottpuppylu/agy-DIRECTOR-WORKER/releases/tag/v2.6.0-agy.6) · [CI](https://github.com/scottpuppylu/agy-DIRECTOR-WORKER/actions/runs/45324462338) |
 
-本輪起點 cdxdw 原 checkout 無未提交版控修改或其他連結工作樹。只見 Git 排除的 Python cache。保留原有 checkout、狀態及候選 refs，在 `D:\cdx-DIRECTOR-WORKER-review` 建立 `codex/cdxdw-independent-review` 從 `a9c8d1e` 施工。版本化 fixture 的工單、refs、報告、Hook 和執行環境都建在暫存 Git 專案。
+本輪起點 cdxdw 原 checkout 無未提交版控修改或其他連結工作樹。只見 Git 排除的 Python cache。保留原有 checkout、狀態及候選 refs，在 `D:\cdx-DIRECTOR-WORKER-review` 建立 `codex/cdxdw-independent-review` 從 `a9c8d1e` 施工。遠端 dshdw 比對另放 `D:\dsh-DIRECTOR-WORKER-research`。版本化 fixture 的工單、refs、報告、Hook 和執行環境都建在暫存 Git 專案。
 
 `git ls-files` 建立 129 檔的候選清單，對比正式版 127 檔，兩版本合計 143 個不重複的 Git blob，候選約 38,185 行。逐檔讀取、解碼、定位入口與查證問題。Codex 平台與重要流程做語意追蹤。大型歷史、相容工具及測試做全文掃描和針對流程的抽查，這部分未完成每行的人工語意審讀。追蹤的檔案全為文字，依賴和生成檔來源另列。每檔指紋在 [閱讀清單](CDXDW-2026-11-24-FILE-REVIEW.md)。
 
@@ -96,9 +96,11 @@ python -I -B -X utf8 tools/selftest.py
 python -I -B -X utf8 research/probe_app_server.py --native-review
 ```
 
-獨立反例使用隔離的 Git archive，已觀察 `.4` 在 E2E 覆蓋、草稿審批和整合舊 PASS 的三個失敗；草稿審批的影響也在同工單下一次 final 出現。測試經公開 CLI，整合測試的 AUTO 前置收據由 fixture 建立，單工單的另一個測試實跑 AUTO。run-plan、工作樹同步、PO 變更、工件與錯候選涵蓋正負例。上游工具套件早期在 Windows 回報 3,159/3,159，有一項 symlink fixture 因權限跳過。原生探針回報實際協議及模型請求範圍，模型輸出由 loopback fixture 固定。Windows 實體唯讀沒有成立，因此同機的正式 `--run` 尚無完成證據。
+獨立反例使用隔離的 Git archive，已觀察 `.4` 在 E2E 覆蓋、草稿審批和整合舊 PASS 的三個失敗。草稿審批的影響也在同工單下一次 final 出現。測試經公開 CLI，整合測試的 AUTO 前置收據由 fixture 建立，單工單的另一個測試實跑 AUTO。run-plan、工作樹同步、PO 變更、工件與錯候選涵蓋正負例。上游工具套件早期在 Windows 回報 3,159/3,159，有一項 symlink fixture 因權限跳過。原生探針回報實際協議及模型請求範圍。模型回覆由 loopback fixture 固定，CLI 的外掛目錄發現另有外部請求，回 401。Windows 實體唯讀沒有成立，因此同機的正式 `--run` 尚無完成證據。
 
 cdxdw 自檢在 Windows Git 2.55.0／Python 3.11.9 和 WSL Ubuntu Git 2.43.0／Python 3.12.3 都是 12/12 通過。隔離專案完成真實打包的 `.3 → .4 → .5` 升級和備份還原 `.5 → .4`，比對 PO 原文、journal、工單、候選 ref 及未提交工作。現場升級仍要在結束執行中的舊指令後部署。保留下來的舊 runtime 可以用於回查，回到舊閘門也會恢復舊判定行為。
+
+發版演練以實作提交 `b9b88a380f1ed0f02f06f188d63aea1695c5f6f2` 從暫存 clone 調用 `tools/release.py`，bare remote 的 main 固定在正式 `.3`。實測分支可快轉、版號與 changelog 對齊、cdxdw selftest 成功、工具內建掃描通過，輸出三個預計遠端步驟。執行前後比較 bare remote 的全部 refs，一致。當地 PATH 沒有 Gitleaks，遠端 CI 發版驗收仍待實際候選環境。
 
 ## 剩餘優先順序
 

@@ -96,6 +96,7 @@ python -I -B -X utf8 tools/cdxdw.py work --repo PROJECT final WO-001-export.md -
 | [Codex 操作](docs/11_codex_operations.md) · [需求到成品](docs/12_chat_to_product.md) · [安全閘門](docs/13_safety_gates.md) | 平台與驗收手冊 |
 | [工具說明](tools/CDX-TOOLS.md) · [範本](templates/) · [Codex plugin](plugin/cdx/) | 安裝、指令、工單表單 |
 | [移植報告](CODEX-PORT.md) · [平台研究](research/CODEX-PLATFORM.md) · [版本紀錄](CHANGELOG.md) | 來源、證據、已知限制 |
+| [獨立研究](research/CDXDW-2026-11-24-INDEPENDENT-REVIEW.md) · [逐檔清單](research/CDXDW-2026-11-24-FILE-REVIEW.md) | 候選差異、可執行重現與驗證 |
 
 ## 常見問題
 

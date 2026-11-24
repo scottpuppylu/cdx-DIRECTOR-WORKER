@@ -11,8 +11,8 @@
 | Git、Python ≥ 3.9 | 所有 CLI、本機 worktree、CI | AST 3.9；Git 與 Python 3.11 Windows、系統 Python 3.12 WSL |
 | Codex CLI、App Server、模型 provider | session、doctor、research probe | CLI 0.160.1 生成 schema；Responses fixture 走 loopback |
 | GitHub CLI、GitHub Actions | `tools/release.py`、CI | 查詢遠端發布和 run；發布由專案授權 |
-| Docker、容器基底、Claude CLI、套件與網路配置 | `tools/container/Dockerfile`、`run_worker.sh` | 保留的原版相容材料；本輪沒有啟動 |
-| pre-commit、Gitleaks | `templates/.pre-commit-config.yaml` | 相容範本與設定；各下游需自行啟用 |
+| Docker、容器基底、Claude CLI、套件與網路配置 | `tools/container/Dockerfile`、`run_worker.sh` | Dockerfile 固定 `python:3.12-slim-bookworm` manifest digest 與 Claude Code `2.1.317`。Git、iptables、curl 與 CA 由 apt 安裝。保留作上游相容，本輪未啟動。 |
+| pre-commit、Gitleaks | `templates/.pre-commit-config.yaml` | 範本使用 repo-local 執行入口，Gitleaks 依本機 PATH 選用。各下游自行啟用。 |
 | Desktop／原版 Artifact Host | `work adopt`、`choice_page.html`／`choice_reconcile.py` | Git 採用與 worktree 以 fixture 測；原生 UI 另驗 |
 
 | 路徑 | 候選內容與正式版差異 | 使用流程／入口 | 查證點 |
@@ -70,7 +70,7 @@
 | `templates/SETTINGS_MANIFEST.md` | 32 行 · `e4567323184523ac` | 驗收 · 執行環境與設定差異 | 換執行器與無效結果的判定 |
 | `templates/SPEC_REVIEW.md` | 44 行 · `2e9f7878f9fb0048` | 派工 · 獨立規格審查格式 | approve-spec 的 hash 不等於作者身分證明 |
 | `templates/TASK_REPORT.md` | 43 行 · `b33edfa83448f925` | 驗收 · worker 候選、AC、測試與證據 | gate_check、report_vs_audit 和 final 的不同輸入 |
-| `templates/TEST_REQUEST.md` | 24 行 · `654fef03f01d77d7` | 派工 · TEST_REQUEST、CODE_REFS 和評量 | run_plan_check 的新聞字與執行前鎖輸入 |
+| `templates/TEST_REQUEST.md` | 24 行 · `654fef03f01d77d7` | 派工 · TEST_REQUEST、CODE_REFS 和評量 | run_plan_check 的程式參照與執行前鎖輸入 |
 | `templates/WORKER_PLAN.md` | 11 行 · `20abfdeb7800dba8` | 派工 · worker 產出的驗收計畫 | Standard／Strict 的批准時點與快照 |
 | `templates/WORK_ORDER.md` | 121 行 · `09e8e942a4955d2e`，.3 119 行 [4bd65063188dd455] | 派工 · BRIEF、BASE_REF、scope、AC、E2E | CLI 驗參與最後提交點 |
 | `templates/choice_page.html` | 396 行 · `b5f302a6067e4e04` | PO 相容 · 選項 Artifact 介面、回覆與 token | 需要原版宿主協議，Codex 手動帳本仍可用 |
