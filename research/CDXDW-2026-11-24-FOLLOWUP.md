@@ -11,6 +11,16 @@
 | 量測 coverage 與成品包 | CLI 入口和裝置輸出可跑上游 ruler。審查包用 pack_check 確認格式、覆蓋、檔案及內容指紋。 | 已測 exit 0 且零匹配時回 INVALID、成功樣本、pack 有列檔缺漏時失敗。 |
 | 報告宣稱與可靠稽核 | 已登記 session、報告與最新外部 AUDIT_HEAD 可交給 `audit report` 和工單證據閘門。缺終態、無法核對的宣稱或被截短的稽核不能充當通過證據。 | 測試涵蓋實際可核對、錯命令、舊 anchor。來源完整度依宿主事件。 |
 | PO 回覆和改判 | 選用保存原文與訊息引用。原始 bytes 依 SHA-256 留檔，候選、工件及改判留在 acceptance journal。 | 已驗證逐位元保存與缺引用時拒絕。操作者身分依專案的登入和授權程序。 |
-| App Server／原生 Review 與調度 | 審查程序停用 MCP、Apps、Plugins、Hooks 和 web search。啟動前查有效設定及 MCP 清單。可從既有 receipts 量測重跑、復工及用量，再決定調度方式。 | 真實模型、實體沙箱、Desktop Local→Worktree→Local 與跨主機操作需要合格環境。 |
+| App Server／原生 Review 與調度 | 審查程序停用 MCP、Apps、Plugins、Hooks 和 web search。啟動前查有效設定及 MCP 清單。可從既有 receipts 量測重跑、復工及用量，再決定調度方式。 | Windows MXC、真實模型 Review 和 Desktop 本機交接已完成下列實測。 |
+
+## 發布實測
+
+| 項目 | 結果 |
+|---|---|
+| Windows MXC | 已保存 `features.prefer_mxc = true`，App Server 回報 `ready`。唯讀模式的寫入返回非零且檔案未建立。工作區寫入模式可在指定目錄建立檔案，對工作區外的測試目錄寫入會被拒絕。 [Windows 沙箱設定](https://learn.chatgpt.com/docs/windows/windows-sandbox) |
+| 真實模型原生 Review | 透過 Desktop 隨附的 Codex `0.171.0-alpha.13.2` 和已登入帳號執行。收據綁定兩提交範圍和 diff SHA-256。模型找出第一個提交造成 `average([])` 拋出 `ZeroDivisionError` 的回歸，並確認了觸發條件。 |
+| Desktop 交接 | Local → Worktree → Local 兩次均回報完成。目的地讀得到原模型回覆，兩端 `handoff verify` 均返回 `MATCH`。用相同的 Git 與工作線資料在 Desktop 建立的 detached 工作樹執行 `handoff attach`，工單狀態讀到新位置。 |
+
+Windows 和 WSL 之間的 Desktop 搬運，以及受信任 Hook 在 Desktop 實際 compact 時的事件覆蓋，未納入這次實測。
 
 工具與配置見 [工具手冊](../tools/CDX-TOOLS.md)。

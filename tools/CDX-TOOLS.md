@@ -84,6 +84,8 @@ cdxdw handoff --repo PROJECT attach HANDOFF.json --worktree ISOLATED_DESTINATION
 
 停止原工作線的寫入後匯出清單，在目的地核對候選 refs、暫存／未暫存變更、未追蹤檔及工作線狀態。跨主機時用既有交接方式搬移 Git 資料和狀態備份，以 `verify --state PATH` 核對副本。準備正式接手時，在目的地初始化專屬的 cdxdw 狀態，將確認過的工作紀錄複製到新狀態，使用目的地安裝產生的 `PROJECT.json` 和 `runtime/`。再在同專案的隔離工作樹執行 `attach`。工具保留已派工文件的原 bytes，另記目的地的工作樹與狀態位置。Desktop Local checkout 也可做唯讀核對。原 App Server thread 仍以原路徑及回合對帳。
 
+`attach` 接受工單指定的分支或 detached HEAD。Desktop 若在目的地建立另一個分支，先用 `verify` 確認交接資料，再以目前提交進入 detached HEAD（`git switch --detach HEAD`）並重新執行 `verify` 與 `attach`。若要用 Desktop 繼續搬運該分支，可先完成搬運，再決定在哪個隔離工作樹登記接手。Desktop 若要求清空輸入狀態，請開啟目前的測試或工作對話，確認草稿及待送訊息均已處理後重試。
+
 ## 升級
 
 先結束舊版正在執行的命令，以同一 runtime 操作同一份工單。.3 的鎖目錄可保留作為紀錄，.4 起使用由作業系統釋放的 `.guard` 鎖。.3 舊版收據和文字 E2E 可回查，缺少結構化嘗試時顯示 `LEGACY_NEEDS_VERIFICATION`，重跑或補登後用新版 `final` 核對。

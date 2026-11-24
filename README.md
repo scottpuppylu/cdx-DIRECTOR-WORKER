@@ -2,7 +2,7 @@
 
 **cdxdw** 是 [DIRECTOR-WORK v2.6.0](https://github.com/scottpuppylu/DIRECTOR-WORK/tree/v2.6.0) 的獨立 Codex 版。你提出需求和驗收方式，Codex 總監把工作交給隔離的工作線，最後拿實際候選和驗收證據回來。中斷後可從工單、工作樹和紀錄接回。
 
-**本文件適用於 `2.6.0-cdx.6` 候選。** 已發行版本可從 GitHub Releases 取得。用 `python -I -B -X utf8 tools/cdxdw.py --version` 核對你手上的套件，再選用對應文件。 [GitHub Releases](https://github.com/scottpuppylu/cdx-DIRECTOR-WORKER/releases) · [版本紀錄](CHANGELOG.md)
+**本文件適用於 `2.6.0-cdx.6`。** 從 GitHub Releases 取得發行版，並用 `python -I -B -X utf8 tools/cdxdw.py --version` 核對手上的套件。 [GitHub Releases](https://github.com/scottpuppylu/cdx-DIRECTOR-WORKER/releases) · [版本紀錄](CHANGELOG.md)
 
 [五分鐘開始](#五分鐘開始) · [從交辦到驗收](#從交辦到驗收) · [中斷後怎麼接手](#中斷後怎麼接手) · [升級與回復](#升級與回復) · [指令速查](#指令速查) · [已知限制](#驗證與已知限制)
 
@@ -35,11 +35,11 @@ flowchart LR
 
 ## 五分鐘開始
 
-準備既有 Git 專案、Git、Python 3.9 以上，以及可開啟本機專案的 Codex。一般安裝與驗收工具由 Python 執行。若要使用 App Server、原生 Review 或線上診斷，還需要可用的 Codex CLI。候選版的原生協議實驗使用 CLI `0.160.1`。
+準備既有 Git 專案、Git、Python 3.9 以上，以及可開啟本機專案的 Codex。一般安裝與驗收工具由 Python 執行。若要使用 App Server、原生 Review 或線上診斷，還需要可用的 Codex CLI。若 PATH 上的 CLI 版本不支援目前所選的模型，可用 `session native-review --codex PATH` 指定相容的 Codex 執行檔。
 
 ### 方法一　在 Codex 貼上啟動提示詞
 
-在 Codex 打開**你要開發的 Git 專案**，貼上下面這段。若要試候選功能，一併提供你手上 `.6` 套件或 checkout 的路徑。
+在 Codex 打開**你要開發的 Git 專案**，貼上下面這段。若已下載 `.6` 套件，一併提供套件或 checkout 的路徑。
 
 ```text
 你是這個專案的 DIRECTOR-WORK 總監。使用 cdx-DIRECTOR-WORKER。
@@ -282,9 +282,7 @@ python -I -B -X utf8 research/reproduce_cdxdw.py
 python -I -B -X utf8 research/probe_app_server.py --native-review
 ```
 
-Windows 的物理唯讀探針在研究環境未通過。真實模型審查、Desktop Handoff、受信任 Hook 的實際事件覆蓋及實際交付 SHA 的遠端 CI 仍待驗證。安裝、工單預覽與本機證據檢查可先使用。 [實驗及重現詳情](research/CDXDW-2026-11-24-INDEPENDENT-REVIEW.md)
-
-[`.6` 缺口補強與驗證範圍](research/CDXDW-2026-11-24-FOLLOWUP.md)
+`.6` 在 Windows 使用 Codex MXC 沙箱重跑探針。唯讀模式擋下實際寫入，工作區寫入模式只允許在指定工作區寫入。真實模型使用 Desktop 隨附的執行檔，在兩個提交的完整範圍中找出第一個提交引入的錯誤。Desktop 的 Local → Worktree → Local 交接保留對話歷史，兩端皆核對暫存、未暫存、未追蹤檔案及封存 refs。遠端 CI 結果可按發行 tag 核對。跨主機 Desktop 交接與受信任 Hook 的實際事件覆蓋仍待驗證。 [`.6` 缺口補強與驗證範圍](research/CDXDW-2026-11-24-FOLLOWUP.md) · [GitHub Actions](https://github.com/scottpuppylu/cdx-DIRECTOR-WORKER/actions)
 
 ## 常見問題
 

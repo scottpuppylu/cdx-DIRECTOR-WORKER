@@ -1,6 +1,6 @@
 # cdxdw 版本紀錄
 
-## 2.6.0-cdx.6 候選 — 2026-11-24
+## 2.6.0-cdx.6 — 2026-11-24
 
 - 發版入口查驗目前整合收據、實際交付 SHA、受信任的 GitHub workflow 指紋和最新成功工作。
 - 工單可啟用可行性、pre-TR 輸入與 CPU 檢查、量尺、交付包、外部稽核頭和 PO 原始回覆。
@@ -8,6 +8,8 @@
 - 原生審查啟動前確認 MCP、Apps、Plugins、Hooks 和網頁搜尋均隔離。
 
 對齊初衷（PURPOSE.md）讓發布、設備測試與接手都能依同一版工單和候選的實際證據進行。
+
+發布驗證涵蓋 Windows MXC 唯讀與工作區邊界、真實模型原生 Review，以及 Desktop Local → Worktree → Local 交接。 [驗證範圍](research/CDXDW-2026-11-24-FOLLOWUP.md)
 
 ## 2.6.0-cdx.5 候選 — 2026-11-24
 
