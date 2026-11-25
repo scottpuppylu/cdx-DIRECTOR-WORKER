@@ -293,6 +293,37 @@ FEASIBILITY: FEASIBLE
         with self.assertRaisesRegex(Refused, "differs from the accepted"):
             cdx_release.verify_delivery_archive({"members": [{"order": "WO-001", "artifact": "b" * 64}]},
                                                 receipt, bundle, policy)
+        product = b"the combined product"
+        output = {"path": "dist/product.txt", "ci_path": "out/product.txt", "asset": "product.txt"}
+        proof.update(delivery={"mode": "artifacts", "outputs": [output]},
+                     outputs={"product.txt": dict(output, sha256=hashlib.sha256(product).hexdigest())})
+        with ZipFile(bundle, "a") as archive:
+            archive.writestr(output["ci_path"], b"old format")
+        receipt["artifact"]["sha256"] = hashlib.sha256(bundle.read_bytes()).hexdigest()
+        with self.assertRaisesRegex(Refused, "verified integrated output"):
+            cdx_release.verify_delivery_archive(proof, receipt, bundle, policy)
+        with ZipFile(bundle, "w") as archive:
+            archive.writestr("out/kit.zip", payload)
+            archive.writestr(output["ci_path"], product)
+        receipt["artifact"]["sha256"] = hashlib.sha256(bundle.read_bytes()).hexdigest()
+        staged = self.root / "assets"
+        staged.mkdir()
+        cdx_release.verify_delivery_archive(proof, receipt, bundle, policy, staged=staged)
+        self.assertEqual((staged / "product.txt").read_bytes(), product)
+
+    def test_existing_release_draft_is_published_before_completion(self):
+        release = cdx_release.release
+        job = release.Release(self.root, dict(release.DEFAULTS, gh_repo="fixture/project"), True, False, None)
+        job.tag = "v2.6.0-cdx.9"
+        draft = {"tagName": job.tag, "url": "https://example.invalid/release", "isDraft": True, "isPrerelease": False}
+        responses = [SimpleNamespace(returncode=0, stdout=json.dumps(draft)),
+                     SimpleNamespace(returncode=0),
+                     SimpleNamespace(returncode=0, stdout=json.dumps(dict(draft, isDraft=False)))]
+        with patch.object(release.shutil, "which", return_value="gh"), patch.object(release, "run",
+                side_effect=responses) as command, patch.object(job, "step") as step:
+            job.release_step("2.6.0-cdx.9")
+        self.assertIn("--draft=false", command.call_args_list[1].args[0])
+        self.assertEqual(step.call_args.args[:2], ("release", "OK"))
 
     def test_integration_conflict_keeps_release_target_and_no_passing_receipt(self):
         repo = self.git_project("conflicting")
@@ -672,6 +703,8 @@ ACCEPTANCE:
             worker = self.root / order_id
             name = f"{order_id}-capacity.md"
             work = state / "work" / order_id
+            human_rows = ("| AC-2 | PO | First result | Open entry | correct |\n"
+                          "| AC-3 | PO | Output format | Open entry | correct |") if index == 1 else ""
             text(state / "orders" / name, f"""# {order_id} — check capacity
 ISSUED_BY = director 2026-01-02 10:00
 REVISION = 1
@@ -694,6 +727,7 @@ FORBIDDEN:
 | ID | type | req | how | expected |
 | --- | --- | --- | --- | --- |
 | AC-1 | AUTO | Capacity | Run entry | exit 0 |
+{human_rows}
 
 CHECKS:
 - AC-1: {json.dumps(entry)}
@@ -719,12 +753,32 @@ CHECKS:
                          json_bytes({"candidate": head, "order_sha256": spec["sha"], "attempt": record["id"],
                                      "report_sha256": gate_check.order_hash(report.encode())}))
             member_args.extend(("--member", f"{name}={head}"))
+        first_order, first_head = member_args[1].split("=")
+        observation = ("record", first_order, "--candidate", first_head, "--kind", "po",
+                       "--actor", "fixture-po", "--environment", "fixture", "--entry", "product",
+                       "--expected", "correct", "--observed", "checked")
+        self.work(repo, *observation, "--outcome", "CHANGES_REQUESTED", "--ac", "AC-3")
+        self.work(repo, *observation, "--outcome", "PASS", "--ac", "AC-2")
+        blocked = ("integrate", "--target", "refs/heads/main", "--base", base, *member_args[:2],
+                   "--argv", json.dumps(entry))
+        self.assertIn("AC-3", self.work(repo, "final", first_order, "--candidate", first_head, code=2))
+        self.assertIn("AC-3", self.work(repo, *blocked, code=2))
+        criteria = json.loads(self.work(repo, "status", first_order))["criteria"]
+        self.assertEqual((criteria["AC-2"]["outcome"], criteria["AC-3"]["outcome"]), ("PASS", "CHANGES_REQUESTED"))
+        self.work(repo, *observation, "--outcome", "PASS", "--ac", "AC-3")
         single = json.loads(self.work(repo, "integrate", "--target", "refs/heads/main", "--base", base,
                                       *member_args[:2], "--argv", json.dumps(entry)))
         self.assertEqual(single["outcome"], "PASS")
         self.assertEqual(single["head"], member_args[1].split("=")[1])
         self.assertEqual(json.loads(self.work(repo, "integration-status", single["id"],
                                              "--expect-head", single["head"]))["outcome"], "PASS")
+        other_target = "refs/heads/simulate-landing"
+        git(repo, "update-ref", other_target, base)
+        landed = json.loads(self.work(repo, "integrate", "--target", other_target, "--base", base,
+                                     *member_args[:2], "--argv", json.dumps(entry)))
+        git(repo, "update-ref", other_target, landed["head"], base)
+        check = json.loads(self.work(repo, "integration-status", landed["id"], "--expect-head", landed["head"]))
+        self.assertEqual((check["outcome"], check["delivery_state"]), ("PASS", "LANDED"))
         common = ("integrate", "--target", "refs/heads/main", "--base", base, *member_args, "--argv")
         failure = json.loads(self.work(repo, *common, json.dumps(entry), code=2))
         self.assertEqual(failure["outcome"], "FAIL")
@@ -744,8 +798,13 @@ CHECKS:
             built = json.loads(self.work(repo, "e2e", first["filename"], "--candidate", first["candidate"],
                                          "--artifact-path", "left.txt"))
             self.assertEqual(json.loads(self.work(repo, *status, success["head"], code=2))["outcome"], "STALE")
+            approved = json.loads(self.work(repo, "approve-integration", "--target", "refs/heads/main", "--base",
+                                           base, "--argv", json.dumps([*entry[:-1], "4"]), "--approved-by", "fixture"))
+            self.work(repo, *observation, "--outcome", "PASS", "--artifact", built["artifact"], "--ac", "AC-2",
+                      "--ac", "AC-3")
             with_artifact = json.loads(self.work(repo, *common, json.dumps([*entry[:-1], "4"]),
-                                                 "--member-artifact", f"{first['filename']}={built['artifact']}"))
+                                                 "--member-artifact", f"{first['filename']}={built['artifact']}",
+                                                 "--approval", approved["approval"]))
             self.assertEqual(with_artifact["members"][0]["artifact"], built["artifact"])
             success = with_artifact
         git(repo, "commit", "--allow-empty", "-m", "Advance target")

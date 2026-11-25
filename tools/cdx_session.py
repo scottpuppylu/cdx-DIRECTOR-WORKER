@@ -13,11 +13,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from cdx_audit import append_app
 from cdx_common import (SHA, THREAD_ID, Refused, atomic_write, git, json_bytes, load_project, lock, read_json,
                         report_error, state_path)
-from cdx_doctor import certified, sandbox_probe
+from cdx_doctor import certified, discover, sandbox_probe
 from cdx_review import native_review, review_server, review_target
 from cdx_rpc import AppServer, RPCError, RPCTimeout
-from cdx_work import (active_order, approved_brief, dispatch_check, dispatched_copy, order_file_id,
-                      plan_approval, validate_checkout)
+from cdx_work import (active_order, approved_brief, desktop_chat, dispatch_check, dispatched_copy, order_file_id,
+                      plan_approval, resume_location, validate_checkout)
 
 
 TERMINAL = ("completed", "interrupted", "failed")
@@ -88,7 +88,7 @@ def review_preflight(server, state):
         raise Refused("This Codex executor did not prove the read-only filesystem boundary")
 
 
-def phase_request(spec, record, phase, attempt, plan_file=None):
+def phase_request(state, spec, record, phase, attempt, plan_file=None):
     work, order, role = spec["work"], spec["path"], record["role"]
     common = (f"CDX_ATTEMPT: {attempt}\n你是 {role}。工單 {order}。"
               f"鎖定 SHA-256 {spec['sha']}。讀取檔案前確認路徑與角色。"
@@ -96,7 +96,7 @@ def phase_request(spec, record, phase, attempt, plan_file=None):
     if phase == "plan" and role == "worker":
         return common + "以唯讀方式擬定驗收計畫，列出風險與測試，不修改檔案。"
     if phase == "implement" and role == "worker":
-        resume_file = work / "RESUME_STATE.md"
+        resume_file = resume_location(state, spec)
         return (common + f"讀核准的計畫 {plan_file} 與斷點 {resume_file}。"
                 f"只依 SCOPE 改施工區，把交件與斷點存 {work}。"
                 "若 Git 寫入遭沙箱限制，交回總監審查後提交。遇到外部操作或越界要求，回報 BLOCKED。")
@@ -132,7 +132,7 @@ def run_turn(server, state, spec, record, session_file, phase, timeout, observe)
         plan_approval(state, spec)
     previous = last.get("id")
     attempt = str(uuid.uuid4())
-    prompt = phase_request(dict(spec, path=dispatched_copy(state, spec)), record, phase, attempt, plan_file)
+    prompt = phase_request(state, dict(spec, path=dispatched_copy(state, spec)), record, phase, attempt, plan_file)
     policy = {"type": "readOnly", "networkAccess": False}
     if phase == "implement":
         policy = {"type": "workspaceWrite", "writableRoots": [str(spec["work"])], "networkAccess": False,
@@ -302,6 +302,26 @@ def main(argv=None):
                 raise Refused("Review requires the exact full candidate SHA and a clean checkout")
         session_file = state_path(state, "sessions", f"{order_id}-{args.role}.json")
         audit = state_path(state, "audit", f"{order_id}-{args.role}.jsonl")
+        if args.command == "status" and args.role == "worker":
+            order = active_order(state, args.order)
+            chat = desktop_chat(state, order)
+            native = read_json(session_file) if session_file.is_file() else None
+            if chat and (not native or native.get("order_sha256") != order["sha"]):
+                result = {"state": "desktop", "chat": chat, "order": order_id, "order_sha256": order["sha"],
+                          "worktree": str(order["checkout"]), "app_server": native,
+                          "resume": str(resume_location(state, order)), "host_hook_trust": "NOT_PROBED"}
+                if args.live:
+                    executable = args.codex or shutil.which("codex")
+                    if not executable:
+                        raise Refused("Codex CLI was not found on PATH")
+                    with AppServer(executable, order["checkout"]) as server:
+                        result.update(discover(server, order["checkout"]), host_hook_trust="OBSERVED")
+                print(json.dumps(result, ensure_ascii=False))
+                return 0
+            if chat and native and not args.live:
+                validate_binding(native, order_id, args.order, args.role)
+                print(json.dumps(dict(native, desktop_chat=chat), ensure_ascii=False))
+                return 0
         if args.command == "status" and not args.live:
             record = read_json(session_file)
             validate_binding(record, order_id, args.order, args.role)

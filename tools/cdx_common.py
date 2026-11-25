@@ -17,6 +17,7 @@ ORDER_ID = re.compile(r"WO-[0-9]+", re.ASCII)
 THREAD_ID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", re.ASCII)
 SHA = re.compile(r"[0-9a-f]{40}", re.ASCII)
 VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+-cdx\.[0-9]+", re.ASCII)
+STATE_SCHEMA = 2
 GIT_LOCATION = {"GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX", "GIT_OBJECT_DIRECTORY",
                 "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_QUARANTINE_PATH",
                 "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"}
@@ -141,7 +142,11 @@ def stamp():
     return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %z")
 
 
-def load_project(repo):
+def executing_version():
+    return (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+
+
+def load_project(repo, *, diagnostic=False):
     root = checkout(repo)
     common = common_dir(root)
     pointer = read_json(state_path(common, POINTER))
@@ -151,11 +156,14 @@ def load_project(repo):
     project = read_json(state_path(state, "PROJECT.json"))
     main = Path(project["repo"])
     version = project.get("version", "")
-    if (pointer.get("schema") != 1 or project.get("schema") != 1 or
+    schema = project.get("schema")
+    if (schema not in (1, STATE_SCHEMA) or pointer.get("schema") != schema or
             Path(project["git_common_dir"]) != common or main != primary_checkout(root) or
             within(state, main) or within(main, state) or within(state, common) or within(common, state) or
             not VERSION.fullmatch(version) or Path(project["kit"]) != state_path(state, "runtime", version)):
         raise Refused("cdx project identity does not match the Git common directory")
+    if not diagnostic and (schema != STATE_SCHEMA or executing_version() != version):
+        raise Refused(f"Active runtime is {version}. Use {state / 'cdxdw.py'} after setup has completed.")
     return root, state, project
 
 

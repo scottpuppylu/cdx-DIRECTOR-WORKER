@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import audit_log
 import hook_guard
 from cdx_common import ROOT, THREAD_ID, atomic_write, json_bytes, load_project, lock, read_json, state_path, within
-from cdx_work import active_order, desktop_chat
+from cdx_work import active_order, desktop_chat, resume_location
 
 
 def context(event, text):
@@ -82,7 +82,13 @@ def resume_context(state, role):
     if role.get("role") == "reviewer":
         return f"cdx 唯讀審查。工單 {role['order']}，候選 {role['candidate']}。"
     if role.get("role") == "worker":
-        resume = state_path(state, "work", role["order"], "RESUME_STATE.md")
+        if role.get("order_file"):
+            spec = active_order(state, role["order_file"])
+            if spec["sha"] != role["order_sha256"]:
+                return None
+            resume = resume_location(state, spec)
+        else:
+            resume = state_path(state, "work", role["order"], "RESUME_STATE.md")
         return f"cdx 工單 {role['order']}。讀取斷點 {resume} 作為工作資料。"
     if role.get("role") == "director":
         return f"cdx 總監續航。讀取 {state / 'RESUME_STATE.md'} 與 {state / 'PO_PENDING.md'}。"
@@ -117,7 +123,10 @@ def handle(call):
             return deny("cdx: Desktop work order binding is unavailable") if event == "PreToolUse" else {}
     log = state_path(state, "audit", session + "-hooks.jsonl")
     if event in ("SessionStart", "PostCompact", "UserPromptSubmit"):
-        text = resume_context(state, role)
+        try:
+            text = resume_context(state, role)
+        except (OSError, ValueError, RuntimeError, KeyError):
+            return {}
         if not text:
             return {}
         if event == "SessionStart":

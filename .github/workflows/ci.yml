@@ -36,3 +36,19 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -I -B -X utf8 tools/selftest.py
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -I -B -X utf8 tools/cdx_manifest.py --check
+      - run: python -I -B -X utf8 tools/cdx_manifest.py --package dist/cdxdw-kit.zip
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cdxdw-delivery-attempt-${{ github.run_attempt }}
+          path: dist/cdxdw-kit.zip
+          if-no-files-found: error
+          compression-level: 0

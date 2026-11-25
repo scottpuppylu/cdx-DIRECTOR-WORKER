@@ -12,8 +12,11 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gate_check
-from cdx_acceptance import acceptance_lock, artifact_required, attempt, latest_attempts, run_entry
+from cdx_acceptance import (acceptance_lock, artifact_required, attempt, current_judgments, judgment_criteria,
+                            latest_attempts, run_entry)
 from cdx_audit import check_report
+from cdx_delivery import (approve_integration, delivery_po_status, integration_approval, save_po_delivery,
+                          target_position)
 from cdx_gates import feasibility, file_hash, invoke, pack_digest, policy, ruler_check, tail
 from cdx_common import (SHA, ROOT, THREAD_ID, VERSION, Refused, atomic_write, check_environment, checkout, common_dir,
                         detached_checkout, executor, git, git_environment, json_bytes,
@@ -77,8 +80,7 @@ def validate_checkout(repo, state, spec, *, fresh=False):
             checkout(worker) != worker or common_dir(worker) != common_dir(repo)):
         raise Refused("Worker must be an isolated worktree of this Git project")
     branch = git(worker, "branch", "--show-current")
-    registration = state_path(state, "work", spec["order_id"], "DESKTOP.json")
-    adopted = spec.get("handoff") or (read_json(registration) if registration.is_file() else {})
+    adopted = spec.get("handoff") or desktop_registration(state, spec)
     if branch != spec["branch"] and (
             branch or any(adopted.get(key) != value for key, value in desktop_identity(repo, spec).items())):
         raise Refused(f"Expected worktree branch {spec['branch']}; found {branch or 'detached HEAD'}")
@@ -93,11 +95,44 @@ def desktop_identity(repo, spec):
     return {"worktree": str(spec["checkout"]), "git_common_dir": str(common_dir(repo)), "base": spec["base"]}
 
 
+def revision_record(state, spec, name):
+    return state_path(state, "work", spec["order_id"], "revisions", spec["sha"], name)
+
+
+def resume_location(state, spec):
+    archived = revision_record(state, spec, "RESUME_STATE.md")
+    return archived if archived.is_file() else spec["work"] / "RESUME_STATE.md"
+
+
+def initialize_resume(state, spec, previous=None):
+    resume = (revision_record(state, spec, "RESUME_STATE.md") if spec["revision"] > 1 else
+              state_path(state, "work", spec["order_id"], "RESUME_STATE.md"))
+    if resume.exists():
+        return
+    if previous and previous.is_file():
+        atomic_write(resume, previous.read_bytes())
+        return
+    text = (f"PROGRESS: worker checkout ready at {spec['base']}\nDOING: read {spec['file']}\n"
+            "NEXT_STEP: confirm the dispatched order and prepare a plan\nCOMMS: NONE\n\n"
+            f"# RESUME_STATE — {spec['order_id']} r{spec['revision']}\nUPDATED: {stamp()}\n")
+    atomic_write(resume, text.encode("utf-8"))
+
+
+def desktop_registration(state, spec):
+    current = revision_record(state, spec, "DESKTOP.json")
+    if current.is_file():
+        return read_json(current)
+    legacy = state_path(state, "work", spec["order_id"], "DESKTOP.json")
+    record = read_json(legacy) if legacy.is_file() else {}
+    if record.get("worktree") == str(spec["checkout"]) and record.get("base") == spec["base"]:
+        return record
+    return {}
+
+
 def desktop_chat(state, spec):
     if "handoff" in spec:
         return spec["handoff"].get("chat")
-    path = state_path(state, "work", spec["order_id"], "DESKTOP.json")
-    return read_json(path).get("chat") if path.is_file() else None
+    return desktop_registration(state, spec).get("chat")
 
 
 def bind_desktop_chat(state, spec, chat, *, handoff=None):
@@ -117,6 +152,9 @@ def bind_desktop_chat(state, spec, chat, *, handoff=None):
                 raise Refused("This Desktop chat is already bound to another role or checkout")
             if prior == record:
                 return
+            if prior.get("order_sha256") != spec["sha"] and prior.get("order_sha256"):
+                archive = state_path(state, "sessions", "desktop-history", chat, prior["order_sha256"] + ".json")
+                atomic_write(archive, json_bytes(prior))
         atomic_write(path, json_bytes(record))
 
 
@@ -128,14 +166,33 @@ def active_order(state, filename, *, location=None):
         raise Refused("Order is not registered in DIRECTOR_LOG.md")
     revision, digest = record
     snapshot = state_path(state, "order-history", f"{order_id}-r{revision}-{digest}.md")
-    path = state_path(state, "work", order_id, "HANDOFF.json")
-    if location is None and path.is_file():
-        bound = read_json(path)
-        if bound.get("order_sha256") == digest:
-            location = bound
+    if location is None:
+        location = handoff_location(state, order_id, digest)
     spec = order_spec(state, filename, snapshot if snapshot.is_file() else None, location=location)
     dispatch_check(state, spec)
     return spec
+
+
+def handoff_location(state, order_id, digest):
+    for path in (state_path(state, "work", order_id, "revisions", digest, "HANDOFF.json"),
+                 state_path(state, "work", order_id, "HANDOFF.json")):
+        if path.is_file():
+            record = read_json(path)
+            if record.get("order_sha256") == digest:
+                return record
+    return None
+
+
+def historical_order(state, filename, revision):
+    order_id = order_file_id(filename)
+    snapshots = list(state_path(state, "order-history").glob(f"{order_id}-r{revision}-*.md"))
+    if len(snapshots) != 1:
+        raise Refused("Use a uniquely archived, dispatched order revision")
+    snapshot = snapshots[0]
+    digest = gate_check.order_hash(snapshot.read_bytes())
+    if snapshot.name != f"{order_id}-r{revision}-{digest}.md":
+        raise Refused("Historical order snapshot fingerprint does not match")
+    return order_spec(state, filename, snapshot, location=handoff_location(state, order_id, digest))
 
 
 def dispatch_check(state, spec):
@@ -317,26 +374,21 @@ def prepare(repo, state, spec, project, *, adopt=False, chat=None):
                 git(worker, "status", "--porcelain", "--untracked-files=all") or
                 git(worker, "branch", "--show-current") not in ("", spec["branch"])):
             raise Refused("Adopt a clean Codex worktree of this repo at the exact approved base")
-        registration = state_path(state, "work", spec["order_id"], "DESKTOP.json")
+        registration = revision_record(state, spec, "DESKTOP.json")
         identity = desktop_identity(repo, spec)
-        previous = read_json(registration) if registration.is_file() else {}
+        previous = desktop_registration(state, spec)
         if previous and any(previous.get(key) != value for key, value in identity.items()):
             raise Refused("This work order already has a different Desktop worktree")
         if chat and not THREAD_ID.fullmatch(chat):
             raise Refused("Supply the UUID of the Desktop chat")
-        atomic_write(registration, json_bytes(dict(identity, chat=chat or previous.get("chat"))))
+        atomic_write(registration, json_bytes(dict(identity, order_sha256=spec["sha"], chat=chat or previous.get("chat"))))
     elif not worker.exists():
         git(repo, "worktree", "add", "-b", spec["branch"], "--", str(worker), spec["base"])
     validate_checkout(repo, state, spec, fresh=True)
     sync_worker(repo, worker, project)
     (spec["work"] / "evidence").mkdir(parents=True, exist_ok=True)
-    resume = spec["work"] / "RESUME_STATE.md"
-    if not resume.exists():
-        text = (f"PROGRESS: worker checkout ready at {spec['base']}\nDOING: read {spec['file']}\n"
-                "NEXT_STEP: confirm the dispatched order and prepare a plan\nCOMMS: NONE\n\n"
-                f"# RESUME_STATE — {spec['order_id']}\nUPDATED: {stamp()}\n")
-        with resume.open("x", encoding="utf-8") as handle:
-            handle.write(text)
+    if spec["revision"] == 1:
+        initialize_resume(state, spec)
 
 
 def sync_worker(repo, worker, project):
@@ -401,6 +453,22 @@ def dispatch(repo, state, spec):
             raise Refused("A changed work order must increment REVISION before redispatch")
         if old is None:
             validate_checkout(repo, state, spec, fresh=True)
+        elif not repeated:
+            last = historical_order(state, spec["file"], old[0])
+            same_workline = spec["checkout"] == last["checkout"] and spec["base"] == last["base"]
+            if not same_workline:
+                validate_checkout(repo, state, spec, fresh=True)
+            resume = resume_location(state, last)
+            archive = revision_record(state, last, "RESUME_STATE.md")
+            if resume.is_file() and not archive.exists():
+                atomic_write(archive, resume.read_bytes())
+            initialize_resume(state, spec, previous=resume if same_workline else None)
+            legacy_candidate = state_path(state, "work", last["order_id"], "CANDIDATE.json")
+            selected = read_json(legacy_candidate) if legacy_candidate.is_file() else {}
+            history = revision_record(state, last, "CANDIDATE.json")
+            if selected.get("order_sha256") == last["sha"] and not history.is_file():
+                atomic_write(history, json_bytes(selected))
+        initialize_resume(state, spec)
         snapshot = state_path(state, "order-history", f"{spec['order_id']}-r{spec['revision']}-{spec['sha']}.md")
         save_snapshot(snapshot, raw, spec["sha"])
         bind_desktop_chat(state, spec, desktop_chat(state, spec))
@@ -428,17 +496,24 @@ def seal(repo, state, spec):
     selection = state_path(state, "work", spec["order_id"], "CANDIDATE.json")
     selected = {"candidate": candidate, "ref": ref, "order_sha256": spec["sha"]}
     with lock(selection.with_suffix(".lock")):
+        plan = approved_plan(state, spec, candidate)
         old = git(repo, "for-each-ref", "--format=%(objectname)", ref)
         if old and old != candidate:
             raise Refused("Candidate ref points to a different commit")
         if not old:
             git(repo, "update-ref", "--create-reflog", ref, candidate, "0" * len(candidate))
+        if plan:
+            binding = revision_record(state, spec, f"plan-{candidate}.json")
+            atomic_write(binding, json_bytes(plan))
+        atomic_write(revision_record(state, spec, "CANDIDATE.json"), json_bytes(selected))
         atomic_write(selection, json_bytes(selected))
     print(json.dumps(selected))
 
 
 def selected_candidate(state, spec):
-    path = state_path(state, "work", spec["order_id"], "CANDIDATE.json")
+    path = revision_record(state, spec, "CANDIDATE.json")
+    if not path.is_file():
+        path = state_path(state, "work", spec["order_id"], "CANDIDATE.json")
     selected = read_json(path) if path.is_file() else {}
     return selected.get("candidate") if selected.get("order_sha256") == spec["sha"] else None
 
@@ -478,8 +553,7 @@ def check_review(repo, state, spec, candidate, worker, result):
     brief_args = ["--brief", brief, "--order-history", state_path(state, "order-history")] if brief else []
     validate_tests(repo, spec, candidate)
     spec_review(state, spec)
-    if spec["governance"] in ("Standard", "Strict"):
-        plan_approval(state, spec)
+    plan = approved_plan(state, spec, candidate)
     folder = state_path(state, "work", spec["order_id"], "evidence")
     report = state_path(state, "work", spec["order_id"], "TASK_REPORT.md")
     report_data = report.read_bytes()
@@ -539,6 +613,7 @@ def check_review(repo, state, spec, candidate, worker, result):
             raise Refused("Archived review receipt does not match its digest")
     result["report_sha256"] = gate_check.order_hash(report_data)
     atomic_write(receipt, json_bytes({"candidate": candidate, "order_sha256": spec["sha"], "auto": logs,
+                                      "plan_sha256": plan["plan_sha256"] if plan else None,
                                       "report_sha256": result["report_sha256"], "recorded": stamp(),
                                       "attempt": result["id"],
                                       "po": "PENDING_PO"}))
@@ -587,10 +662,13 @@ def check_final(state, spec, candidate, artifact, *, emit=True):
             receipt.get("report_sha256") != gate_check.order_hash(report_data) or
             receipt.get("attempt") != latest["auto"]["id"]):
         raise Refused("Independent review receipt is for a different order, report or candidate")
+    if receipt.get("plan_sha256") or revision_record(state, spec, f"plan-{candidate}.json").is_file():
+        plan = approved_plan(state, spec, candidate)
+        if not plan or receipt.get("plan_sha256") != plan["plan_sha256"]:
+            raise Refused("Independent review receipt does not match the sealed plan")
     results = re.findall(r"^[ \t]*RESULT:[ \t]*(\S+)[ \t]*\r?$", report_data.decode("utf-8-sig"), re.M)
     if results != ["PASS"]:
         raise Refused("Final review needs a passing candidate report")
-    types = {row.get("type") for row in gate_check.ac_table(spec["text"]).values()}
     if latest[required_e2e].get("artifact") != artifact:
         raise Refused("Latest E2E tested a different build artifact")
     evidence = latest.get("evidence", {})
@@ -605,25 +683,24 @@ def check_final(state, spec, candidate, artifact, *, emit=True):
             if (audit.get("report_sha256") != hashlib.sha256(report_data).hexdigest() or
                     audit.get("audit_sha256") != file_hash(log)):
                 raise Refused("Report or externally anchored audit changed after verification")
-    if gates.get("po_reply"):
-        po = latest.get("po", {})
-        digest = po.get("reply_sha256")
-        if (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest) or not po.get("reply_ref") or
-                file_hash(state_path(state, "po-replies", f"{digest}.txt")) != digest):
-            raise Refused("Current product needs the PO's original reply and source reference")
     manual = latest.get("manual_e2e")
     if manual and manual["outcome"] != "PASS":
         raise Refused(f"manual_e2e={manual['outcome']}")
-    judgments = {"review": "REVIEW", "po": "PO"}
+    decisions = current_judgments(state, spec, candidate, artifact)
     pending = []
-    for kind, criterion in judgments.items():
-        record = latest.get(kind)
-        if record:
-            if record["outcome"] != "PASS":
-                raise Refused(f"{kind}={record['outcome']}")
-        elif criterion in types:
-            pending.append(criterion)
-    status = {"candidate": candidate, "order_sha256": spec["sha"], "artifact": artifact, "product": "PASS",
+    for ac, record in sorted(decisions.items()):
+        kind, outcome = record["kind"], record["outcome"]
+        if outcome in ("NOT_RUN", "LEGACY_NEEDS_VERIFICATION"):
+            pending.append(f"{kind.upper()} {ac} ({outcome})")
+            continue
+        if outcome != "PASS":
+            raise Refused(f"{kind}={outcome} ({ac})")
+        if kind == "po" and gates.get("po_reply"):
+            digest = record.get("reply_sha256")
+            if (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest) or not record.get("reply_ref") or
+                    file_hash(state_path(state, "po-replies", f"{digest}.txt")) != digest):
+                raise Refused(f"{ac} needs the PO's original reply and source reference")
+    status = {"candidate": candidate, "order_sha256": spec["sha"], "artifact": artifact, "product": "PENDING" if pending else "PASS",
               "pending": pending, "integration": "CHECK_RELEASE_TARGET_SEPARATELY"}
     if emit:
         print(json.dumps(status))
@@ -631,8 +708,11 @@ def check_final(state, spec, candidate, artifact, *, emit=True):
         raise Refused(f"Product check passed. Waiting for {', '.join(pending)}")
     if emit:
         print(f"CDX_FINAL candidate={candidate} scope=single-order")
-    return {kind: latest[kind]["id"] for kind in ("auto", "e2e", "manual_e2e", "review", "po", "preflight", "evidence")
-            if kind in latest}
+    proofs = {kind: latest[kind]["id"] for kind in ("auto", "e2e", "manual_e2e", "review", "po", "preflight", "evidence")
+              if kind in latest}
+    if decisions:
+        proofs["criteria"] = {ac: record["id"] for ac, record in sorted(decisions.items())}
+    return proofs
 
 
 def e2e(repo, state, spec, args):
@@ -691,6 +771,12 @@ def judgment(repo, state, spec, args):
             raise Refused("This candidate requires --artifact for recorded judgments")
         if not all(value.strip() for value in (args.actor, args.environment, args.entry, args.expected, args.observed)):
             raise Refused("Record actor, environment, entry point, expected and observed behavior")
+        criteria = judgment_criteria(spec, args.kind) if args.kind in ("review", "po") else set()
+        chosen = set(args.ac)
+        if chosen - criteria or len(chosen) != len(args.ac):
+            raise Refused("Each --ac needs a distinct criterion of the selected judgment kind")
+        if len(criteria) > 1 and not chosen:
+            raise Refused(f"Select the exact criteria with --ac: {', '.join(sorted(criteria))}")
         reply = {}
         if args.reply_file or args.reply_ref or (args.kind == "po" and spec.get("gates", {}).get("po_reply")):
             if args.kind != "po" or not args.reply_file or not (args.reply_ref or "").strip():
@@ -709,7 +795,8 @@ def judgment(repo, state, spec, args):
             kind = "manual_e2e" if args.kind == "e2e" else args.kind
             with attempt(state, spec, args.candidate, kind, source="operator-recorded", actor=args.actor,
                          environment=args.environment, entry_point=args.entry, expected=args.expected,
-                         observed=args.observed, artifact=args.artifact, **reply) as record:
+                         observed=args.observed, artifact=args.artifact, criteria=sorted(chosen or criteria),
+                         **reply) as record:
                 record["outcome"] = args.outcome
         print(json.dumps(record, ensure_ascii=False))
 
@@ -764,13 +851,19 @@ def verify_evidence(repo, state, spec, args):
         return 0 if record["outcome"] == "PASS" else 2
 
 
-def integrate(repo, state, args):
+def integration_request(repo, args):
     if (not SHA.fullmatch(args.base) or not args.target.startswith(("refs/heads/", "refs/remotes/")) or
             git(repo, "rev-parse", "--verify", args.target + "^{commit}") != args.base):
         raise Refused("Pin the current full target ref and commit before integration")
     command = json.loads(args.argv)
-    if not isinstance(command, list) or not command:
+    if (not isinstance(command, list) or not command or
+            not all(isinstance(part, str) and part.strip() and "\0" not in part for part in command)):
         raise Refused("Supply the approved integration entry point as a JSON argv array")
+    return command
+
+
+def integrate(repo, state, args):
+    command = integration_request(repo, args)
     artifacts = {}
     for item in args.member_artifact:
         filename, separator, digest = item.partition("=")
@@ -794,10 +887,15 @@ def integrate(repo, state, args):
                         "candidate": candidate, "artifact": artifact, "proofs": proofs})
     if artifacts or not members or len({item["order"] for item in members}) != len(members):
         raise Refused("Select one or more distinct work orders and match each artifact to a selected member")
+    config = read_json(state_path(state, "director_work.json"))
+    if not args.approval and (config.get("cdx_require_integration_approval") or any(row["artifact"] for row in members)):
+        raise Refused("Approve the integration entry and delivery contract before integrating")
+    delivery = (integration_approval(state, args.approval, args.target, args.base, command) if args.approval
+                else {"mode": "source", "outputs": [], "require_po": False})
     series = integration_series(state, args.target, args.base, members)
     series.parent.mkdir(parents=True, exist_ok=True)
     with lock(series.with_suffix(".lock")):
-        return run_integration(repo, state, args, members, command, series)
+        return run_integration(repo, state, args, members, command, series, delivery=delivery)
 
 
 def integration_series(state, target, base, members):
@@ -808,11 +906,13 @@ def integration_series(state, target, base, members):
     return state_path(state, "integrations", "latest", f"{digest}.json")
 
 
-def run_integration(repo, state, args, members, command, series):
+def run_integration(repo, state, args, members, command, series, *, delivery=None):
     integration = str(uuid.uuid4())
     path = state_path(state, "integrations", f"{integration}.json")
-    result = {"schema": 2, "id": integration, "target": args.target, "base": args.base,
+    result = {"schema": 3, "id": integration, "target": args.target, "base": args.base,
               "members": members, "outcome": "RUNNING", "started": stamp(), "command": command}
+    result["approval"] = getattr(args, "approval", None)
+    result["delivery"] = delivery or {"mode": "source", "outputs": [], "require_po": False}
     atomic_write(path, json_bytes(result))
     atomic_write(series, json_bytes({"id": integration}))
     try:
@@ -833,8 +933,9 @@ def run_integration(repo, state, args, members, command, series):
                     return 2
             head = git(worker, "rev-parse", "HEAD")
             result["head"] = head
+            result["tree"] = git(worker, "rev-parse", "HEAD^{tree}")
             git(repo, "update-ref", f"refs/cdxdw/integrations/{integration}", head, "0" * len(head))
-            run_entry(repo, head, command, args.timeout, result)
+            run_entry(repo, head, command, args.timeout, result, delivery_outputs=result["delivery"]["outputs"])
         if integration_stale(repo, state, result):
             result["outcome"] = "STALE"
         return 0 if result["outcome"] == "PASS" else 2
@@ -849,11 +950,17 @@ def run_integration(repo, state, args, members, command, series):
 
 def integration_stale(repo, state, result, landed_head=None):
     try:
-        if git(repo, "rev-parse", "--verify", result["target"] + "^{commit}") not in (result["base"], landed_head):
+        target = landed_head or git(repo, "rev-parse", "--verify", result["target"] + "^{commit}")
+        if target_position(repo, result, target) == "TARGET_CHANGED":
             return True
         integration_ref = f"refs/cdxdw/integrations/{result['id']}"
         if git(repo, "for-each-ref", "--format=%(objectname)", integration_ref) != result.get("head"):
             return True
+        if result.get("tree") and git(repo, "rev-parse", f"{result['head']}^{{tree}}") != result["tree"]:
+            return True
+        if result.get("approval"):
+            if integration_approval(state, result["approval"], result["target"], result["base"], result["command"]) != result["delivery"]:
+                return True
         for member in result["members"]:
             spec = active_order(state, member["filename"])
             candidate = member["candidate"]
@@ -861,7 +968,10 @@ def integration_stale(repo, state, result, landed_head=None):
                     git(repo, "for-each-ref", "--format=%(objectname)", sealed_ref(spec, candidate)) != candidate):
                 return True
             with acceptance_lock(state, spec, candidate):
-                if check_final(state, spec, candidate, member["artifact"], emit=False) != member["proofs"]:
+                actual = check_final(state, spec, candidate, member["artifact"], emit=False)
+                if result.get("schema") == 2:
+                    actual.pop("criteria", None)
+                if actual != member["proofs"]:
                     return True
     except (Refused, OSError):
         return True
@@ -875,7 +985,8 @@ def integration_receipt(repo, state, identifier, expected_head=None, *, landed_h
     if result.get("id") != identifier:
         raise Refused("Integration receipt ID does not match this attempt")
     if result["outcome"] == "PASS":
-        if result.get("schema") != 2:
+        if result.get("schema") not in (2, 3) or (
+                result["schema"] == 2 and any(row.get("artifact") for row in result["members"])):
             result["outcome"] = "LEGACY_NEEDS_VERIFICATION"
         else:
             series = integration_series(state, result["target"], result["base"], result["members"])
@@ -887,8 +998,14 @@ def integration_receipt(repo, state, identifier, expected_head=None, *, landed_h
         if not SHA.fullmatch(expected_head):
             raise Refused("Use the full delivery commit SHA")
         result["expected_head"] = expected_head
-        if result["outcome"] == "PASS" and result["head"] != expected_head:
+    if result["outcome"] == "PASS":
+        current = landed_head or git(repo, "rev-parse", "--verify", result["target"] + "^{commit}")
+        position = target_position(repo, result, current)
+        if expected_head is not None and result["head"] != expected_head and not (
+                expected_head == current and position == "LANDED_EQUIVALENT_TREE"):
             result["outcome"] = "WRONG_DELIVERY_HEAD"
+        else:
+            result.update(target_head=current, delivery_state=position, po_delivery=delivery_po_status(state, result))
     return result
 
 
@@ -912,8 +1029,9 @@ def order_status(repo, state, spec, candidate, artifact=None):
     prefix = f"refs/cdxdw/candidates/{spec['order_id']}"
     seals = git(repo, "for-each-ref", "--format=%(objectname)", prefix).splitlines()
     candidate = candidate or selected_candidate(state, spec)
-    desktop = state_path(state, "work", spec["order_id"], "DESKTOP.json")
+    desktop = desktop_registration(state, spec)
     latest = latest_attempts(state, spec, candidate, artifact) if candidate else {}
+    decisions = current_judgments(state, spec, candidate, artifact) if candidate else {}
     statuses = {kind: latest.get(kind, {}).get("outcome", "NOT_RUN")
                 for kind in ("auto", "e2e", "manual_e2e", "review", "po", "preflight", "evidence")}
     if statuses["e2e"] == "PASS" and latest["e2e"].get("artifact") != artifact:
@@ -946,11 +1064,16 @@ def order_status(repo, state, spec, candidate, artifact=None):
     next_step = "Choose or seal a candidate" if not candidate else (
         "Resolve " + ", ".join(needed) if needed else
         "Run final for this candidate" if final["outcome"] == "PASS" else final["reason"])
+    plan_binding = revision_record(state, spec, f"plan-{candidate}.json")
     print(json.dumps({"order": spec["order_id"], "revision": spec["revision"], "order_sha256": spec["sha"],
                       "snapshot": str(spec["path"]), "draft": draft_status, "sessions": sessions,
-                      "desktop": read_json(desktop) if desktop.is_file() else None,
+                      "desktop": desktop or None,
+                      "resume": str(resume_location(state, spec)),
+                      "sealed_plan": read_json(plan_binding) if plan_binding.is_file() else None,
                       "checkout": str(spec["checkout"]), "handoff": spec.get("handoff"),
                       "sealed_candidates": seals, "candidate": candidate, "artifact": artifact, "acceptance": statuses,
+                      "criteria": {ac: {key: row.get(key) for key in ("kind", "outcome", "id", "reply_ref")}
+                                   for ac, row in sorted(decisions.items())},
                       "final": final, "next": next_step}, ensure_ascii=False))
 
 
@@ -991,6 +1114,22 @@ def plan_approval(state, spec, *, save=False, head=None, approver=None):
     return snapshot
 
 
+def approved_plan(state, spec, candidate):
+    if spec["governance"] not in ("Standard", "Strict"):
+        return None
+    binding = revision_record(state, spec, f"plan-{candidate}.json")
+    path = binding if binding.is_file() else state_path(state, "reviews", f"{spec['order_id']}-plan.json")
+    record = read_json(path)
+    digest = record.get("plan_sha256", "")
+    if (record.get("order_sha256") != spec["sha"] or record.get("base", spec["base"]) != spec["base"] or
+            not re.fullmatch(r"[0-9a-f]{64}", digest)):
+        raise Refused("Approved plan does not match this dispatched order")
+    snapshot = state_path(state, "reviews", f"{spec['order_id']}-PLAN-{digest}.md")
+    if file_hash(snapshot) != digest:
+        raise Refused("Approved plan snapshot does not match its fingerprint")
+    return {"order_sha256": spec["sha"], "base": spec["base"], "plan_sha256": digest}
+
+
 def approve_plan(repo, state, spec, approver):
     worker = state_path(state, "sessions", f"{spec['order_id']}-worker.json")
     with lock(worker.with_suffix(".lock")):
@@ -1026,6 +1165,8 @@ def main(argv=None):
             sub.add_argument("--candidate", required=command != "status")
         if command in ("record", "verify-evidence", "final", "status"):
             sub.add_argument("--artifact", help="SHA-256 of the actual build artifact")
+        if command == "status":
+            sub.add_argument("--revision", type=int, help="read an archived dispatched revision")
         if command in ("e2e", "preflight"):
             sub.add_argument("--timeout", type=int, default=180)
             sub.add_argument("--input-root", help="directory containing approved, hash-pinned pre-TR inputs")
@@ -1035,6 +1176,7 @@ def main(argv=None):
         if command == "adopt":
             sub.add_argument("--chat", help="UUID of the Desktop chat for status and handoff")
         if command == "record":
+            sub.add_argument("--ac", action="append", default=[], help="exact REVIEW or PO criterion, repeat as needed")
             sub.add_argument("--reply-file", type=Path, help="UTF-8 file with the exact original PO reply")
             sub.add_argument("--reply-ref", help="original PO message reference")
             sub.add_argument("--kind", required=True, choices=("e2e", "review", "po"))
@@ -1052,16 +1194,29 @@ def main(argv=None):
             sub.add_argument("--active", action="store_true", help="approve the dispatched snapshot instead of the draft")
         elif command == "approve-plan":
             sub.add_argument("--approver", help="record the operator-supplied approver identity")
+    approval = commands.add_parser("approve-integration", help="pin the integration command and delivery contract")
+    approval.add_argument("--target", required=True)
+    approval.add_argument("--base", required=True)
+    approval.add_argument("--argv", required=True)
+    approval.add_argument("--delivery", type=Path, help="source or artifacts delivery JSON")
+    approval.add_argument("--approved-by", required=True)
     integration = commands.add_parser("integrate", help="check an ordered combination of sealed candidates")
     integration.add_argument("--target", required=True)
     integration.add_argument("--base", required=True)
     integration.add_argument("--member", action="append", required=True)
     integration.add_argument("--member-artifact", action="append", default=[])
     integration.add_argument("--argv", required=True, help="approved public entry command in JSON argv form")
+    integration.add_argument("--approval", help="fingerprint from approve-integration")
     integration.add_argument("--timeout", type=int, default=180)
     integration_check = commands.add_parser("integration-status")
     integration_check.add_argument("id")
     integration_check.add_argument("--expect-head", help="require the exact commit proposed for delivery")
+    po_delivery = commands.add_parser("record-delivery", help="record PO judgment for the exact integration outputs")
+    po_delivery.add_argument("id")
+    po_delivery.add_argument("--outcome", required=True, choices=("PASS", "CHANGES_REQUESTED"))
+    po_delivery.add_argument("--actor", required=True)
+    po_delivery.add_argument("--reply-file", required=True, type=Path)
+    po_delivery.add_argument("--reply-ref", required=True)
     tests = commands.add_parser("lock-tests", help="hash the tests as stored in the baseline commit")
     tests.add_argument("--base", required=True)
     tests.add_argument("paths", nargs="+")
@@ -1082,6 +1237,18 @@ def main(argv=None):
             return 0
         if args.command == "integrate":
             return integrate(repo, state, args)
+        if args.command == "approve-integration":
+            command = integration_request(repo, args)
+            delivery = read_json(args.delivery) if args.delivery else {"mode": "source"}
+            result = approve_integration(state, args.target, args.base, command, delivery, args.approved_by)
+            print(json.dumps(result, ensure_ascii=False))
+            return 0
+        if args.command == "record-delivery":
+            result = integration_receipt(repo, state, args.id)
+            if result["outcome"] != "PASS":
+                raise Refused("Only a current passing integration has a delivery to judge")
+            print(json.dumps(save_po_delivery(state, result, args), ensure_ascii=False))
+            return 0
         if args.command == "integration-status":
             return integration_status(repo, state, args.id, args.expect_head)
         artifact = getattr(args, "artifact", None)
@@ -1091,6 +1258,8 @@ def main(argv=None):
             raise Refused("Use a positive timeout")
         if args.command in ("prepare", "adopt", "dispatch") or (args.command == "approve-spec" and not args.active):
             spec = order_spec(state, args.order)
+        elif args.command == "status" and args.revision is not None:
+            spec = historical_order(state, args.order, args.revision)
         else:
             spec = active_order(state, args.order)
         if args.command == "review":

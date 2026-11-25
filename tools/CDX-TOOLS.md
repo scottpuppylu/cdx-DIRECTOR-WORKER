@@ -43,7 +43,23 @@
 
 工單可用 `CDX_GATES` 的 `artifact_path` 鎖定 E2E 會產出的相對檔案路徑。舊工單在首次使用工件驗收後，同一候選也會維持工件綁定。此後省略工件的重跑和最終放行會被拒絕。用相同指紋登記改判，或給真正的新工件走一次新的驗收。 `status` 的 `final` 欄顯示目前證據是否可放行。
 
+REVIEW 或 PO 有多個 AC 時，每次 `work record` 用一個或多個 `--ac AC-N` 明列覆蓋範圍。單一 AC 的既有收據可沿用。多 AC 的舊總判定需按原文重新登記範圍，`status` 的 `criteria` 會逐項列出判定與來源。封存候選的獨立重審讀核准 PLAN 快照，現場工作稿可保留。
+
 用 `work integrate` 驗證一張或多張工單，指定 `--target refs/heads/main`、`--base FULL_TARGET_SHA`、`--member ORDER.md=FULL_CANDIDATE_SHA` 和已核准的 `--argv` JSON 命令。單張可快轉時保留原候選 SHA。其他情況依提供順序合併並驗證實際結果。單項有工件時，追加 `--member-artifact ORDER.md=ARTIFACT_SHA256`。目標、工單、候選、封存 ref、單項證據或最新整合嘗試改變時，舊收據會失效。發版前用 `work integration-status UUID --expect-head FULL_DELIVERY_SHA` 核對實際提交。
+
+新版受控發版要先執行 `work approve-integration --target REF --base SHA --argv JSON --approved-by ID`，將傳回的 `approval` 交給 `work integrate --approval`。預設規格交付原始碼。交付建置產物時用 `--delivery FILE.json` 核准，例如下列內容。
+
+```json
+{
+  "mode": "artifacts",
+  "require_po": true,
+  "outputs": [
+    {"path": "dist/product.zip", "ci_path": "product.zip", "asset": "product.zip"}
+  ]
+}
+```
+
+整合完成後請 PO 看指定工件。需要記錄其決定時，使用 `work record-delivery UUID --outcome PASS --actor PO --reply-file FILE --reply-ref MESSAGE`。如果建置流程無法重現相同 bytes，讓整合的核准指令驗證並交出同一份固定工件，CI 封存同一份檔案。發版會在草稿核對已上傳資產的摘要，再公開，重試會核對已存在的資產。 [GitHub Release assets](https://docs.github.com/en/rest/releases/assets)
 
 ## 中斷後對帳
 
@@ -109,6 +125,8 @@ cdxdw handoff --repo PROJECT attach HANDOFF.json --worktree ISOLATED_DESTINATION
 
 請用目前的 `handoff export` 重新匯出舊版清單。新版清單納入已核准的初衷、規格與計畫快照、驗收所引用的 PO 原文、原生 Review 與相關回合資料。比對成功後，接手前還會重新查工單與核准依賴。
 
+預檢也會列出政策與最低 runtime 差異，以及目的地需同步的 Skill。對齊後執行 `attach --chat UUID`，工具會同步接收工作樹。用 `session status ORDER --live` 查實際宿主看到的 Skill、Hook 來源與信任。工單換 worktree 時先增加版次，在新 base 準備工作樹並登記新 chat，再核准及派工。舊版用 `work status ORDER --revision N` 回查。
+
 `attach` 接受工單指定的分支或 detached HEAD。Desktop 若在目的地建立另一個分支，先用 `verify` 確認交接資料，再以目前提交進入 detached HEAD（`git switch --detach HEAD`）並重新執行 `verify` 與 `attach`。若要用 Desktop 繼續搬運該分支，可先完成搬運，再決定在哪個隔離工作樹登記接手。Desktop 若要求清空輸入狀態，請開啟目前的測試或工作對話，確認草稿及待送訊息均已處理後重試。
 
 ## 升級
@@ -116,6 +134,8 @@ cdxdw handoff --repo PROJECT attach HANDOFF.json --worktree ISOLATED_DESTINATION
 先結束舊版正在執行的命令，以同一 runtime 操作同一份工單。.3 的鎖目錄可保留作為紀錄，.4 起使用由作業系統釋放的 `.guard` 鎖。.3 舊版收據和文字 E2E 可回查，缺少結構化嘗試時顯示 `LEGACY_NEEDS_VERIFICATION`，重跑或補登後用新版 `final` 核對。
 
 用新版套件先預覽 `setup`，再加 `--apply`。已有工作中的 worktree 用 `work sync-worker ORDER` 同步，之後在宿主確認 Skill 載入和 Hook 信任。舊候選 journal 原樣保留，舊 manifest 需重新匯出。遇到舊規格收據可用原報告與 `approve-spec --active` 保存生效版。舊整合若顯示 `LEGACY_NEEDS_VERIFICATION`，可按原組合重跑。
+
+升級至 `.9` 前結束舊命令，避免已載入舊狀態的長工作仍在寫入。安裝先在狀態內的 `migrations/schema-1/` 保存升級前資料、Git 指標、refs 及既存配置副本，再切換 schema。之後使用狀態根目錄的固定入口 `cdxdw.py`，以 `doctor` 查執行及作用中版本。需要回退時，在隔離專案恢復配對的舊 runtime、升級前狀態及 Git 指標，核對 refs 和未提交修改後再採用。
 
 維護者改過套件檔案時，先用 Git stage 選定要發行的檔案，再執行 `python -I -B -X utf8 tools/cdx_manifest.py` 產生 `RUNTIME-MANIFEST.json`。CI 的 `--check` 核對預定安裝的檔案、版本及內容。GitHub 發行封包與 Git checkout 都以該清單安裝。
 

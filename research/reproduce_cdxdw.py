@@ -110,11 +110,14 @@ FORBIDDEN:
                  state / "work" / "WO-001" / "CANDIDATE.json", worker / "sample.txt",
                  *sorted((state / "acceptance").rglob("*.json"))]
     before = {path: path.read_bytes() for path in preserved}
-    rollback_paths = [state / "PROJECT.json", repo / ".codex" / "hooks.json", worker / ".codex" / "hooks.json",
+    rollback_paths = [state / "PROJECT.json", repo / ".git" / "director-work-cdx.json",
+                      repo / ".codex" / "hooks.json", worker / ".codex" / "hooks.json",
                       *repo.glob(".agents/skills/cdx-*/SKILL.md"), *worker.glob(".agents/skills/cdx-*/SKILL.md")]
     rollback = {path: path.read_bytes() for path in rollback_paths}
     cdx(latest, "setup")
     cdx(latest, "setup", "--apply")
+    if latest_version.endswith("-cdx.9"):
+        cdx(candidate, "work", "status", name, expected=2)
     cdx(latest, "work", "sync-worker", name)
     status = json.loads(cdx(latest, "work", "status", name))
     assert status["candidate"] == head and status["acceptance"]["e2e"] == "FAIL"

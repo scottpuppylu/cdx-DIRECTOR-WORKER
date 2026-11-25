@@ -5,14 +5,17 @@ import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from urllib.parse import urlencode
 from zipfile import BadZipFile, ZipFile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import release
 from cdx_common import SHA, Refused, atomic_write, git, json_bytes, load_project, read_json, report_error, stamp, state_path
+from cdx_delivery import ASSET, delivery_spec
 from cdx_work import integration_receipt
 
 
@@ -107,10 +110,21 @@ def stream_digest(handle):
     return digest.hexdigest()
 
 
-def verify_delivery_archive(proof, receipt, archive_file, policy):
+def verify_delivery_archive(proof, receipt, archive_file, policy, *, staged=None):
     members = {row["order"]: row["artifact"] for row in proof["members"] if row.get("artifact")}
     archive_sha = receipt.get("artifact", {}).get("sha256")
+    delivery = delivery_spec(proof.get("delivery", {"mode": "source"}))
+    final_outputs = proof.get("outputs", {})
+    if set(final_outputs) != {row["asset"] for row in delivery["outputs"]}:
+        raise Refused("Integration receipt is missing its approved final outputs")
+    for output in delivery["outputs"]:
+        saved = final_outputs[output["asset"]]
+        if (any(saved.get(key) != value for key, value in output.items()) or
+                not re.fullmatch(r"[0-9a-f]{64}", saved.get("sha256", ""))):
+            raise Refused("Integrated output does not match the approved delivery contract")
     if archive_file is None:
+        if final_outputs:
+            raise Refused("Provide the attested CI archive for the integrated final outputs")
         if any(digest != archive_sha for digest in members.values()):
             raise Refused("Provide the attested CI archive and artifact_members for the accepted build outputs")
         return {order: {"sha256": digest} for order, digest in members.items()}
@@ -138,10 +152,26 @@ def verify_delivery_archive(proof, receipt, archive_file, policy):
                     if stream_digest(item) != accepted:
                         raise Refused(f"{order} artifact differs from the accepted build output")
                 result[order] = {"path": name, "sha256": accepted}
+            if final_outputs:
+                result["final_outputs"] = {}
+            for name, output in final_outputs.items():
+                entry = output["ci_path"]
+                if not ASSET.fullmatch(name) or files.count(entry) != 1:
+                    raise Refused(f"CI archive needs one integrated output at {entry}")
+                with archive.open(entry) as item:
+                    if stream_digest(item) != output["sha256"]:
+                        raise Refused(f"CI archive differs from the verified integrated output: {entry}")
+                if staged is not None:
+                    with archive.open(entry) as item, (staged / name).open("xb") as target:
+                        shutil.copyfileobj(item, target)
+                    with (staged / name).open("rb") as asset:
+                        if stream_digest(asset) != output["sha256"]:
+                            raise Refused(f"Staged release asset differs from the integrated output: {name}")
+                result["final_outputs"][name] = {"path": entry, "sha256": output["sha256"]}
     return result
 
 
-def check_delivery(repo, state, job, args, policy):
+def check_delivery(repo, state, job, args, policy, *, staged=None):
     head = job.head()
     if not SHA.fullmatch(head) or head != args.head:
         raise Refused("Release HEAD changed or differs from the requested delivery SHA")
@@ -158,6 +188,10 @@ def check_delivery(repo, state, job, args, policy):
     proof = integration_receipt(repo, state, args.integration, landed_head=landed)
     if proof["outcome"] != "PASS":
         raise Refused(f"Integration {args.integration} is {proof['outcome']}")
+    if proof.get("schema") == 3 and not proof.get("approval"):
+        raise Refused("A managed release requires an approved integration contract. Approve and rerun integration.")
+    if proof.get("po_delivery") not in ("PASS", "NOT_REQUIRED"):
+        raise Refused(f"Integrated product judgment is {proof['po_delivery']}")
     if remote_base not in (proof["base"], landed) or proof["target"] not in (
             f"refs/remotes/{job.remote}/{job.branch}", f"refs/heads/{job.branch}"):
         raise Refused("Integration was not based on the current release target")
@@ -172,13 +206,21 @@ def check_delivery(repo, state, job, args, policy):
             raise Refused("Pin the candidate Git branch for the pre-push CI")
         git(repo, "check-ref-format", f"refs/heads/{branch}")
     receipt = check_ci(repo, slug, head, args.ci_run, policy, args.artifact, branch=branch)
-    outputs = verify_delivery_archive(proof, receipt, args.archive, policy)
-    if (job.head() != head or integration_receipt(repo, state, args.integration, landed_head=landed)["outcome"] != "PASS"):
+    outputs = verify_delivery_archive(proof, receipt, args.archive, policy,
+                                      staged=staged if not args.push_only and args.execute else None)
+    if (job.head() != head or integration_receipt(repo, state, args.integration, landed_head=landed) != proof):
         raise Refused("Delivery evidence changed during verification")
     job.delivery_head, job.delivery_base = head, proof["base"] if args.push_only else head
     if not args.push_only:
+        def recheck():
+            if job.head() != head or integration_receipt(repo, state, args.integration, landed_head=head) != proof:
+                raise Refused("Delivery evidence changed before publication")
+        job.delivery_recheck = recheck
         ci_url = f"https://github.com/{slug}/actions/runs/{args.ci_run}"
         job.notes += f"\n\n已驗證交付提交 `{head}`。 [目標分支 CI]({ci_url})\n"
+        for name, output in outputs.get("final_outputs", {}).items():
+            job.delivery_assets[name] = {"sha256": output["sha256"], "path": staged / name if staged else None}
+            job.notes += f"\n- `{name}` 的 SHA-256 為 `{output['sha256']}`。"
     proof_path = state_path(state, "delivery", head, f"{args.ci_run}-{receipt['run_attempt']}.json")
     evidence = dict(receipt, integration=args.integration, checked=stamp(), integration_head=proof["head"],
                     stage="push" if args.push_only else "publish", outputs=outputs)
@@ -207,8 +249,11 @@ def main(argv=None):
         command = ["--repo", str(root), "--config", str(config)]
         if args.execute:
             command.append("--execute")
-        return release.main(command, delivery_check=lambda job: check_delivery(root, state, job, args, policy),
-                            push_only=args.push_only)
+        with tempfile.TemporaryDirectory(prefix="cdxdw-release-assets-") as folder:
+            return release.main(command,
+                                delivery_check=lambda job: check_delivery(root, state, job, args, policy,
+                                                                           staged=Path(folder)),
+                                push_only=args.push_only)
     except (OSError, ValueError, RuntimeError, KeyError, BadZipFile, subprocess.SubprocessError) as error:
         return report_error(error)
 

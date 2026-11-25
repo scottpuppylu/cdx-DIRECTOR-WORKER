@@ -44,6 +44,8 @@ python -I -B -X utf8 tools/cdxdw.py doctor --repo PROJECT
 
 初始化後讀 `PROJECT.json` 和 `director_work.json`，確認狀態位置、安裝版本與模式。在 `DECISION_REGISTER.md` 登記 PO 選擇，再把需要往後處理的原話及題目記進 `PO_PENDING.md`。已存在的狀態先接續未結事項。
 
+日常使用狀態目錄下的 `cdxdw.py` 啟動當前 runtime，並以 `--repo` 指定產品專案。建置預覽列出會更新的本機檔和已追蹤檔。升級前先結束舊命令，保留一致性備份。
+
 ## 3. 核對生效範圍與首批工作線
 
 | 位置 | 核對內容 |

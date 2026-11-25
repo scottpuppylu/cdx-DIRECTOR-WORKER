@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "version": "2.6.0-cdx.8",
+  "version": "2.6.0-cdx.9",
   "files": [
     {
       "path": ".agents/plugins/marketplace.json",
@@ -8,7 +8,7 @@
     },
     {
       "path": "BOOTSTRAP.md",
-      "sha256": "13edbd106ce8c5082f98ff8b21a8c7327b4f050b0478c2eeefe6e448aacd24eb"
+      "sha256": "4d358ab89011693d2bc886aa366113dbeec0bdfdea2947e31b18260418149a6e"
     },
     {
       "path": "CHANGELOG-upstream.md",
@@ -16,11 +16,11 @@
     },
     {
       "path": "CHANGELOG.md",
-      "sha256": "0d66f0a99d2f6f95557bdc1e6daa99f4334d1f49283c2526da26987d36e77353"
+      "sha256": "65a445aa709ec7a850941871a35ad9ce28219d9a5a36a0818e301181a7cc34b8"
     },
     {
       "path": "CODEX-PORT.md",
-      "sha256": "4ed3687af841490b2baf7f2f9abc7a1a12819b9594ad541276470a4e8911c9ef"
+      "sha256": "925f7bb2d0ad1e13edd55e81d23b063233a86b73a1385e589ba9e75a68f0942e"
     },
     {
       "path": "LICENSE",
@@ -32,11 +32,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "d550ae41895524a2eb910a3e8393edb15b075aa2f06b4d61af2657edc9ba7500"
+      "sha256": "b6971e919f95e7fadaea37475f1136d813d11cce527632c628df9b51200cd23f"
     },
     {
       "path": "VERSION",
-      "sha256": "bcb08a74fe6d28a9e6d9f452319f7f0b650658115b6f63cdfbd67d1b4fae2755"
+      "sha256": "0609964d8e47480851b5276a6ffebfafe9202b226f76071445177af87cc45a35"
     },
     {
       "path": "director_work.example.json",
@@ -100,7 +100,7 @@
     },
     {
       "path": "plugin/cdx/plugin.json",
-      "sha256": "16cbcd9721254bb1ef7d32d4fb093dd741393df2c48cc10e687c6d9798da4ff3"
+      "sha256": "e6014d7bd2444a8d00ff7be1feb30b7519a8550630795cd6b8f1c66b70be254f"
     },
     {
       "path": "plugin/cdx/skills/cdx-bootstrap/SKILL.md",
@@ -152,7 +152,7 @@
     },
     {
       "path": "research/reproduce_cdxdw.py",
-      "sha256": "aec0637a72fa5454a7804ca7c2fa675ca197baf8c476da1ac185fd14139d531e"
+      "sha256": "a9117efb9ae10ca4704c5267e13fbe3b9e95fc483031bd0e654c1fad224193bb"
     },
     {
       "path": "templates/.gitleaks.toml",
@@ -260,7 +260,7 @@
     },
     {
       "path": "tools/CDX-TOOLS.md",
-      "sha256": "e17021ba33ac8caeaaeea7006a5daf18e724408c13a6623cf190ba75d7201c82"
+      "sha256": "fef0a88aee29228ab7e63cf39baa2538b23c25e9c3b1a89a4879f3ba9e8d1b11"
     },
     {
       "path": "tools/README.md",
@@ -280,7 +280,7 @@
     },
     {
       "path": "tools/cdx_acceptance.py",
-      "sha256": "9745219279d8b16badfbdb9855a75a19f8dd59d974fe0c44e0c82ae8356bae55"
+      "sha256": "1979be6934d9db860a0e39abc00a3116788da38229f7e7c2fa015774be5009a2"
     },
     {
       "path": "tools/cdx_audit.py",
@@ -288,11 +288,15 @@
     },
     {
       "path": "tools/cdx_common.py",
-      "sha256": "532f8d59a217ad028e72fe00421556cee82a801e0e1f326903dfc6e23b5f3a7b"
+      "sha256": "6cd8d13e82604f77563827dfc36cbe75ea039a304242a6e2e6d87e315d6ae8cc"
+    },
+    {
+      "path": "tools/cdx_delivery.py",
+      "sha256": "0103ec0284b167c5689171f7193507f952ca3ae3a9ded55567805bdd6d4d257d"
     },
     {
       "path": "tools/cdx_doctor.py",
-      "sha256": "212560a822eba0059aa0e5b83e5b9637834f09161d363f325f40cc8475a3970a"
+      "sha256": "24ac6900d200a79e4aeb4ff77d91966230c475d314252352cb769743e6164f54"
     },
     {
       "path": "tools/cdx_gates.py",
@@ -300,19 +304,23 @@
     },
     {
       "path": "tools/cdx_handoff.py",
-      "sha256": "2f2379aca7236dccd62f0aa714d22e3d92693fde657608430e8ce07c8e4b28a7"
+      "sha256": "e6a0e498ac2028b2fc30c8692289b3216b2b9119f3fcb5adb46d528144f6e035"
     },
     {
       "path": "tools/cdx_hook.py",
-      "sha256": "3837a4f1b001a055fdec57244f7df7a9207aa5fc045854733acad3a7098a23c7"
+      "sha256": "0f467610b6fa4ba606bd090f84e028b7ce2181ca0f6b8d971a82640266d3b142"
+    },
+    {
+      "path": "tools/cdx_launcher.py",
+      "sha256": "cde3ae7768d32991f78d135f106f266d18a660d2c7b4c46426bc4ab1028f7cf6"
     },
     {
       "path": "tools/cdx_manifest.py",
-      "sha256": "a7ce2241666d5f1712bd8ff6d5a6eb8d20ddbd8ff2f263713bb5a663cdff0100"
+      "sha256": "bca1f25873c7aeb0765c208f6d6abedcd0e626775f98154cf34521ad132f8b17"
     },
     {
       "path": "tools/cdx_release.py",
-      "sha256": "747894b1821d696048f4e04e0d7c947c93a6268d8f5825eb5abb9cf33175bf79"
+      "sha256": "fc7b06917181a5039d8acc1ad6a7415ff2feb611831caf6da2d919a34329bf2f"
     },
     {
       "path": "tools/cdx_review.py",
@@ -324,11 +332,11 @@
     },
     {
       "path": "tools/cdx_session.py",
-      "sha256": "1a54ab788767534dc5eebfef3ca3e5f30df0589bce4530517ead7d4aa67e6679"
+      "sha256": "59ac809776ffc6ce6216f007aa4be6ea2e67c59f25d4178027312c7f3007bb7f"
     },
     {
       "path": "tools/cdx_setup.py",
-      "sha256": "f2b5b186734e51d9d844bbe488809ef1aa3d88bb1c75a6663f9f691f7d130759"
+      "sha256": "a5938eccef343919448a53b1287897063ffce3313ec6f6d3d25475fa52f0bcab"
     },
     {
       "path": "tools/cdx_usage.py",
@@ -336,7 +344,7 @@
     },
     {
       "path": "tools/cdx_work.py",
-      "sha256": "53c5b709e8b263c9e1acd6af3cb3894041540d3ebe0356610b8af833a6b2719c"
+      "sha256": "48dc3a403035cbadcb5122d2dc3cee3f43e65abbc873aa2b16435bb86aa3832c"
     },
     {
       "path": "tools/cdxdw.py",
@@ -460,7 +468,7 @@
     },
     {
       "path": "tools/release.py",
-      "sha256": "7a12d11b8786a251496ccaf63b96a08c3a11f2556ed04cea418c37818da6d369"
+      "sha256": "dfd611cc1edab13e673572ceafcd3505199350ad93b96d5c6b8fc4e5aa3609d2"
     },
     {
       "path": "tools/report_vs_audit.py",
@@ -500,7 +508,7 @@
     },
     {
       "path": "tools/selftest_cdx.py",
-      "sha256": "790c811ddd7efec03f12c05c8e65126b2f75d3be166f66163a4674dec0997764"
+      "sha256": "7c64a56b44d14dc5e7e19a89764ab745c67d4505eec2d3a1a5309f97f2dc0dca"
     },
     {
       "path": "tools/setup_check.py",

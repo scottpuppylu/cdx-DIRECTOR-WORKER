@@ -9,10 +9,11 @@ import shlex
 import subprocess
 import sys
 import re
+import shutil
 import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from cdx_common import (POINTER, ROOT, VERSION, Refused, atomic_write, checkout, common_dir, json_bytes,
+from cdx_common import (POINTER, ROOT, STATE_SCHEMA, VERSION, Refused, atomic_write, checkout, common_dir, git, json_bytes,
                         lock, primary_checkout, read_json, report_error, stamp, state_path, within)
 from cdx_manifest import checked_files
 
@@ -121,7 +122,7 @@ def plan(args, target=None):
     owner = state_path(state, "PROJECT.json")
     existing = read_json(owner) if owner.exists() else None
     if (state.exists() and not existing and any(state.iterdir())) or (
-            existing and (existing.get("schema") != 1 or Path(existing["git_common_dir"]) != common
+            existing and (existing.get("schema") not in (1, STATE_SCHEMA) or Path(existing["git_common_dir"]) != common
                           or Path(existing["repo"]) != repo)):
         raise Refused(f"State belongs to another workflow or project: {state}")
 
@@ -182,9 +183,34 @@ def plan(args, target=None):
         data = json.loads(bundle[ROOT / "director_work.example.json"].decode("utf-8-sig"))
         data["mode"] = mode
         files.append((config, json_bytes(data)))
-    metadata = {"schema": 1, "git_common_dir": str(common), "repo": str(repo), "kit": str(kit),
+    files.append((state_path(state, "cdxdw.py"), bundle[ROOT / "tools" / "cdx_launcher.py"]))
+    metadata = {"schema": STATE_SCHEMA, "git_common_dir": str(common), "repo": str(repo), "kit": str(kit),
                 "version": version, "mode": mode, "hooks": use_hooks, "managed_skills": manifest}
     return state, owner, pointer, metadata, files
+
+
+def backup_legacy(state, repo, pointer, files):
+    backup = state_path(state, "migrations", "schema-1")
+    if backup.is_dir():
+        return
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=backup.parent, prefix=".cdx-migration-") as folder:
+        stage = Path(folder) / "snapshot"
+        shutil.copytree(state, stage / "state", symlinks=True,
+                        ignore=lambda base, names: {name for name in names if name.endswith(".guard") or
+                        (Path(base) == state and name in ("runtime", "migrations"))})
+        atomic_write(stage / "git-pointer.json", pointer.read_bytes())
+        atomic_write(stage / "candidate-refs.txt", git(repo, "for-each-ref", "--format=%(refname) %(objectname)",
+                                                       "refs/cdxdw/", raw=True))
+        previous_files = {}
+        for path, data in files:
+            if within(path, repo) and (not path.is_file() or path.read_bytes() != data):
+                relative = path.relative_to(repo)
+                previous_files[relative.as_posix()] = path.is_file()
+                if path.is_file():
+                    atomic_write(stage / "checkout" / relative, path.read_bytes())
+        atomic_write(stage / "checkout-paths.json", json_bytes({"previously_existed": previous_files}))
+        os.replace(stage, backup)
 
 
 def main(argv=None):
@@ -203,6 +229,13 @@ def main(argv=None):
         if not args.apply:
             state, _, _, meta, files = plan(args)
             print(f"CDX_SETUP PLAN state={state} version={meta['version']} files={len(files)} hooks={meta['hooks']}")
+            repo = Path(meta["repo"])
+            tracked = set(git(repo, "ls-files", "-z").split("\0"))
+            for path, data in files:
+                if within(path, Path(meta["kit"])) or (path.is_file() and path.read_bytes() == data):
+                    continue
+                relative = path.relative_to(repo).as_posix() if within(path, repo) else None
+                print(f"  {'tracked' if relative in tracked else 'local'} {path}")
             return 0
         common = common_dir(checkout(args.repo))
         with lock(common / "cdx-setup.lock"):
@@ -212,6 +245,10 @@ def main(argv=None):
             identity = hashlib.sha256(os.path.normcase(str(state)).encode("utf-8")).hexdigest()[:24]
             with lock(state.parent / f".cdx-install-{identity}.lock"):
                 state, owner, pointer, meta, files = plan(args, target)
+                if owner.is_file() and read_json(owner).get("schema") == 1:
+                    if pointer.is_file():
+                        backup_legacy(state, target[0], pointer, files)
+                    atomic_write(pointer, json_bytes({"schema": STATE_SCHEMA, "state": str(state)}))
                 # Reserve the state before the first scaffold write, even when another repo uses --state.
                 if not owner.exists():
                     atomic_write(owner, json_bytes(meta))
@@ -233,7 +270,8 @@ def main(argv=None):
                     if not path.exists() or path.read_bytes() != data:
                         atomic_write(path, data)
                         changed += 1
-                for path, data in ((owner, json_bytes(meta)), (pointer, json_bytes({"schema": 1, "state": str(state)}))):
+                for path, data in ((owner, json_bytes(meta)),
+                                   (pointer, json_bytes({"schema": STATE_SCHEMA, "state": str(state)}))):
                     if not path.exists() or path.read_bytes() != data:
                         atomic_write(path, data)
         print(f"CDX_SETUP COMPLETE state={state} version={meta['version']} changed={changed} hooks={meta['hooks']}")

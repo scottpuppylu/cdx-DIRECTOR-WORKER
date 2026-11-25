@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+from zipfile import ZipFile, ZipInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from cdx_common import ROOT, Refused, atomic_write, git, json_bytes, report_error, state_path
@@ -70,9 +71,22 @@ def checked_files(root):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--check", action="store_true", help="compare the manifest with the tracked source files")
+    flags = parser.add_mutually_exclusive_group()
+    flags.add_argument("--check", action="store_true", help="compare the manifest with the tracked source files")
+    flags.add_argument("--package", type=Path, help="build a deterministic installable ZIP from the verified files")
     options = parser.parse_args()
     try:
+        if options.package:
+            entries = checked_files(ROOT)
+            options.package.parent.mkdir(parents=True, exist_ok=True)
+            with ZipFile(options.package, "x") as archive:
+                for path, contents in sorted(entries, key=lambda row: row[0].relative_to(ROOT).as_posix()):
+                    entry = ZipInfo(path.relative_to(ROOT).as_posix())
+                    entry.create_system = 3
+                    entry.external_attr = 0o100644 << 16
+                    archive.writestr(entry, contents)
+            print(f"CDX_MANIFEST PACKAGE {options.package}")
+            return 0
         manifest = ROOT / NAME
         raw = json_bytes(manifest_from_checkout(ROOT))
         if options.check:

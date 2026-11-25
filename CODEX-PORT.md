@@ -1,6 +1,6 @@
 # DIRECTOR-WORK → cdx-DIRECTOR-WORKER
 
-`cdx-DIRECTOR-WORKER` 的產品簡稱是 `cdxdw`，本文件適用於 `2.6.0-cdx.8`。上游 `v2.6.0` commit `787f67bb7483cf07ac45f450a3f9e57262383359`。安裝、工單、審查和恢復由這個 repo 提供。
+`cdx-DIRECTOR-WORKER` 的產品簡稱是 `cdxdw`，本文件適用於 `2.6.0-cdx.9`。上游 `v2.6.0` commit `787f67bb7483cf07ac45f450a3f9e57262383359`。安裝、工單、審查和恢復由這個 repo 提供。
 
 ## 對照同系列移植
 
@@ -8,13 +8,13 @@
 |---|---|---|---|---|
 | `dsh-DIRECTOR-WORKER` | `dshdw` | `2.6.0-ds.7` | `dsh_` | 本機 session 事後稽核、獨立工作樹和核准前閘門。 |
 | `agy-DIRECTOR-WORKER` | `agydw` | `2.6.0-agy.6` | `agy_` | Antigravity 的事前 Hook、角色權限、分支工作區、復工與 transcript 稽核。 |
-| `cdx-DIRECTOR-WORKER` | `cdxdw` | `2.6.0-cdx.8` | `cdx_` | Desktop 工作樹交接核對、候選封存、受控發布與驗收。App Server 支援原生審查、回合、續航和稽核。 |
+| `cdx-DIRECTOR-WORKER` | `cdxdw` | `2.6.0-cdx.9` | `cdx_` | Desktop 工作樹交接核對、候選封存、逐項驗收及受控發布。App Server 支援原生審查、回合、續航和稽核。 |
 
 cdxdw 採 `<上游版號>-cdx.<移植版次>`。公開入口為 `tools/cdxdw.py`，既有 `tools/cdx.py` 仍可呼叫同一入口。外掛 ID、Skill ID 與儲存指標使用平台前綴。各版本採用的治理機制與此次實作見 [DW 系列比較](research/DW-FAMILY-REVIEW.md)。
 
 ## 分層與同步
 
-1. 上游的 PURPOSE、MIT 授權與版本歷史留在獨立檔案。此版有 77 份上游檔案與 `v2.6.0` 的 Git blob 逐位元一致。共用 Python 工具與治理格式維持上游介面，例如 gate、scope、trace、evidence、audit、release、pre_tr、ruler、run_plan、waiver 和 pack。
+1. 上游的 PURPOSE、MIT 授權與版本歷史留在獨立檔案。`.8` 的研究基線與上游 `v2.6.0` 有 75 個同路徑且逐位元相同的檔案，計入改名的 `CHANGELOG-upstream.md` 為 76。共用 Python 工具與治理格式維持上游介面，例如 gate、scope、trace、evidence、audit、release、pre_tr、ruler、run_plan、waiver 和 pack。
 2. `tools/cdx_*.py` 是平台層，負責安裝、診斷、Git 工作線、App Server、Hook、用量和稽核。手冊第 11、13 章和 PO 工作流為 Codex 撰寫。
 3. `plugin/cdx` 提供五個可按需叫用的工作流 Skill。以 [官方 plugin 格式](https://developers.openai.com/plugins/build/plugins) 打包，可用 repo marketplace 或 project setup 的安裝入口。
 4. 舊版 Claude 專屬的設定、transcript、Artifact 頁與容器工具隨共用套件保留供上游相容與回歸。cdxdw 的 active 入口走新平台層。
@@ -41,7 +41,7 @@ cdxdw 採 `<上游版號>-cdx.<移植版次>`。公開入口為 `tools/cdxdw.py`
 - `python -I -B -X utf8 research/probe_app_server.py` 用實際 Codex CLI 和 loopback provider 驗證工作樹 Skill、Hook 信任狀態、結構化用量、持久化回合。另一個本機探測觀察到空 thread 在重啟後沒有 rollout，所以 cdxdw 把 native thread 建立延到第一次回合。
 - 在隔離的 Codex CLI `0.160.1` 資料目錄，實測 `cdxdw doctor --live` 發現五份 project skills 與三個尚未信任的 Hook；CLI 的 marketplace 能發現 cdxdw plugin。
 - 從 `v2.6.0-cdx.1` 發行內容安裝到隔離 Git 專案，再用 `.2` 升級。待決帳原文與舊 runtime 都保留；`.2` 的兩個入口回報同一版本。
-- 已知環境限制：本機 Windows 探針的沙箱狀態為 `notConfigured`。這臺機器不能用該配置驗證自動施工及物理唯讀；正式專案可走手動工作樹與工具閘門。沒有用真實模型、桌面 Hand off 或真實 compaction Hook 做這份發版測試。實測細節見 [平台研究](research/CODEX-PLATFORM.md)。
+- 早期平台研究在當時的 Windows 配置觀察到 `notConfigured`。`.6` 已用 MXC 重跑唯讀及工作區邊界，也驗證真實模型與本機 Desktop 往返。`.8` 新增 PostCompact 和 UserPromptSubmit，合計五個專案 Hook，並實測原生手動及自動壓縮。信任狀態以實際宿主診斷為準。 [早期平台研究](research/CODEX-PLATFORM.md) · [實測範圍](research/CDXDW-2026-11-24-FOLLOWUP.md)
 
 ## 操作入口
 

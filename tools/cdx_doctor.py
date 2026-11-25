@@ -10,7 +10,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from cdx_common import ROOT, Refused, load_project, report_error, state_path
+from cdx_common import ROOT, STATE_SCHEMA, Refused, executing_version, load_project, report_error, state_path
 from cdx_rpc import AppServer
 
 
@@ -48,6 +48,19 @@ def certified(result, phase):
             and target["exit"] != 0 and not target["wrote"])
 
 
+def discover(server, repo):
+    skills = server.call("skills/list", {"cwds": [str(repo)], "forceReload": True})
+    hooks = server.call("hooks/list", {"cwds": [str(repo)]})
+    return {
+        "skills": [s.get("name") for row in skills["data"] for s in row["skills"]
+                   if s.get("enabled") and s.get("name", "").startswith("cdx-")],
+        "hooks": [{"event": hook.get("eventName"), "trust": hook.get("trustStatus"),
+                   "source": hook.get("source"), "path": hook.get("sourcePath") or hook.get("path")}
+                  for row in hooks["data"] for hook in row["hooks"]
+                  if (hook.get("statusMessage") or "").startswith("cdx DIRECTOR-WORK ")]
+    }
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default=".")
@@ -56,7 +69,7 @@ def main(argv=None):
     parser.add_argument("--probe-sandbox", action="store_true", help="test safe writes in an isolated disposable fixture")
     args = parser.parse_args(argv)
     try:
-        repo, state, project = load_project(args.repo)
+        repo, state, project = load_project(args.repo, diagnostic=True)
         files = ("PO_PENDING.md", "RESUME_STATE.md", "DIRECTOR_LOG.md", "DECISION_REGISTER.md", "director_work.json")
         missing = [name for name in files if not state_path(state, name).is_file()]
         kit = Path(project["kit"])
@@ -64,6 +77,9 @@ def main(argv=None):
             missing.append("installed runtime")
         codex = args.codex or shutil.which("codex")
         summary = {"project": str(repo), "state": str(state), "kit": str(kit), "version": project["version"],
+                   "executing_version": executing_version(), "active_version": project["version"],
+                   "minimum_write_version": project["version"] if project["schema"] == STATE_SCHEMA else None,
+                   "schema": project["schema"], "launcher": str(state / "cdxdw.py"),
                    "missing": missing, "hooks_configured": project["hooks"], "codex": None, "sandbox": "NOT_PROBED"}
         if codex:
             summary["codex"] = subprocess.check_output([codex, "--version"], encoding="utf-8", timeout=15).strip()
@@ -71,13 +87,7 @@ def main(argv=None):
             if not codex:
                 raise Refused("Codex CLI was not found on PATH")
             with AppServer(codex, repo) as server:
-                skills = server.call("skills/list", {"cwds": [str(repo)], "forceReload": True})
-                hooks = server.call("hooks/list", {"cwds": [str(repo)]})
-                summary["skills"] = [s.get("name") for row in skills["data"] for s in row["skills"]
-                                     if s.get("enabled") and s.get("name", "").startswith("cdx-")]
-                summary["hooks"] = [{"event": hook.get("eventName"), "trust": hook.get("trustStatus")}
-                                    for row in hooks["data"] for hook in row["hooks"]
-                                    if (hook.get("statusMessage") or "").startswith("cdx DIRECTOR-WORK ")]
+                summary.update(discover(server, repo))
                 if os.name == "nt":
                     summary["windows_sandbox"] = server.call("windowsSandbox/readiness", {}).get("status")
                 if args.probe_sandbox:

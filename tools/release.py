@@ -222,6 +222,8 @@ class Release:
         self.planned = []
         self.delivery_head = None
         self.delivery_base = None
+        self.delivery_assets = {}
+        self.delivery_recheck = None
 
     def step(self, name, status, detail=""):
         print(f"STEP {name}: {status}" + (f" {detail}" if detail else ""))
@@ -446,6 +448,43 @@ class Release:
                        "look at the remote tags by hand")
         self.step("tag", "OK", f"{self.tag}^{{}} = {head}")
 
+    def inspect_release(self, gh, repo_name):
+        view = run([gh, "release", "view", self.tag, "-R", repo_name, "--json",
+                    "url,tagName,isDraft,isPrerelease,databaseId"], self.repo)
+        if view.returncode == 0:
+            data = json.loads(view.stdout)
+            if data.get("tagName") != self.tag or type(data.get("isDraft")) is not bool or data.get("isPrerelease"):
+                raise Stop("The existing GitHub release does not match the requested stable tag",
+                           "inspect the release before proceeding")
+            return data
+        diagnostic = f"{view.stderr or ''}\n{view.stdout or ''}"
+        if re.search(r"release not found|HTTP 404", diagnostic, re.I):
+            return None
+        raise Stop("Unable to check existing GitHub release", "check access and retry publication")
+
+    def verify_release_assets(self, gh, repo_name, data, *, allow_missing=False):
+        if not self.delivery_assets:
+            return set()
+        identifier = data.get("databaseId")
+        if type(identifier) is not int:
+            raise Stop("Release ID missing from GitHub", "inspect the release before proceeding")
+        response = run([gh, "api", f"repos/{repo_name}/releases/{identifier}/assets", "--paginate", "--slurp"], self.repo)
+        if response.returncode:
+            raise Stop("Unable to verify the remote release assets", "check GitHub access and retry")
+        rows = [item for page in json.loads(response.stdout) for item in page]
+        seen = set()
+        for item in rows:
+            name = item.get("name")
+            if (name in seen or name not in self.delivery_assets or item.get("state") != "uploaded" or
+                    item.get("digest") != f"sha256:{self.delivery_assets[name]['sha256']}"):
+                raise Stop(f"Remote release asset differs from the approved delivery: {name}",
+                           "inspect the existing asset and rerun with the verified publication plan")
+            seen.add(name)
+        missing = self.delivery_assets.keys() - seen
+        if missing and not allow_missing:
+            raise Stop("Required release assets were not found", "inspect the release and retry")
+        return missing
+
     def release_step(self, version):
         repo_name = self.config["gh_repo"] or gh_repo_from_url(git(self.repo, "remote", "get-url", self.remote))
         title = self.config["title"].format(version=version)
@@ -459,30 +498,57 @@ class Release:
             raise Stop("cannot tell the GitHub repository from the remote URL", "set \"release\": {\"gh_repo\": ...}")
         if not gh:
             raise Stop("gh (GitHub CLI) is not on PATH", "install gh and gh auth login, then run again")
-        view = run([gh, "release", "view", self.tag, "-R", repo_name, "--json", "url,tagName,isDraft"], self.repo)
-        if view.returncode == 0:
-            self.step("release", "SKIP", f"already there: {json.loads(view.stdout).get('url')}")
+        data = self.inspect_release(gh, repo_name)
+        if data and not data["isDraft"]:
+            self.verify_release_assets(gh, repo_name, data)
+            self.step("release", "SKIP", f"already published and verified: {data.get('url')}")
             return
         if not self.execute:
-            self.planned.append(f"gh release create {self.tag} -R {repo_name} --title {title!r} --notes-file <CHANGELOG "
-                                f"section, {len(self.notes.splitlines())} lines> --latest --verify-tag")
+            if data:
+                self.verify_release_assets(gh, repo_name, data, allow_missing=True)
+            action = "resume existing draft" if data else "create release"
+            if self.delivery_assets:
+                action += f" with {len(self.delivery_assets)} verified asset(s)"
+            self.planned.append(f"{action}: {repo_name} {self.tag}")
             return
-        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as handle:
-            handle.write(self.notes)
-            notes_file = handle.name
-        try:
-            proc = run([gh, "release", "create", self.tag, "-R", repo_name, "--title", title, "--notes-file", notes_file,
-                        "--latest", "--verify-tag"], self.repo)
-        finally:
-            os.unlink(notes_file)
-        if proc.returncode != 0:
-            raise Stop(f"gh release create failed: {(proc.stderr or proc.stdout).strip()[-300:]}",
-                       "fix the cause (gh auth status, tag on the remote) and run again; branch and tag are kept")
-        view = run([gh, "release", "view", self.tag, "-R", repo_name, "--json", "url,tagName,isDraft"], self.repo)
-        if view.returncode != 0:
-            raise Stop("gh release view cannot see the new release", f"look at https://github.com/{repo_name}/releases")
-        data = json.loads(view.stdout)
-        self.step("release", "OK", f"{data.get('url')} (draft={data.get('isDraft')})")
+        if not data:
+            if self.delivery_recheck:
+                self.delivery_recheck()
+            with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as handle:
+                handle.write(self.notes)
+                notes_file = handle.name
+            try:
+                proc = run([gh, "release", "create", self.tag, "-R", repo_name, "--title", title,
+                            "--notes-file", notes_file, "--verify-tag",
+                            "--draft" if self.delivery_assets else "--latest"], self.repo)
+            finally:
+                os.unlink(notes_file)
+            if proc.returncode:
+                raise Stop(f"gh release create failed: {(proc.stderr or proc.stdout).strip()[-300:]}",
+                           "check GitHub, then rerun; the verified branch and tag are kept")
+            data = self.inspect_release(gh, repo_name)
+        if data and data["isDraft"]:
+            missing = self.verify_release_assets(gh, repo_name, data, allow_missing=True)
+            if missing:
+                upload = run([gh, "release", "upload", self.tag, "-R", repo_name,
+                              *(self.delivery_assets[name]["path"] for name in sorted(missing))], self.repo)
+                if upload.returncode:
+                    raise Stop("Unable to upload all approved assets to the draft",
+                               "inspect the draft and rerun; existing assets will be verified")
+            self.verify_release_assets(gh, repo_name, data)
+            if self.delivery_head and self.remote_branch_sha() != self.delivery_head:
+                raise Stop("The target changed while preparing the release draft", "verify the target and retry")
+            if self.delivery_recheck:
+                self.delivery_recheck()
+            publish = run([gh, "release", "edit", self.tag, "-R", repo_name,
+                           "--draft=false", "--latest", "--verify-tag"], self.repo)
+            if publish.returncode:
+                raise Stop("GitHub did not confirm publishing the draft", "inspect the release before retrying")
+            data = self.inspect_release(gh, repo_name)
+        if not data or data["isDraft"]:
+            raise Stop("GitHub release is not published", "inspect the release before retrying")
+        self.verify_release_assets(gh, repo_name, data)
+        self.step("release", "OK", f"{data.get('url')} (draft=False)")
 
 
 def use_work_temp():

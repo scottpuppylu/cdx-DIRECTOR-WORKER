@@ -2,7 +2,7 @@
 
 **cdxdw** 是 [DIRECTOR-WORK v2.6.0](https://github.com/scottpuppylu/DIRECTOR-WORK/tree/v2.6.0) 的獨立 Codex 版。你提出需求和驗收方式，Codex 總監把工作交給隔離的工作線，最後拿實際候選和驗收證據回來。中斷後可從工單、工作樹和紀錄接回。
 
-**本文件適用於 `2.6.0-cdx.8`。** 從 GitHub Releases 取得正式套件，或依需求使用已核對的 checkout。執行 `python -I -B -X utf8 tools/cdxdw.py --version` 可核對版本。 [GitHub Releases](https://github.com/scottpuppylu/cdx-DIRECTOR-WORKER/releases) · [版本紀錄](CHANGELOG.md)
+**本文件適用於 `2.6.0-cdx.9`。** 從 GitHub Releases 取得正式套件，或依需求使用已核對的 checkout。執行 `python -I -B -X utf8 tools/cdxdw.py --version` 可核對版本。 [GitHub Releases](https://github.com/scottpuppylu/cdx-DIRECTOR-WORKER/releases) · [版本紀錄](CHANGELOG.md)
 
 第一次使用，**在 Codex 開啟要開發的專案 → 貼啟動提示詞 → 選模式**。已有 cdxdw 專案可直接使用續航提示詞。
 
@@ -209,7 +209,7 @@ python -I -B -X utf8 tools/cdxdw.py session --repo $project native-review $order
 
 - `review --rerun` 核對工單及候選範圍，重跑已在工單核准的 AUTO 指令。
 - `native-review` 預覽封存 ref、base、候選及完整差異的 SHA-256。加 `--run` 才啟動 Codex 原生審查，且須先通過實體唯讀探針。結果是供總監裁決的審查紀錄。
-- `work record --kind review` 保存獨立審查的判定。`work record --kind po` 保存 PO 對指定版本的判定。
+- `work record --kind review` 保存獨立審查的判定。`work record --kind po` 保存 PO 對指定版本的判定。用 `--ac AC-2` 指明驗收條件，可重複指定。多項條件各自保留判定，封存候選也會記下當時核准的 PLAN 摘要。
 
 [交件報告範本](templates/TASK_REPORT.md) · [原生 Review 與工具手冊](tools/CDX-TOOLS.md)
 
@@ -249,6 +249,8 @@ python -I -B -X utf8 tools/cdxdw.py work --repo $project integrate `
 ```
 
 發版前用 `work integration-status UUID --expect-head FULL_DELIVERY_SHA` 比對待交付提交。可用 `cdxdw release --push-only` 核對候選分支 CI 後推送。交付已到目標分支後，改用該分支的候選 SHA 綠燈，核對 workflow、必要 jobs 和驗收證據，再正式發行。若遠端合併、rebase 或合併佇列產生新的 SHA，需該 SHA 的最新 CI，且交付 tree 必須符合已驗證組合。 [受控發版](tools/CDX-TOOLS.md#受控發版) · [共用工具說明](tools/README.md)
+
+受控發版先以 `work approve-integration` 核准命令和交付規格，整合時帶上 `--approval`。要發布建置檔時，規格同時指明整合輸出、CI 封存內路徑和 GitHub 資產名。工具用同一份收據核對三處摘要，並在發布草稿前驗證已上傳資產。
 
 ## 中斷後怎麼接手
 
@@ -315,7 +317,7 @@ DIRECTOR-my-app/                        安裝工具建立的外部狀態
 ## 升級與回復
 
 1. 結束舊 runtime 正在執行的命令，保存目前專案與狀態資料的備份。確認同一張工單只由一個 runtime 寫入。
-2. 用新版套件跑 `setup --repo PROJECT` 預覽，確認原狀態目錄後加 `--apply`。安裝保留舊 runtime，供查閱原始格式與規則。
+2. 用新版套件跑 `setup --repo PROJECT` 預覽，確認原狀態目錄和會改的追蹤檔後加 `--apply`。`.9` 先備份舊狀態，再啟用固定入口 `DIRECTOR-<repo>/cdxdw.py`。日常命令透過固定入口選擇作用中的 runtime。
 3. 既有工作樹用 `work sync-worker ORDER` 更新 cdxdw 管理的 Skill 和 Hook，再查宿主載入及信任。遇到無法辨識的本機 Skill，先核對它的來源。
 4. 舊版收據依原格式保留。若顯示 `LEGACY_NEEDS_VERIFICATION`，以新版重跑或補登判定。遇到需要回復的情況，採用已核對的備份，並比對未提交改動、候選 refs、待決原文和 journal。
 

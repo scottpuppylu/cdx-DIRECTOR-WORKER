@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 
 import evidence_record
+import gate_check
 from cdx_gates import cpu_checks, feasibility, ruler_check
 from cdx_common import (ROOT, SHA, Refused, atomic_write, check_environment, executor, git_environment, json_bytes,
                         lock, read_json, stamp, state_path)
@@ -77,6 +78,32 @@ def latest_attempts(state, spec, candidate, artifact=None):
     return latest
 
 
+def judgment_criteria(spec, kind):
+    return {ac for ac, row in gate_check.ac_table(spec["text"]).items() if row.get("type") == kind.upper()}
+
+
+def current_judgments(state, spec, candidate, artifact):
+    _, data = journal(state, spec, candidate)
+    required = {kind: judgment_criteria(spec, kind) for kind in ("review", "po")}
+    if spec.get("gates", {}).get("po_reply") and not required["po"]:
+        required["po"] = {"po"}
+    decisions = {ac: {"kind": kind, "outcome": "NOT_RUN"} for kind, criteria in required.items() for ac in criteria}
+    for row in data["attempts"]:
+        kind = row["kind"]
+        if kind not in required or row.get("artifact") != artifact:
+            continue
+        criteria = required[kind]
+        covered = row.get("criteria")
+        if not covered and len(criteria) > 1:
+            for ac in criteria:
+                decisions[ac] = dict(row, outcome="LEGACY_NEEDS_VERIFICATION")
+            continue
+        for ac in covered or criteria or {kind}:
+            if ac in criteria or (not criteria and ac == kind):
+                decisions[ac] = row
+    return decisions
+
+
 def artifact_required(state, spec, candidate):
     if spec.get("gates", {}).get("artifact_path"):
         return True
@@ -106,7 +133,7 @@ def run_plan(repo, candidate, plan, record, stdout=None):
 
 
 def run_entry(repo, candidate, command, timeout, record, artifact_path=None, *, plan=None, gates=None,
-              input_root=None, preflight_only=False):
+              input_root=None, preflight_only=False, delivery_outputs=()):
     if not preflight_only and (not command or not all(isinstance(arg, str) and arg.strip() and "\0" not in arg
                                                     for arg in command)):
         raise Refused("The entry point must be an argv array")
@@ -141,12 +168,23 @@ def run_entry(repo, candidate, command, timeout, record, artifact_path=None, *, 
             path = state_path(root.resolve(), artifact_path)
             record["artifact"] = evidence_record.hash_file(path)
             record["artifact_path"] = artifact_path
+        if result.returncode == 0 and delivery_outputs:
+            outputs = {}
+            for output in delivery_outputs:
+                path = state_path(root.resolve(), *output["path"].split("/"))
+                if not path.is_file():
+                    record.setdefault("missing_outputs", []).append(output["path"])
+                    continue
+                outputs[output["asset"]] = dict(output, sha256=evidence_record.hash_file(path))
+            record["outputs"] = outputs
     for stream in ("stdout", "stderr"):
         raw = getattr(result, stream)
         record[stream] = {"sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw),
                           "tail": raw[-4096:].decode("utf-8", errors="replace")}
     record["exit_code"] = result.returncode
     record["outcome"] = "PASS" if result.returncode == 0 else "FAIL"
+    if record.get("missing_outputs"):
+        record["outcome"] = "INVALID"
     if plan and not run_plan(repo, candidate, plan, record, result.stdout):
         record["outcome"] = "INVALID"
     if gates and not ruler_check(gates[1]["gates"].get("ruler"), result.stdout, record):
