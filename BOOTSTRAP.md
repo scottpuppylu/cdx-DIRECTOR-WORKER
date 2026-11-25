@@ -19,7 +19,7 @@
 
 ## 1. 取得規則包並按模式讀取
 
-- 優先使用 PO 提供的路徑或指定 release tag。新安裝未指定時，從 [cdx-DIRECTOR-WORKER](https://github.com/scottpuppylu/cdx-DIRECTOR-WORKER) 取得主分支，放在產品 repo 以外的可用目錄，記錄 `VERSION` 與完整提交 SHA。取得的是發行封包時記錄來源 tag。
+- 優先使用 PO 提供的路徑或指定 release tag。新安裝未指定時，從正式發行取得 `cdxdw-kit.zip`，或 checkout 對應 tag。把套件放在產品 repo 以外的可用目錄，記錄 `VERSION` 與來源 tag。使用 PO 指定的 Git 提交時，記錄完整 SHA。 [正式發行](https://github.com/scottpuppylu/cdx-DIRECTOR-WORKER/releases)
 - 先讀 [README](README.md)、[PURPOSE](PURPOSE.md) 和本頁。一般模式讀 `docs/01` 到 `docs/13`，包含 `06b`。小白模式先讀 [01](docs/01_roles_authority.md)、[03](docs/03_communication.md)、[06](docs/06_resume_lossless.md)、[08](docs/08_safety_rules.md)、[11](docs/11_codex_operations.md)、[12](docs/12_chat_to_product.md)，其餘在第一張工單派出前讀完。
 - 下載、專案外狀態或 sandbox 測試卡住時，說明具體的網路請求、路徑或能力。先用已有的套件、允許的狀態路徑及唯讀步驟繼續。保持專案現有的權限設定，所需額外授權由 PO 確認。
 
