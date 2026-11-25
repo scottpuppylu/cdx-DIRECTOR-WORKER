@@ -3,10 +3,12 @@
 import argparse
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import sys
+from urllib.parse import urlencode
+from zipfile import BadZipFile, ZipFile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import release
@@ -44,7 +46,7 @@ def validate_policy(policy):
     return workflow, signature, set(jobs)
 
 
-def check_ci(repo, slug, head, run_id, policy, artifact_sha256=None):
+def check_ci(repo, slug, head, run_id, policy, artifact_sha256=None, *, branch=None):
     workflow, signature, required = validate_policy(policy)
     if hashlib.sha256(git(repo, "show", f"{head}:{workflow}", raw=True)).hexdigest() != signature:
         raise Refused("The delivery SHA does not contain the trusted workflow")
@@ -54,10 +56,12 @@ def check_ci(repo, slug, head, run_id, policy, artifact_sha256=None):
     owner = (run.get("repository") or {}).get("full_name", "")
     source = (run.get("head_repository") or {}).get("full_name", "")
     workflow_id, attempt = run.get("workflow_id"), run.get("run_attempt")
+    scope = branch or run.get("head_branch")
     if (run.get("id") != run_id or run.get("head_sha") != head or
             owner.casefold() != slug.casefold() or source.casefold() != slug.casefold() or
             run.get("path", "").split("@", 1)[0] != workflow or run.get("event") not in EVENTS or
             run.get("status") != "completed" or run.get("conclusion") != "success" or
+            not isinstance(scope, str) or not scope or run.get("head_branch") != scope or
             type(attempt) is not int or attempt < 1 or type(workflow_id) is not int or workflow_id < 1):
         raise Refused("CI run must attest to the exact SHA, trusted workflow and repository")
     jobs_url = f"{run_url}/attempts/{attempt}/jobs?per_page=100"
@@ -67,30 +71,74 @@ def check_ci(repo, slug, head, run_id, policy, artifact_sha256=None):
         if (len(found) != 1 or found[0].get("status") != "completed" or
                 found[0].get("conclusion") != "success" or found[0].get("head_sha") != head):
             raise Refused(f"Missing passing job at this exact SHA: {name}")
-    latest_url = f"{prefix}/workflows/{workflow_id}/runs?head_sha={head}&per_page=100"
+    query = urlencode({"head_sha": head, "branch": scope, "per_page": 100})
+    latest_url = f"{prefix}/workflows/{workflow_id}/runs?{query}"
     current = github(latest_url)
-    eligible = [row for row in current["workflow_runs"] if row.get("event") in EVENTS and row.get("head_sha") == head]
+    eligible = [row for row in current["workflow_runs"] if row.get("event") in EVENTS and
+                row.get("head_sha") == head and row.get("head_branch") == scope]
     latest = max(eligible, key=lambda row: (row["created_at"], row["id"]), default={})
     if (latest.get("id") != run_id or latest.get("run_attempt") != attempt or latest.get("status") != "completed" or
             latest.get("conclusion") != "success"):
-        raise Refused("A newer GitHub CI run or attempt supersedes this evidence")
+        raise Refused(f"A newer GitHub CI run or attempt on {scope} supersedes this evidence")
     evidence = {"repository": slug, "head": head, "workflow": workflow, "workflow_sha256": signature,
-                "run_id": run_id, "run_attempt": attempt, "jobs": sorted(required), "url": run.get("html_url")}
+                "branch": scope, "event": run["event"], "run_id": run_id, "run_attempt": attempt,
+                "jobs": sorted(required), "url": run.get("html_url")}
     artifact = policy.get("artifact_name")
     if artifact is not None or artifact_sha256:
         if (not isinstance(artifact, str) or not artifact.strip() or
                 not re.fullmatch(r"[a-f0-9]{64}", artifact_sha256 or "")):
             raise Refused("Pin an artifact name in cdx_release_ci and provide its SHA-256")
+        artifact = artifact.replace("{attempt}", str(attempt))
+        if attempt > 1 and not artifact.endswith(f"-attempt-{attempt}"):
+            raise Refused("Use an artifact_name template ending with -attempt-{attempt} for reruns")
         url = f"{run_url}/artifacts?per_page=100"
         artifacts = [item for page in github(url, pages=True) for item in page["artifacts"]
                      if item.get("name") == artifact and item.get("expired") is False]
         if len(artifacts) != 1 or artifacts[0].get("digest") != f"sha256:{artifact_sha256}":
             raise Refused("No unique build artifact with the expected GitHub digest")
-        # GitHub's artifact API is run-scoped. Use attempt-qualified names when a workflow is retried.
-        if attempt > 1 and not artifact.endswith(f"-attempt-{attempt}"):
-            raise Refused("A rerun artifact name must end with its -attempt-N identifier")
         evidence["artifact"] = {"id": artifacts[0]["id"], "name": artifact, "sha256": artifact_sha256}
     return evidence
+
+
+def stream_digest(handle):
+    digest = hashlib.sha256()
+    for block in iter(lambda: handle.read(1024 * 1024), b""):
+        digest.update(block)
+    return digest.hexdigest()
+
+
+def verify_delivery_archive(proof, receipt, archive_file, policy):
+    members = {row["order"]: row["artifact"] for row in proof["members"] if row.get("artifact")}
+    archive_sha = receipt.get("artifact", {}).get("sha256")
+    if archive_file is None:
+        if any(digest != archive_sha for digest in members.values()):
+            raise Refused("Provide the attested CI archive and artifact_members for the accepted build outputs")
+        return {order: {"sha256": digest} for order, digest in members.items()}
+    if not archive_sha:
+        raise Refused("An archive needs the matching GitHub CI artifact attestation")
+    paths = policy.get("artifact_members", {})
+    if not isinstance(paths, dict):
+        raise Refused("artifact_members must map work order IDs to paths inside the CI archive")
+    with archive_file.open("rb") as raw:
+        if stream_digest(raw) != archive_sha:
+            raise Refused("The downloaded CI archive does not match its attested SHA-256")
+        raw.seek(0)
+        with ZipFile(raw) as archive:
+            files = [info.filename for info in archive.infolist() if not info.is_dir()]
+            result = {}
+            for order, accepted in members.items():
+                name = paths.get(order)
+                if name is None and accepted == archive_sha:
+                    result[order] = {"sha256": accepted}
+                    continue
+                if (not isinstance(name, str) or not name or "\\" in name or PurePosixPath(name).is_absolute() or
+                        any(part in ("", ".", "..") for part in name.split("/")) or files.count(name) != 1):
+                    raise Refused(f"{order} needs one unique artifact_members path in the CI archive")
+                with archive.open(name) as item:
+                    if stream_digest(item) != accepted:
+                        raise Refused(f"{order} artifact differs from the accepted build output")
+                result[order] = {"path": name, "sha256": accepted}
+    return result
 
 
 def check_delivery(repo, state, job, args, policy):
@@ -105,6 +153,8 @@ def check_delivery(repo, state, job, args, policy):
     slug = push[1]
     remote_base = git(repo, "rev-parse", f"refs/remotes/{job.remote}/{job.branch}")
     landed = head if remote_base == head else None
+    if not args.push_only and landed is None:
+        raise Refused("Land the verified SHA first. Use --push-only or the repository merge workflow, then use target CI.")
     proof = integration_receipt(repo, state, args.integration, landed_head=landed)
     if proof["outcome"] != "PASS":
         raise Refused(f"Integration {args.integration} is {proof['outcome']}")
@@ -115,12 +165,20 @@ def check_delivery(repo, state, job, args, policy):
         if git(repo, "rev-parse", f"{proof['head']}^{{tree}}") != git(repo, "rev-parse", f"{head}^{{tree}}"):
             raise Refused("Actual delivery tree differs from the verified integration")
         git(repo, "merge-base", "--is-ancestor", proof["base"], head)
-    receipt = check_ci(repo, slug, head, args.ci_run, policy, args.artifact)
+    branch = job.branch
+    if args.push_only and landed is None:
+        branch = policy.get("candidate_branch") or git(repo, "branch", "--show-current")
+        if not isinstance(branch, str) or not branch.strip() or branch == job.branch:
+            raise Refused("Pin the candidate Git branch for the pre-push CI")
+        git(repo, "check-ref-format", f"refs/heads/{branch}")
+    receipt = check_ci(repo, slug, head, args.ci_run, policy, args.artifact, branch=branch)
+    outputs = verify_delivery_archive(proof, receipt, args.archive, policy)
     if (job.head() != head or integration_receipt(repo, state, args.integration, landed_head=landed)["outcome"] != "PASS"):
         raise Refused("Delivery evidence changed during verification")
-    job.delivery_head, job.delivery_base = head, proof["base"]
+    job.delivery_head, job.delivery_base = head, proof["base"] if args.push_only else head
     proof_path = state_path(state, "delivery", head, f"{args.ci_run}-{receipt['run_attempt']}.json")
-    evidence = dict(receipt, integration=args.integration, checked=stamp(), integration_head=proof["head"])
+    evidence = dict(receipt, integration=args.integration, checked=stamp(), integration_head=proof["head"],
+                    stage="push" if args.push_only else "publish", outputs=outputs)
     atomic_write(proof_path, json_bytes(evidence))
     print("CDX_DELIVERY " + json.dumps(dict(evidence, receipt=str(proof_path)), ensure_ascii=False))
 
@@ -132,6 +190,8 @@ def main(argv=None):
     parser.add_argument("--head", required=True)
     parser.add_argument("--ci-run", required=True, type=int)
     parser.add_argument("--artifact", help="SHA-256 of the named GitHub build archive")
+    parser.add_argument("--archive", type=Path, help="downloaded CI ZIP containing PO-accepted build outputs")
+    parser.add_argument("--push-only", action="store_true", help="check candidate CI and push without creating a release")
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args(argv)
     try:
@@ -144,8 +204,9 @@ def main(argv=None):
         command = ["--repo", str(root), "--config", str(config)]
         if args.execute:
             command.append("--execute")
-        return release.main(command, delivery_check=lambda job: check_delivery(root, state, job, args, policy))
-    except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError) as error:
+        return release.main(command, delivery_check=lambda job: check_delivery(root, state, job, args, policy),
+                            push_only=args.push_only)
+    except (OSError, ValueError, RuntimeError, KeyError, BadZipFile, subprocess.SubprocessError) as error:
         return report_error(error)
 
 

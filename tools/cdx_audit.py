@@ -96,9 +96,11 @@ def verified_entries(path):
             yield entry
 
 
-def build_log(events, output):
+def build_log(events, output, session=None):
     if output.exists():
         raise FileExistsError(output)
+    if session is not None and not THREAD_ID.fullmatch(session):
+        raise Refused("Use the exact source thread UUID")
     digest = hashlib.sha256()
     previous, seq, lines, byte_count = audit_log.GENESIS, 0, 0, 0
     now = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
@@ -120,11 +122,14 @@ def build_log(events, output):
                     digest.update(raw)
                     if raw.strip():
                         projected = app_fields(json.loads(raw.decode("utf-8-sig" if lines == 1 else "utf-8")))
-                        if projected:
+                        if projected and (session is None or projected["session_id"] == session):
                             write(stage, projected)
             imported = seq
+            if session is not None and not imported:
+                raise Refused("No App Server audit events match this thread")
             write(stage, {"kind": "rebuild", "source": "codex-app-server-jsonl",
-                          "sha256": digest.hexdigest(), "lines": lines, "bytes": byte_count, "imported": imported})
+                          "sha256": digest.hexdigest(), "lines": lines, "bytes": byte_count, "imported": imported,
+                          "session_id": session})
             stage.flush()
             os.fsync(stage.fileno())
             stage.close()
@@ -202,6 +207,7 @@ def main(argv=None):
     build = sub.add_parser("build", help="project App Server JSONL events into a new audit file")
     build.add_argument("events", type=Path)
     build.add_argument("--out", type=Path, required=True)
+    build.add_argument("--session", help="import only events projected for this thread UUID")
     compare = sub.add_parser("report", help="compare claims against a hash-chained, externally anchored log")
     for name in ("report", "log", "anchor"):
         compare.add_argument("--" + name, type=Path, required=True)
@@ -218,7 +224,7 @@ def main(argv=None):
             result = check_report(args.report, args.log, args.session, args.anchor, strict=True)
             print(json.dumps(result, ensure_ascii=False))
             return 0 if result["outcome"] == "PASS" else 2
-        count = build_log(args.events, args.out)
+        count = build_log(args.events, args.out, args.session)
         print(f"CDX_AUDIT imported={count} out={args.out}")
         return 0
     except (OSError, ValueError, RuntimeError, TypeError, audit_log.CannotRun) as error:

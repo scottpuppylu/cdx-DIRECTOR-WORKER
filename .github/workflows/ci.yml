@@ -25,6 +25,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      - run: python -I -B -X utf8 tools/cdx_manifest.py --check
       - run: python -I -B -X utf8 tools/selftest_cdx.py --verbose
   upstream:
     runs-on: ubuntu-latest

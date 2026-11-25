@@ -2,7 +2,7 @@
 
 **cdxdw** 是 [DIRECTOR-WORK v2.6.0](https://github.com/scottpuppylu/DIRECTOR-WORK/tree/v2.6.0) 的獨立 Codex 版。你提出需求和驗收方式，Codex 總監把工作交給隔離的工作線，最後拿實際候選和驗收證據回來。中斷後可從工單、工作樹和紀錄接回。
 
-**本文件適用於 `2.6.0-cdx.7` 開發版。** 需要正式發行版可從 GitHub Releases 取得。執行 `python -I -B -X utf8 tools/cdxdw.py --version` 可核對手上的套件。 [GitHub Releases](https://github.com/scottpuppylu/cdx-DIRECTOR-WORKER/releases) · [版本紀錄](CHANGELOG.md)
+**本文件適用於 `2.6.0-cdx.8`。** 從 GitHub Releases 取得正式套件，或依需求使用已核對的 checkout。執行 `python -I -B -X utf8 tools/cdxdw.py --version` 可核對版本。 [GitHub Releases](https://github.com/scottpuppylu/cdx-DIRECTOR-WORKER/releases) · [版本紀錄](CHANGELOG.md)
 
 第一次使用，**在 Codex 開啟要開發的專案 → 貼啟動提示詞 → 選模式**。已有 cdxdw 專案可直接使用續航提示詞。
 
@@ -102,6 +102,7 @@ python -I -B -X utf8 tools/cdxdw.py doctor --repo $project
 - 想先從對話談需求可選 `--mode beginner`。已有安裝時，`setup` 接回既有模式和狀態。
 - 要檢查 Codex 原生能力，再跑 `doctor --repo PROJECT --live`。要驗實體檔案邊界，加 `--probe-sandbox`。若 PATH 上的版本不合，可用 `doctor --codex PATH` 或 `session native-review --codex PATH` 指定執行檔。
 - 安裝後在目標專案的新 Codex 對話輸入「使用 cdxdw 接著做，先讀這個專案已登記的狀態，和我確認第一版怎麼驗收」。
+- 套件用 `RUNTIME-MANIFEST.json` 列出安裝檔及 SHA-256。安裝工具會驗證這些檔案，再建立版本化 runtime。從 Git checkout 維護套件時，修改安裝檔後重新產生清單。
 
 [完整建置步驟](BOOTSTRAP.md) · [平台與沙箱診斷](docs/11_codex_operations.md) · [Codex Worktree 與交接](https://learn.chatgpt.com/docs/environments/git-worktrees)
 
@@ -193,6 +194,8 @@ python -I -B -X utf8 tools/cdxdw.py work --repo $project dispatch $order
 
 將 `dispatch` 輸出的核准快照交給負責施工的 Codex 對話。總監審完 `work/WO-001/PLAN.md` 後，執行 `python -I -B -X utf8 tools/cdxdw.py work --repo $project approve-plan $order`。施工與驗收讀已派工快照，你可以另行編輯下版草稿。`.5` 也會分別保存各版的規格審查。 [規格審查範本](templates/SPEC_REVIEW.md) · [施工計畫範本](templates/WORKER_PLAN.md)
 
+開始施工前修訂計畫時，可在原工單上重新 `approve-plan`，用 `--approver` 記下核准者。工具保留先前的核准和原文。開始施工後，如有實質計畫變更，更新工單版次並重新派工。
+
 ### 3. 封存候選並重跑
 
 Worker 提交預期變更，把 `TASK_REPORT.md` 和驗收證據寫進 `work/WO-001/`。總監封存後使用輸出的完整 SHA，工具可從 Git ref 重建乾淨候選。
@@ -222,6 +225,8 @@ python -I -B -X utf8 tools/cdxdw.py work --repo $project final $order --candidat
 
 有命令的工單需要最新的實際執行結果。瀏覽器或人工入口可用 `work record --kind e2e` 記錄操作者、環境、入口、預期、實際和判定。有建置工件時，用 `e2e --artifact-path` 取得工件 SHA-256，並在 `record`、`status` 及 `final` 指定同一個 `--artifact`。要求 REVIEW 或 PO 的工單要先取得相應判定。舊成功收據可回查，最新失敗會擋下放行。 [E2E、人工判定與工件參數](tools/CDX-TOOLS.md#初衷與最終驗收)
 
+已知建置檔在暫存候選中的位置時，可在工單填 `CDX_GATES = {"artifact_path": "dist/product.zip"}`。命令 E2E 會自動核對該檔。曾以工件方式驗收的候選，之後仍要帶工件指紋，直到換成另一次真正交付或明確記錄 PO 改判。
+
 例如 PO 已親自試用指定候選並回覆接受，總監可依實際回覆登記。同一候選若交付多份工件，請把 `--artifact` 加到紀錄與放行命令。
 
 ```powershell
@@ -230,9 +235,9 @@ python -I -B -X utf8 tools/cdxdw.py work --repo $project record $order --candida
   --entry 'Orders > Export CSV' --expected '兩筆輸出且空結果保留表頭' --observed '兩個案例皆符合，PO 回覆接受'
 ```
 
-### 5. 多張工單合併交付
+### 5. 整合與交付
 
-單張工單通過後，以 `work integrate` 固定目標分支與其 SHA，按實際採用順序提供兩個以上的 `--member ORDER.md=SHA`，用 `--argv` 指定核准的公開入口指令。工具會在暫存工作樹合併並驗收。單項有工件時，另以 `--member-artifact ORDER.md=HASH` 綁定。
+一張或多張工單通過後，以 `work integrate` 固定目標分支及 SHA，按採用順序提供 `--member ORDER.md=SHA`，用 `--argv` 指定核准的交付入口。單張可快轉時會保留封存候選的 SHA。發生合併時會驗實際合併後的內容。單項有工件時，另以 `--member-artifact ORDER.md=HASH` 綁定。
 
 ```powershell
 $targetSha = 'REPLACE_WITH_FULL_TARGET_SHA'
@@ -243,7 +248,7 @@ python -I -B -X utf8 tools/cdxdw.py work --repo $project integrate `
   --member "WO-002-report.md=$secondSha" --argv $entry
 ```
 
-發版前用 `work integration-status UUID --expect-head FULL_DELIVERY_SHA` 比對待交付提交。`.6` 的 `cdxdw release` 可核對同一交付 SHA 的 GitHub CI、workflow 指紋及所需工作，並沿用發版工具的 dry run。若遠端合併、rebase 或合併佇列產生新的 SHA，需該 SHA 的最新 CI，且交付 tree 必須符合已驗證組合。 [受控發版](tools/CDX-TOOLS.md#受控發版) · [共用工具說明](tools/README.md)
+發版前用 `work integration-status UUID --expect-head FULL_DELIVERY_SHA` 比對待交付提交。可用 `cdxdw release --push-only` 核對候選分支 CI 後推送。交付已到目標分支後，改用該分支的候選 SHA 綠燈，核對 workflow、必要 jobs 和驗收證據，再正式發行。若遠端合併、rebase 或合併佇列產生新的 SHA，需該 SHA 的最新 CI，且交付 tree 必須符合已驗證組合。 [受控發版](tools/CDX-TOOLS.md#受控發版) · [共用工具說明](tools/README.md)
 
 ## 中斷後怎麼接手
 
@@ -264,7 +269,7 @@ python -I -B -X utf8 tools/cdxdw.py work --repo $project integrate `
 
 [續航手冊](docs/06_resume_lossless.md) · [交接範本](templates/HANDOFF.md) · [回合對帳](tools/CDX-TOOLS.md#中斷後對帳)
 
-`.6` 可在 Desktop 交接前用 `handoff export` 保存清單，到目的地用 `handoff verify` 核對未提交工作、候選 refs 和外部狀態。換到同一專案的隔離工作樹後可使用 `handoff attach`。 [交接指令](tools/CDX-TOOLS.md#desktop-交接核對)
+在 Desktop 交接前用 `handoff export` 保存清單，到目的地用 `handoff verify` 核對未提交工作、候選 refs、初衷快照和 PO 原文等驗收依賴。換到同一專案的隔離工作樹後可用 `handoff attach`。使用舊版交接清單時，先在來源重新匯出。 [交接指令](tools/CDX-TOOLS.md#desktop-交接核對)
 
 ### 專案會多出哪些檔案
 

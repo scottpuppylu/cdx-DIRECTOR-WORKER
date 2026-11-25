@@ -39,6 +39,7 @@ def run_upgrade(here, folder):
     candidate = archive(here, "a9c8d1e19c48f2220093bd88cac52c7fb0b853ca", folder / "candidate")
     latest = folder / "latest"
     shutil.copytree(here, latest, ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"))
+    latest_version = (latest / "VERSION").read_text(encoding="utf-8").strip()
     repo, state, worker = (folder / name for name in ("project", "state", "worker"))
     repo.mkdir()
 
@@ -121,10 +122,10 @@ FORBIDDEN:
     assert "changed=0" in cdx(latest, "setup", "--apply")
     assert git("rev-parse", selected["ref"]) == head
     assert all(path.read_bytes() == data for path, data in before.items())
-    assert all((state / "runtime" / f"2.6.0-cdx.{version}" / "tools" / "cdxdw.py").is_file()
-               for version in (3, 4, 5))
-    assert "2.6.0-cdx.5" in (worker / ".codex" / "hooks.json").read_text(encoding="utf-8")
-    print("UPGRADE .3 -> .4 -> .5: evidence, drafts, PO, ref and old runtimes preserved")
+    assert all((state / "runtime" / version / "tools" / "cdxdw.py").is_file()
+               for version in ("2.6.0-cdx.3", "2.6.0-cdx.4", latest_version))
+    assert latest_version in (worker / ".codex" / "hooks.json").read_text(encoding="utf-8")
+    print(f"UPGRADE .3 -> .4 -> {latest_version}: evidence, drafts, PO, ref and old runtimes preserved")
     # Only the disposable fixture is rolled back. Keep both runtimes and all evidence.
     for path, payload in rollback.items():
         path.write_bytes(payload)
@@ -132,7 +133,7 @@ FORBIDDEN:
     assert json.loads(cdx(restored, "work", "status", name))["candidate"] == head
     assert "changed=0" in cdx(restored, "setup", "--apply")
     assert all(path.read_bytes() == data for path, data in before.items())
-    print("ROLLBACK .5 -> .4: recovered via the saved owner, Skills and Hook files in the fixture")
+    print(f"ROLLBACK {latest_version} -> .4: recovered via the saved owner, Skills and Hook files in the fixture")
     return 0
 
 

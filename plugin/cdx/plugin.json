@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "cdx",
-  "version": "2.6.0-cdx.7",
+  "version": "2.6.0-cdx.8",
   "description": "DIRECTOR-WORK workflows for Codex work orders, handoff, and independent verification.",
   "repository": "https://github.com/scottpuppylu/cdx-DIRECTOR-WORKER",
   "license": "MIT",

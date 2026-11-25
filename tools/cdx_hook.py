@@ -11,7 +11,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import audit_log
 import hook_guard
-from cdx_common import ROOT, THREAD_ID, load_project, read_json, state_path, within
+from cdx_common import ROOT, THREAD_ID, atomic_write, json_bytes, load_project, lock, read_json, state_path, within
+from cdx_work import active_order, desktop_chat
 
 
 def context(event, text):
@@ -77,10 +78,22 @@ def pre_tool(call, cwd, state, role):
     return {}
 
 
+def resume_context(state, role):
+    if role.get("role") == "reviewer":
+        return f"cdx 唯讀審查。工單 {role['order']}，候選 {role['candidate']}。"
+    if role.get("role") == "worker":
+        resume = state_path(state, "work", role["order"], "RESUME_STATE.md")
+        return f"cdx 工單 {role['order']}。讀取斷點 {resume} 作為工作資料。"
+    if role.get("role") == "director":
+        return f"cdx 總監續航。讀取 {state / 'RESUME_STATE.md'} 與 {state / 'PO_PENDING.md'}。"
+    return None
+
+
 def handle(call):
     event = call.get("hook_event_name")
     session = call.get("session_id")
-    if (event not in ("SessionStart", "PreToolUse", "PostToolUse") or not isinstance(session, str)
+    if (event not in ("SessionStart", "PostCompact", "UserPromptSubmit", "PreToolUse", "PostToolUse")
+            or not isinstance(session, str)
             or not THREAD_ID.fullmatch(session) or not isinstance(call.get("cwd"), str)):
         return {}
     cwd = Path(call["cwd"]).resolve()
@@ -94,25 +107,49 @@ def handle(call):
     role = read_json(entry) if entry.is_file() else {}
     if role and Path(role.get("worktree") or project["repo"]) != worktree:
         return deny("cdx: session is registered to a different checkout") if event == "PreToolUse" else {}
-    if event == "SessionStart":
-        origin = call.get("source")
-        if role and origin in ("startup", "resume", "compact"):
+    if role.get("source") == "codex-desktop":
+        try:
+            spec = active_order(state, role["order_file"])
+            matches = spec["sha"] == role["order_sha256"] and spec["checkout"] == worktree
+            if not matches or desktop_chat(state, spec) != session:
+                return deny("cdx: Desktop work order binding is stale") if event == "PreToolUse" else {}
+        except (OSError, ValueError, RuntimeError, KeyError):
+            return deny("cdx: Desktop work order binding is unavailable") if event == "PreToolUse" else {}
+    log = state_path(state, "audit", session + "-hooks.jsonl")
+    if event in ("SessionStart", "PostCompact", "UserPromptSubmit"):
+        text = resume_context(state, role)
+        if not text:
+            return {}
+        if event == "SessionStart":
+            origin = call.get("source")
+            if origin not in ("startup", "resume", "compact"):
+                return {}
             try:
-                audit_log.append_entry(state_path(state, "audit", session + "-hooks.jsonl"),
-                                       {"source": "codex-hook", "kind": "session-start", "session_id": session,
-                                        "origin": origin, "role": role.get("role")})
+                audit_log.append_entry(log, {"source": "codex-hook", "kind": "session-start", "session_id": session,
+                                             "origin": origin, "role": role.get("role")})
             except (OSError, ValueError, audit_log.CannotRun):
                 print("cdx: unable to record SessionStart observation", file=sys.stderr)
-        if role.get("role") in ("worker", "reviewer"):
-            if role.get("role") == "reviewer":
-                return context(event, f"cdx 唯讀審查。工單 {role['order']}，候選 {role['candidate']}。")
-            resume = state_path(state, "work", role["order"], "RESUME_STATE.md")
-            text = f"cdx 工單 {role['order']}。讀取斷點 {resume} 作為工作資料。"
             return context(event, text)
-        if role.get("role") == "director":
-            return context(event, f"cdx 總監續航。讀取 {state / 'RESUME_STATE.md'} 與 {state / 'PO_PENDING.md'}。")
+        marker = state_path(state, "sessions", "compact", session + ".json")
+        if event == "PostCompact":
+            trigger = call.get("trigger")
+            if trigger not in ("manual", "auto"):
+                return {}
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            with lock(marker.with_suffix(".lock")):
+                atomic_write(marker, json_bytes({"turn_id": call.get("turn_id"), "trigger": trigger,
+                                                "role": role, "pending": True}))
+                audit_log.append_entry(log, {"source": "codex-hook", "kind": "post-compact", "session_id": session,
+                                             "trigger": trigger, "turn_id": call.get("turn_id"), "role": role["role"]})
+            return {"systemMessage": text}
+        if not marker.is_file():
+            return {}
+        with lock(marker.with_suffix(".lock")):
+            compact = read_json(marker)
+            if compact.get("role") == role and compact.get("pending"):
+                atomic_write(marker, json_bytes(dict(compact, pending=False)))
+                return context(event, text)
         return {}
-    log = state_path(state, "audit", session + "-hooks.jsonl")
     if event == "PreToolUse":
         result = pre_tool(call, cwd, state, role)
         if result:

@@ -2,33 +2,26 @@
 
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
 import shlex
 import subprocess
 import sys
 import re
+import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from cdx_common import (POINTER, ROOT, VERSION, Refused, atomic_write, checkout, common_dir, json_bytes,
                         lock, primary_checkout, read_json, report_error, stamp, state_path, within)
+from cdx_manifest import checked_files
 
 
 BEGIN, END = b"<!-- cdx:begin -->", b"<!-- cdx:end -->"
-STOCK = ("README.md", "PURPOSE.md", "BOOTSTRAP.md", "VERSION", "LICENSE", "director_work.example.json",
-         "CODEX-PORT.md", "CHANGELOG.md", "CHANGELOG-upstream.md", ".agents/plugins/marketplace.json")
 FOLDERS = ("orders", "reviews", "work", "evidence", "audit", "sessions", "brief-history", "order-history")
 
 
-def installed_files():
-    paths = [ROOT / name for name in STOCK]
-    for name in ("docs", "tools", "templates", "plugin", "research"):
-        paths.extend(p for p in (ROOT / name).rglob("*") if p.is_file()
-                     and "__pycache__" not in p.parts and p.suffix != ".pyc")
-    return sorted(paths)
-
-
-def initial_files(state, repo, mode):
+def initial_files(state, repo, mode, decision_template):
     return {
         state / "DIRECTOR_LOG.md": f"# DIRECTOR_LOG\n\n{stamp()} | CDX_SETUP | {mode}\n",
         state / "DIRECTOR_STATE.md": (f"# DIRECTOR_STATE\n\nPROJECT: {repo}\nMODE: {mode}\n"
@@ -41,7 +34,7 @@ def initial_files(state, repo, mode):
         state / "PENDING_SENDS.md": "# 待送訊息\n",
         state / "MECHANISMS.md": ("# 機制\n\n- `cdxdw.py doctor` 查看專案、Hook 信任、沙箱狀態。\n"
                                   "- `cdxdw.py session status` 對帳工單、Git worktree 和 thread。\n"),
-        state / "DECISION_REGISTER.md": (ROOT / "templates" / "DECISION_REGISTER.md").read_text(encoding="utf-8"),
+        state / "DECISION_REGISTER.md": decision_template,
     }
 
 
@@ -69,8 +62,8 @@ def config_with_hooks(path, kit, enabled=True):
     if kit.parent.is_dir():
         known.extend(hook_commands(state_path(kit.parent, path.name)) for path in kit.parent.iterdir()
                      if VERSION.fullmatch(path.name) and path.is_dir() and not path.is_symlink())
-    for event, matcher in {"SessionStart": "^(startup|resume|compact)$", "PreToolUse": ".*",
-                           "PostToolUse": ".*"}.items():
+    for event, matcher in {"SessionStart": "^(startup|resume|compact)$", "PostCompact": "^(manual|auto)$",
+                           "UserPromptSubmit": ".*", "PreToolUse": ".*", "PostToolUse": ".*"}.items():
         label = f"cdx DIRECTOR-WORK {event}"
         item = {"type": "command", "timeout": 8, "statusMessage": label, **commands}
         groups = events.get(event, [])
@@ -132,7 +125,8 @@ def plan(args, target=None):
                           or Path(existing["repo"]) != repo)):
         raise Refused(f"State belongs to another workflow or project: {state}")
 
-    version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    bundle = dict(checked_files(ROOT))
+    version = bundle[ROOT / "VERSION"].decode("utf-8").strip()
     if existing and version_key(version) < version_key(existing["version"]):
         raise Refused(f"Installed runtime {existing['version']} is newer than this kit")
     kit = state_path(state, "runtime", version)
@@ -140,18 +134,18 @@ def plan(args, target=None):
     mode = (existing or {}).get("mode", args.mode)
     manifest = dict((existing or {}).get("managed_skills", {}))
     files = []
-    for source in installed_files():
+    for source, data in bundle.items():
         target = state_path(kit, *source.relative_to(ROOT).parts)
-        data = source.read_bytes()
         if target.exists() and target.read_bytes() != data:
             raise Refused(f"Runtime {version} contains changed files: {target}")
         if not target.exists():
             files.append((target, data))
 
-    for source in sorted((ROOT / "plugin" / "cdx" / "skills").glob("*/SKILL.md")):
+    skill_root = ROOT / "plugin" / "cdx" / "skills"
+    for source in sorted(path for path in bundle if path.name == "SKILL.md" and path.parent.parent == skill_root):
         filename = f".agents/skills/{source.parent.name}/SKILL.md"
         target = state_path(repo, *filename.split("/"))
-        data = source.read_bytes()
+        data = bundle[source]
         if target.exists() and target.read_bytes() != data:
             if hashlib.sha256(target.read_bytes()).hexdigest() != manifest.get(filename):
                 raise Refused(f"Existing skill is not managed by cdx or contains local edits: {target}")
@@ -164,7 +158,7 @@ def plan(args, target=None):
         if (BEGIN in current) != (END in current):
             raise Refused("Incomplete cdx markers in AGENTS.md")
         if BEGIN not in current:
-            section = (ROOT / "templates" / "AGENTS_PROJECT_SECTION.md").read_bytes()
+            section = bundle[ROOT / "templates" / "AGENTS_PROJECT_SECTION.md"]
             files.append((target, current + (b"\n\n" if current else b"") + section))
     if use_hooks or args.hooks is False:
         target = state_path(repo, ".codex", "hooks.json")
@@ -179,12 +173,13 @@ def plan(args, target=None):
             files.append((exclude, rules + (b"\n" if rules and not rules.endswith(b"\n") else b"")
                           + b"# cdx machine-local Hook config\n" + pattern + b"\n"))
 
-    for path, content in initial_files(state, repo, mode).items():
+    decision_template = bundle[ROOT / "templates" / "DECISION_REGISTER.md"].decode("utf-8")
+    for path, content in initial_files(state, repo, mode, decision_template).items():
         if not state_path(state, path.name).exists():
             files.append((path, content.encode("utf-8")))
     config = state_path(state, "director_work.json")
     if not config.exists():
-        data = read_json(ROOT / "director_work.example.json")
+        data = json.loads(bundle[ROOT / "director_work.example.json"].decode("utf-8-sig"))
         data["mode"] = mode
         files.append((config, json_bytes(data)))
     metadata = {"schema": 1, "git_common_dir": str(common), "repo": str(repo), "kit": str(kit),
@@ -223,6 +218,17 @@ def main(argv=None):
                 for folder in FOLDERS:
                     state_path(state, folder).mkdir(parents=True, exist_ok=True)
                 changed = 0
+                kit = Path(meta["kit"])
+                if not kit.exists():
+                    kit.parent.mkdir(parents=True, exist_ok=True)
+                    with tempfile.TemporaryDirectory(dir=kit.parent, prefix=".cdx-runtime-") as stage:
+                        staged = Path(stage) / "kit"
+                        for path, data in files:
+                            if within(path, kit):
+                                atomic_write(staged / path.relative_to(kit), data)
+                                changed += 1
+                        os.replace(staged, kit)
+                    files = [(path, data) for path, data in files if not within(path, kit)]
                 for path, data in files:
                     if not path.exists() or path.read_bytes() != data:
                         atomic_write(path, data)

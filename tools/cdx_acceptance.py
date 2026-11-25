@@ -77,6 +77,13 @@ def latest_attempts(state, spec, candidate, artifact=None):
     return latest
 
 
+def artifact_required(state, spec, candidate):
+    if spec.get("gates", {}).get("artifact_path"):
+        return True
+    _, data = journal(state, spec, candidate)
+    return any(row.get("artifact") or row.get("artifact_path") for row in data["attempts"])
+
+
 def run_plan(repo, candidate, plan, record, stdout=None):
     with tempfile.TemporaryDirectory(prefix="cdxdw-run-plan-") as directory:
         root = Path(directory)

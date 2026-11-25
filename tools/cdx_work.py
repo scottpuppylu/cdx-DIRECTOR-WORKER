@@ -12,7 +12,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gate_check
-from cdx_acceptance import acceptance_lock, attempt, latest_attempts, run_entry
+from cdx_acceptance import acceptance_lock, artifact_required, attempt, latest_attempts, run_entry
 from cdx_audit import check_report
 from cdx_gates import feasibility, file_hash, invoke, pack_digest, policy, ruler_check, tail
 from cdx_common import (SHA, ROOT, THREAD_ID, VERSION, Refused, atomic_write, check_environment, checkout, common_dir,
@@ -91,6 +91,33 @@ def validate_checkout(repo, state, spec, *, fresh=False):
 
 def desktop_identity(repo, spec):
     return {"worktree": str(spec["checkout"]), "git_common_dir": str(common_dir(repo)), "base": spec["base"]}
+
+
+def desktop_chat(state, spec):
+    if "handoff" in spec:
+        return spec["handoff"].get("chat")
+    path = state_path(state, "work", spec["order_id"], "DESKTOP.json")
+    return read_json(path).get("chat") if path.is_file() else None
+
+
+def bind_desktop_chat(state, spec, chat, *, handoff=None):
+    if chat is None:
+        return
+    if not THREAD_ID.fullmatch(chat):
+        raise Refused("Supply the UUID of the Desktop chat")
+    record = {"role": "worker", "source": "codex-desktop", "thread": chat, "order": spec["order_id"],
+              "order_file": spec["file"], "order_sha256": spec["sha"], "worktree": str(spec["checkout"])}
+    if handoff:
+        record["handoff"] = handoff
+    path = state_path(state, "sessions", f"{chat}.json")
+    with lock(path.with_suffix(".lock")):
+        if path.is_file():
+            prior = read_json(path)
+            if any(prior.get(key) != record[key] for key in ("role", "source", "thread", "order", "worktree")):
+                raise Refused("This Desktop chat is already bound to another role or checkout")
+            if prior == record:
+                return
+        atomic_write(path, json_bytes(record))
 
 
 def active_order(state, filename, *, location=None):
@@ -376,6 +403,7 @@ def dispatch(repo, state, spec):
             validate_checkout(repo, state, spec, fresh=True)
         snapshot = state_path(state, "order-history", f"{spec['order_id']}-r{spec['revision']}-{spec['sha']}.md")
         save_snapshot(snapshot, raw, spec["sha"])
+        bind_desktop_chat(state, spec, desktop_chat(state, spec))
         if repeated:
             return
         line = f"{stamp()} | DISPATCH {spec['order_id']} rev={spec['revision']} sha={spec['sha']} | cdx\n"
@@ -532,6 +560,8 @@ def e2e_kind(spec):
 def check_final(state, spec, candidate, artifact, *, emit=True):
     dispatch_check(state, spec)
     approved_brief(state, spec)
+    if artifact is None and artifact_required(state, spec, candidate):
+        raise Refused("This candidate requires a build artifact. Supply its SHA-256 with --artifact.")
     latest = latest_attempts(state, spec, candidate, artifact)
     required_e2e = e2e_kind(spec)
     for kind in ("auto", required_e2e):
@@ -593,7 +623,7 @@ def check_final(state, spec, candidate, artifact, *, emit=True):
                 raise Refused(f"{kind}={record['outcome']}")
         elif criterion in types:
             pending.append(criterion)
-    status = {"candidate": candidate, "order_sha256": spec["sha"], "product": "PASS",
+    status = {"candidate": candidate, "order_sha256": spec["sha"], "artifact": artifact, "product": "PASS",
               "pending": pending, "integration": "CHECK_RELEASE_TARGET_SEPARATELY"}
     if emit:
         print(json.dumps(status))
@@ -610,15 +640,25 @@ def e2e(repo, state, spec, args):
     kind = "preflight" if preflight else "e2e"
     input_root = Path(args.input_root).resolve() if args.input_root else None
     with acceptance_lock(state, spec, args.candidate):
-        with attempt(state, spec, args.candidate, kind, artifact=args.artifact) as record:
-            dispatch_check(state, spec)
-            approved_brief(state, spec)
+        dispatch_check(state, spec)
+        approved_brief(state, spec)
+        pinned_path = spec.get("gates", {}).get("artifact_path")
+        artifact_path = args.artifact_path
+        if not preflight:
+            if pinned_path and artifact_path and artifact_path != pinned_path:
+                raise Refused("Use the artifact path pinned by the dispatched work order")
+            artifact_path = pinned_path or artifact_path
+            if not artifact_path and artifact_required(state, spec, args.candidate):
+                raise Refused("This candidate requires --artifact-path for each E2E rerun")
+            if artifact_path and Path(artifact_path).is_absolute():
+                raise Refused("Artifact path must be relative to the candidate")
+        with attempt(state, spec, args.candidate, kind, artifact=None, artifact_path=artifact_path) as record:
             command = None if preflight else json.loads(field(spec["text"], "E2E_COMMAND", allow_comment=False))
             if not preflight and not isinstance(command, list):
                 raise Refused("E2E_COMMAND must contain an approved JSON argv array")
             with candidate_checkout(repo, state, spec, args.candidate):
                 plan = None if preflight else e2e_run_plan(repo, spec, args.candidate)
-                run_entry(repo, args.candidate, command, args.timeout, record, args.artifact_path, plan=plan,
+                run_entry(repo, args.candidate, command, args.timeout, record, artifact_path, plan=plan,
                           gates=(state, spec), input_root=input_root, preflight_only=preflight)
                 dispatch_check(state, spec)
         print(json.dumps(record, ensure_ascii=False))
@@ -647,6 +687,8 @@ def judgment(repo, state, spec, args):
     with acceptance_lock(state, spec, args.candidate):
         dispatch_check(state, spec)
         approved_brief(state, spec)
+        if args.artifact is None and artifact_required(state, spec, args.candidate):
+            raise Refused("This candidate requires --artifact for recorded judgments")
         if not all(value.strip() for value in (args.actor, args.environment, args.entry, args.expected, args.observed)):
             raise Refused("Record actor, environment, entry point, expected and observed behavior")
         reply = {}
@@ -680,6 +722,8 @@ def verify_evidence(repo, state, spec, args):
     with acceptance_lock(state, spec, args.candidate):
         dispatch_check(state, spec)
         approved_brief(state, spec)
+        if args.artifact is None and artifact_required(state, spec, args.candidate):
+            raise Refused("This candidate requires --artifact for verified evidence")
         with candidate_checkout(repo, state, spec, args.candidate):
             with attempt(state, spec, args.candidate, "evidence", artifact=args.artifact) as record:
                 record["outcome"] = "PASS"
@@ -705,12 +749,10 @@ def verify_evidence(repo, state, spec, args):
                         raise Refused("Keep the audit anchor outside worker-controlled directories")
                     bound = state_path(state, "sessions", f"{spec['order_id']}-worker.json")
                     worker = read_json(bound) if bound.is_file() else {}
-                    if worker.get("order_sha256") == spec["sha"] and worker.get("thread"):
-                        session = worker["thread"]
-                    else:
-                        desktop = state_path(state, "work", spec["order_id"], "DESKTOP.json")
-                        session = spec.get("handoff", {}).get("chat") or (
-                            read_json(desktop).get("chat") if desktop.is_file() else None)
+                    session = desktop_chat(state, spec)
+                    if (not session and worker.get("order_sha256") == spec["sha"] and
+                            worker.get("worktree") == str(spec["checkout"])):
+                        session = worker.get("thread")
                     if not session:
                         raise Refused("Register the worker session or Desktop chat before auditing its claims")
                     report = state_path(state, "work", spec["order_id"], "TASK_REPORT.md")
@@ -750,8 +792,8 @@ def integrate(repo, state, args):
             proofs = check_final(state, spec, candidate, artifact, emit=False)
         members.append({"order": spec["order_id"], "filename": filename, "order_sha256": spec["sha"],
                         "candidate": candidate, "artifact": artifact, "proofs": proofs})
-    if artifacts or len(members) < 2 or len({item["order"] for item in members}) != len(members):
-        raise Refused("Select two or more distinct work orders")
+    if artifacts or not members or len({item["order"] for item in members}) != len(members):
+        raise Refused("Select one or more distinct work orders and match each artifact to a selected member")
     series = integration_series(state, args.target, args.base, members)
     series.parent.mkdir(parents=True, exist_ok=True)
     with lock(series.with_suffix(".lock")):
@@ -776,11 +818,16 @@ def run_integration(repo, state, args, members, command, series):
     try:
         with detached_checkout(repo, args.base) as worker:
             for member in members:
+                merge_mode = "--no-ff"
+                if len(members) == 1 and subprocess.run(
+                        ["git", "-C", str(repo), "merge-base", "--is-ancestor", args.base, member["candidate"]],
+                        env=git_environment(), capture_output=True).returncode == 0:
+                    merge_mode = "--ff-only"
                 try:
                     git(worker, "-c", f"core.hooksPath={worker.parent / 'no-hooks'}", "-c", "commit.gpgSign=false",
                         "-c", "rerere.enabled=false",
                         "-c", "user.name=cdxdw integration", "-c", "user.email=cdxdw@example.invalid",
-                        "merge", "--no-ff", "--no-edit", member["candidate"])
+                        "merge", merge_mode, "--no-edit", member["candidate"])
                 except Refused:
                     result.update(outcome="MERGE_FAILED", failed_member=member["order"])
                     return 2
@@ -871,6 +918,13 @@ def order_status(repo, state, spec, candidate, artifact=None):
                 for kind in ("auto", "e2e", "manual_e2e", "review", "po", "preflight", "evidence")}
     if statuses["e2e"] == "PASS" and latest["e2e"].get("artifact") != artifact:
         statuses["e2e"] = "DIFFERENT_ARTIFACT"
+    final = None
+    if candidate:
+        try:
+            check_final(state, spec, candidate, artifact, emit=False)
+            final = {"outcome": "PASS"}
+        except (OSError, ValueError, RuntimeError, KeyError) as error:
+            final = {"outcome": "BLOCKED", "reason": str(error)}
     if candidate:
         legacy = {"auto": state_path(state, "reviews", f"{spec['order_id']}-{candidate}.json"),
                   "e2e": state_path(state, "evidence", "E2E", spec["order_id"], f"{candidate}.md")}
@@ -890,16 +944,17 @@ def order_status(repo, state, spec, candidate, artifact=None):
     needed = [kind for kind, status in statuses.items()
               if status != "PASS" and (kind in required or kind in recorded or kind.upper() in levels)]
     next_step = "Choose or seal a candidate" if not candidate else (
-        "Resolve " + ", ".join(needed) if needed else "Run final for this candidate")
+        "Resolve " + ", ".join(needed) if needed else
+        "Run final for this candidate" if final["outcome"] == "PASS" else final["reason"])
     print(json.dumps({"order": spec["order_id"], "revision": spec["revision"], "order_sha256": spec["sha"],
                       "snapshot": str(spec["path"]), "draft": draft_status, "sessions": sessions,
                       "desktop": read_json(desktop) if desktop.is_file() else None,
                       "checkout": str(spec["checkout"]), "handoff": spec.get("handoff"),
                       "sealed_candidates": seals, "candidate": candidate, "artifact": artifact, "acceptance": statuses,
-                      "next": next_step}, ensure_ascii=False))
+                      "final": final, "next": next_step}, ensure_ascii=False))
 
 
-def plan_approval(state, spec, *, save=False):
+def plan_approval(state, spec, *, save=False, head=None, approver=None):
     plan_file = state_path(state, "work", spec["order_id"], "PLAN.md")
     payload = plan_file.read_bytes()
     if not payload.strip():
@@ -911,15 +966,51 @@ def plan_approval(state, spec, *, save=False):
     if spec.get("gates", {}).get("feasibility"):
         expected["feasibility_sha256"] = feasibility(state, spec)
     if save:
-        if not snapshot.exists():
+        if snapshot.exists():
+            if snapshot.read_bytes() != payload:
+                raise Refused("The archived plan does not match its fingerprint")
+        else:
             atomic_write(snapshot, payload)
-        atomic_write(path, json_bytes(dict(expected, recorded=stamp())))
-        log_event(state, f"PLAN_APPROVED {spec['order_id']} sha={digest}")
+        previous = read_json(path) if path.is_file() else {}
+        if previous and all(previous.get(key) == value for key, value in expected.items()):
+            return snapshot
+        revision = previous.get("plan_revision", 1) + 1 if previous else 1
+        if previous:
+            history = state_path(state, "reviews", "plan-history", spec["order_id"],
+                                 f"r{revision - 1}-{previous['plan_sha256']}.json")
+            raw = json_bytes(previous)
+            save_snapshot(history, raw, hashlib.sha256(raw).hexdigest())
+        atomic_write(path, json_bytes(dict(expected, recorded=stamp(), plan_revision=revision,
+                                          base=spec["base"], worktree_head=head, approver=approver)))
+        log_event(state, f"PLAN_APPROVED {spec['order_id']} plan_rev={revision} sha={digest}")
     else:
         actual = read_json(path)
-        if any(actual.get(key) != value for key, value in expected.items()) or snapshot.read_bytes() != payload:
+        if (any(actual.get(key) != value for key, value in expected.items()) or
+                actual.get("base", spec["base"]) != spec["base"] or snapshot.read_bytes() != payload):
             raise Refused("Plan or order changed after approval")
     return snapshot
+
+
+def approve_plan(repo, state, spec, approver):
+    worker = state_path(state, "sessions", f"{spec['order_id']}-worker.json")
+    with lock(worker.with_suffix(".lock")):
+        dispatch_check(state, spec)
+        approved_brief(state, spec)
+        approval = state_path(state, "reviews", f"{spec['order_id']}-plan.json")
+        previous = read_json(approval) if approval.is_file() else {}
+        current_head = validate_checkout(repo, state, spec, fresh=not previous and spec["revision"] == 1)
+        if previous.get("order_sha256") == spec["sha"]:
+            plan_file = state_path(state, "work", spec["order_id"], "PLAN.md")
+            if (file_hash(plan_file) != previous["plan_sha256"] or
+                    (spec.get("gates", {}).get("feasibility") and
+                     feasibility(state, spec) != previous.get("feasibility_sha256"))):
+                session = read_json(worker) if worker.is_file() else {}
+                if (current_head != (previous.get("worktree_head") or spec["base"]) or
+                        git(spec["checkout"], "status", "--porcelain", "--untracked-files=all") or
+                        (session.get("order_sha256") == spec["sha"] and
+                         (session.get("phase") == "implement" or session.get("state") in ("starting", "running")))):
+                    raise Refused("Implementation has begun. Revise and redispatch the work order to approve a new plan.")
+        return plan_approval(state, spec, save=True, head=current_head, approver=approver)
 
 
 def main(argv=None):
@@ -959,6 +1050,8 @@ def main(argv=None):
             sub.add_argument("--reviewer", required=True)
             sub.add_argument("--author", required=True)
             sub.add_argument("--active", action="store_true", help="approve the dispatched snapshot instead of the draft")
+        elif command == "approve-plan":
+            sub.add_argument("--approver", help="record the operator-supplied approver identity")
     integration = commands.add_parser("integrate", help="check an ordered combination of sealed candidates")
     integration.add_argument("--target", required=True)
     integration.add_argument("--base", required=True)
@@ -1017,17 +1110,10 @@ def main(argv=None):
         elif args.command == "sync-worker":
             validate_checkout(repo, state, spec)
             sync_worker(repo, spec["checkout"], project)
+            bind_desktop_chat(state, spec, desktop_chat(state, spec), handoff=spec.get("handoff", {}).get("handoff"))
             print(f"CDX_WORK SYNC_WORKER {spec['order_id']} {spec['checkout']}")
         elif args.command == "approve-plan":
-            dispatch_check(state, spec)
-            approved_brief(state, spec)
-            if spec["revision"] == 1:
-                approval = state_path(state, "reviews", f"{spec['order_id']}-plan.json")
-                if not approval.exists():
-                    validate_checkout(repo, state, spec, fresh=True)
-                else:
-                    plan_approval(state, spec)
-            plan_approval(state, spec, save=True)
+            approve_plan(repo, state, spec, args.approver)
             print(f"CDX_WORK PLAN_APPROVED {spec['order_id']}")
         elif args.command == "approve-spec":
             spec_review(state, spec, reviewer=args.reviewer, author=args.author)

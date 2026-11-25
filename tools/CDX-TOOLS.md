@@ -14,7 +14,7 @@
 | `work … lock-tests --base SHA FILE…` | 依 Git base 顯示測試檔內容指紋 |
 | `work … approve-spec ORDER --reviewer ID --author ID [--active]` | 保存規格審查快照，預設綁草稿，`--active` 綁已派工版 |
 | `work … dispatch ORDER` | 在 DIRECTOR_LOG 記錄工單版次、雜湊及時間 |
-| `work … approve-plan ORDER` | 綁定工單與 PLAN 的 SHA-256 |
+| `work … approve-plan ORDER [--approver ID]` | 綁定工單、施工基準與 PLAN 的 SHA-256，動工前可修訂並保存舊核准 |
 | `work … seal ORDER` 與 `work … status ORDER [--candidate SHA] [--artifact HASH]` | 封存已提交的候選，查派工快照、工作線、候選與工件驗收 |
 | `work … sync-worker ORDER` | 同步已派工工作樹內由 cdxdw 管理的 Skill／Hook |
 | `work … review ORDER --candidate SHA [--rerun]` | 核對實際候選、範圍、報告、證據；選用獨立重跑與 receipt |
@@ -26,7 +26,7 @@
 | `session … run ORDER --phase plan/implement/review` | 原生 App Server 回合，沙箱前置實測及雜湊稽核 |
 | `session … status ORDER [--live]` 與 `session … reconcile ORDER` | 查本地或宿主對帳，確認未知項目後續接 |
 | `session … native-review ORDER --candidate SHA [--run]` | 預覽封存的 base、候選及 diff 指紋，顯式執行 Codex 原生審查 |
-| `audit verify LOG`、`audit status LOG`、`audit build EVENTS --out LOG` | 驗證雜湊鏈、對帳工具開始與終態，或由 App Server JSONL 建立摘要 |
+| `audit verify LOG`、`audit status LOG`、`audit build EVENTS --out LOG [--session UUID]` | 驗證雜湊鏈、對帳工具開始與終態，或由 App Server JSONL 建立指定對話的稽核 |
 | `usage LOG [--format exec]` | App Server 累計記錄或 Codex exec JSONL 的用量 |
 | `cdx_hook.py` | 由 Codex 透過 stdin JSON 觸發 SessionStart、PreToolUse、PostToolUse |
 | `selftest_cdx.py` | 一張本機工單的完整重跑，加上安裝、拒絕、稽核等回歸 |
@@ -41,13 +41,17 @@
 
 人工判定用 `work record`，指定 `--kind e2e|review|po`、`--outcome PASS|FAIL|CHANGES_REQUESTED`，以及 `--actor`、`--environment`、`--entry`、`--expected`、`--observed`。以 `--artifact HASH` 綁定實際查看的建置產物。同一個 SHA-256 傳給 `work status` 和 `work final`。有 `E2E_COMMAND` 的工單需要該入口的最新執行結果；未指定入口命令的工單需要人工 E2E。同一工件上已記錄的人工失敗也阻擋放行。工單要求的 REVIEW 與 PO 各有獨立判定。
 
-要驗組合，在核准後把 `--target refs/heads/main`、`--base FULL_TARGET_SHA`、兩個或更多 `--member ORDER.md=FULL_CANDIDATE_SHA`、以及批准的 `--argv` JSON 命令交給 `work integrate`。採用順序跟參數順序相同。單項驗收有工件時，為該項追加 `--member-artifact ORDER.md=ARTIFACT_SHA256`。目標、工單、候選、封存 ref、單項證據或最近整合嘗試改變時，舊通過收據會失效。發版前用 `work integration-status UUID --expect-head FULL_DELIVERY_SHA` 核對實際提交。遠端產生另一個 merge/rebase SHA 時，要在實際交付提交重跑 CI。
+工單可用 `CDX_GATES` 的 `artifact_path` 鎖定 E2E 會產出的相對檔案路徑。舊工單在首次使用工件驗收後，同一候選也會維持工件綁定。此後省略工件的重跑和最終放行會被拒絕。用相同指紋登記改判，或給真正的新工件走一次新的驗收。 `status` 的 `final` 欄顯示目前證據是否可放行。
+
+用 `work integrate` 驗證一張或多張工單，指定 `--target refs/heads/main`、`--base FULL_TARGET_SHA`、`--member ORDER.md=FULL_CANDIDATE_SHA` 和已核准的 `--argv` JSON 命令。單張可快轉時保留原候選 SHA。其他情況依提供順序合併並驗證實際結果。單項有工件時，追加 `--member-artifact ORDER.md=ARTIFACT_SHA256`。目標、工單、候選、封存 ref、單項證據或最新整合嘗試改變時，舊收據會失效。發版前用 `work integration-status UUID --expect-head FULL_DELIVERY_SHA` 核對實際提交。
 
 ## 中斷後對帳
 
 `session status --live` 讀取 thread 與最新回合。`session reconcile` 透過原始 turn ID 或啟動標記找回紀錄，遇到未知回合時保留原狀。工單改版後，仍可用原工單檔名查詢、對帳既有回合。要啟動新版回合，先完成新版派工，再用 `session new --replace` 登記已結束的工作線。只有啟動未獲確認且宿主沒有記錄該次回合時，才用 `reconcile --reset-empty`。
 
 `session native-review --run` 和 App Server 的 `--phase review` 使用停用 MCP、Apps、Plugins、Hooks 及 web search 的審查程序。啟動模型前核對有效設定與 MCP 清單，並檢查實體唯讀。作業系統的讀取可見範圍仍依有效沙箱而定。
+
+Desktop 以 `work adopt ORDER --chat UUID` 登記工作位置，派工時綁定當前工單快照。既有工作樹可用 `work sync-worker ORDER` 更新註冊。受信任的 `PostCompact` 會保存事件並提示斷點位置，下一次送出提示時由 `UserPromptSubmit` 帶入同一位置。已執行但缺終態的命令維持無法驗證。若有獨立匯出的 App Server 事件，用 `audit build EVENTS --out STATE/audit/WO-001-worker.jsonl --session UUID` 匯入已登記對話，再獨立保存 `AUDIT_HEAD`。
 
 ## 量測裝置與外部證據
 
@@ -66,13 +70,32 @@ CDX_GATES = {"feasibility": true, "pre_tr": "ci/pre_tr.json", "ruler": {"pattern
 
 ## 受控發版
 
-在目標專案的 `director_work.json` 設定 `cdx_release_ci.workflow`、`workflow_sha256` 和 `jobs`。使用由發版者確認的 Git workflow blob 計算 SHA-256，填入 CI job 顯示名稱。需交付 CI 建置包可加 `artifact_name`，再以 `--artifact HASH` 比對 GitHub 的 archive SHA-256。重跑 workflow 時，工件名稱須附 `-attempt-N`。
+在目標專案的 `director_work.json` 設定該產品自己的 `release.selftest`，以及 `cdx_release_ci.workflow`、`workflow_sha256` 和 `jobs`。以下設定示例用於一個有 `tests/smoke.py` 的產品，請用確定經審查的 workflow blob 指紋替換佔位值。
 
-```text
-cdxdw release --repo PROJECT --integration INTEGRATION_UUID --head FULL_DELIVERY_SHA --ci-run RUN_ID
+```json
+{
+  "release": {
+    "remote": "origin",
+    "branch": "main",
+    "selftest": "python -B tests/smoke.py"
+  },
+  "cdx_release_ci": {
+    "workflow": ".github/workflows/ci.yml",
+    "workflow_sha256": "REPLACE_WITH_THE_REVIEWED_WORKFLOW_SHA256",
+    "jobs": ["windows smoke", "linux smoke"],
+    "candidate_branch": "codex/delivery"
+  }
+}
 ```
 
-需安裝並登入 GitHub CLI。工具核對 fetch、push 及 GitHub repo 一致，並查同一個 SHA 的最新 workflow run、attempt 和必要工作。遠端合併或 rebase 產生新 SHA 時，交付 tree 要和驗過的整合結果相同、base 可追且自身 CI 通過。預設為 dry run，取得發布授權後可加 `--execute`。推送使用驗證過的完整 SHA。
+用 `--push-only` 核對候選分支上此 SHA 的最新 CI，取得授權後加 `--execute` 快轉推送。也可由 GitHub 分支規則或合併流程完成落地。交付 SHA 出現在目標分支後，用該分支最新完成的 CI run ID 重跑發布。兩種操作預設都是預覽。
+
+```text
+cdxdw release --repo PROJECT --integration INTEGRATION_UUID --head FULL_DELIVERY_SHA --ci-run CANDIDATE_RUN_ID --push-only
+cdxdw release --repo PROJECT --integration INTEGRATION_UUID --head FULL_DELIVERY_SHA --ci-run TARGET_BRANCH_RUN_ID
+```
+
+需有可讀取 repo 的 GitHub CLI。遠端合併或 rebase 產生新 SHA 時，交付 tree 要符合驗過的整合結果，base 可追溯，該 SHA 自身的 CI 也要通過。GitHub Actions 工件可由 `artifact_name` 固定，重跑建議設成 `build-attempt-{attempt}`，由工具換成實際 attempt。若工單核准的是 CI ZIP 的內檔，將工單 ID 對應 ZIP 相對路徑填入 `cdx_release_ci.artifact_members`，再同時提供 `--artifact ZIP_SHA256` 與 `--archive DOWNLOADED_ZIP`。工具核對 GitHub 的封存指紋、下載的封存 bytes 和實際內檔 SHA，發行內容仍由專案的交付流程管理。 [GitHub workflow runs](https://docs.github.com/en/rest/actions/workflow-runs) · [GitHub Actions artifacts](https://docs.github.com/en/rest/actions/artifacts)
 
 ## Desktop 交接核對
 
@@ -84,13 +107,17 @@ cdxdw handoff --repo PROJECT attach HANDOFF.json --worktree ISOLATED_DESTINATION
 
 停止原工作線的寫入後匯出清單，在目的地核對候選 refs、暫存／未暫存變更、未追蹤檔及工作線狀態。跨主機時用既有交接方式搬移 Git 資料和狀態備份，以 `verify --state PATH` 核對副本。準備正式接手時，在目的地初始化專屬的 cdxdw 狀態，將確認過的工作紀錄複製到新狀態，使用目的地安裝產生的 `PROJECT.json` 和 `runtime/`。再在同專案的隔離工作樹執行 `attach`。工具保留已派工文件的原 bytes，另記目的地的工作樹與狀態位置。Desktop Local checkout 也可做唯讀核對。原 App Server thread 仍以原路徑及回合對帳。
 
+請用目前的 `handoff export` 重新匯出舊版清單。新版清單納入已核准的初衷、規格與計畫快照、驗收所引用的 PO 原文、原生 Review 與相關回合資料。比對成功後，接手前還會重新查工單與核准依賴。
+
 `attach` 接受工單指定的分支或 detached HEAD。Desktop 若在目的地建立另一個分支，先用 `verify` 確認交接資料，再以目前提交進入 detached HEAD（`git switch --detach HEAD`）並重新執行 `verify` 與 `attach`。若要用 Desktop 繼續搬運該分支，可先完成搬運，再決定在哪個隔離工作樹登記接手。Desktop 若要求清空輸入狀態，請開啟目前的測試或工作對話，確認草稿及待送訊息均已處理後重試。
 
 ## 升級
 
 先結束舊版正在執行的命令，以同一 runtime 操作同一份工單。.3 的鎖目錄可保留作為紀錄，.4 起使用由作業系統釋放的 `.guard` 鎖。.3 舊版收據和文字 E2E 可回查，缺少結構化嘗試時顯示 `LEGACY_NEEDS_VERIFICATION`，重跑或補登後用新版 `final` 核對。
 
-用 .5 套件先預覽 `setup`，再加 `--apply`。已有工作中的 worktree 用 `work sync-worker ORDER` 同步，之後在宿主確認 Skill 載入和 Hook 信任。工具更新能對上保留 runtime 的檔案，遇到不認得的本機 Skill 則拒絕覆蓋。舊 spec 收據依原驗法讀取，準備下一版之前可用原報告與 `approve-spec --active` 保存生效版。舊候選 journal 原樣保留，判讀依來源區分人工與實際執行。舊整合 PASS 在新版顯示 `LEGACY_NEEDS_VERIFICATION`，可按原組合重跑。
+用新版套件先預覽 `setup`，再加 `--apply`。已有工作中的 worktree 用 `work sync-worker ORDER` 同步，之後在宿主確認 Skill 載入和 Hook 信任。舊候選 journal 原樣保留，舊 manifest 需重新匯出。遇到舊規格收據可用原報告與 `approve-spec --active` 保存生效版。舊整合若顯示 `LEGACY_NEEDS_VERIFICATION`，可按原組合重跑。
+
+維護者改過套件檔案時，先用 Git stage 選定要發行的檔案，再執行 `python -I -B -X utf8 tools/cdx_manifest.py` 產生 `RUNTIME-MANIFEST.json`。CI 的 `--check` 核對預定安裝的檔案、版本及內容。GitHub 發行封包與 Git checkout 都以該清單安裝。
 
 ## 上游共用工具
 

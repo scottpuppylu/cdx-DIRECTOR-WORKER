@@ -499,7 +499,7 @@ def use_work_temp():
     return folder
 
 
-def main(argv=None, *, delivery_check=None):
+def main(argv=None, *, delivery_check=None, push_only=False):
     use_work_temp()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--repo", default=".", help="the repository to release (default: current folder)")
@@ -537,8 +537,13 @@ def main(argv=None, *, delivery_check=None):
             job.planned.append(f"gh release create {job.tag} --verify-tag --latest")
         else:
             job.push()
-            job.tag_step(version)
-            job.release_step(version)
+            if not push_only:
+                if job.delivery_head and a.execute and job.remote_branch_sha() != job.delivery_head:
+                    raise Stop("The target changed before publication", "verify the current target before tagging")
+                job.tag_step(version)
+                if job.delivery_head and a.execute and job.remote_branch_sha() != job.delivery_head:
+                    raise Stop("The target changed after tagging", "compare the landed commit and tag before publishing")
+                job.release_step(version)
     except Stop as stop:
         print(f"STEP FAIL: {stop}\nNEXT: {stop.next_step}\nRELEASE: FAIL")
         return 1
@@ -550,7 +555,8 @@ def main(argv=None, *, delivery_check=None):
             print(f"PLAN {line}")
         print(f"RELEASE: DRY_RUN {len(job.planned)} remote step(s) planned; run with --execute to do them")
         return 0
-    print(f"RELEASE: DONE v{version} at {job.head()}")
+    action = "PUSHED" if push_only else "DONE"
+    print(f"RELEASE: {action} v{version} at {job.head()}")
     return 0
 
 

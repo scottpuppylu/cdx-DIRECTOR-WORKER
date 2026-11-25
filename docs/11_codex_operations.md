@@ -32,7 +32,7 @@ App Server 會拒絕它收到的命令或檔案核准請求。遇到需要外部
 
 ## Hook、沙箱與 Plug-in
 
-- `setup --hooks` 在信任的專案配置 SessionStart、PreToolUse、PostToolUse。已有 JSON 的其他 Hook 保留。安裝配置與信任是兩個狀態。
+- `setup --hooks` 在信任的專案配置 SessionStart、PostCompact、UserPromptSubmit、PreToolUse、PostToolUse。已有 JSON 的其他 Hook 保留。安裝配置與信任是兩個狀態。PostCompact 記錄 `manual` 或 `auto` 和續航位置，下一次送出提示時恢復對應指引。 [Codex Hooks](https://learn.chatgpt.com/docs/hooks)
 - `work prepare` 與 `work adopt` 會在 worker checkout 布署需要的 Skill。有啟用 Hook 時也會寫入適用的本機配置。Git 已追蹤的指示和 Hook 以該版內容為準。本機安裝檔由 info/exclude 排除。用 `cdxdw session register-director THREAD_ID` 登記總監，讓它在接續時收到斷點定位。
 - 信任入口是 Desktop 的 Hook 審查與 CLI 的 `/hooks`。查看目前的可信來源、命令和路徑；版本升級後重新核對。
 - `doctor --live --probe-sandbox` 分別查看配置、Hook 及寫入探測。App Server 啟動模型回合前會做邊界正反控制。Windows readiness 不是 ready 時停止自動回合。

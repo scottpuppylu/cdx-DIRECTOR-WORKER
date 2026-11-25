@@ -97,6 +97,8 @@ Standard 與 Strict 需鎖定驗收測試。用 `cdxdw work lock-tests --base <S
 
 付費、裝置或對量測條件敏感的驗收，可選用 `CDX_GATES = {"feasibility": true, "pre_tr": "ci/pre_tr.json"}`，並用 `work preflight` 在正式測試前核對。也可指定量尺、審查包、外部稽核及 PO 原文。 [cdxdw 工具手冊](../tools/CDX-TOOLS.md#量測裝置與外部證據)
 
+有命令產出的交付檔時，可在同一個 `CDX_GATES` 物件加 `"artifact_path": "dist/product.zip"`，讓每次 `E2E_COMMAND` 都使用此相對路徑。總監以結果的 SHA-256 登記人工判定並執行 `final`。
+
 ```text
 TESTS_LOCKED:
 - <repo 相對路徑> sha256=<64 位>

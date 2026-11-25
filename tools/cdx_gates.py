@@ -31,16 +31,19 @@ def policy(text):
     if len(fields) != 1:
         raise Refused("Work order needs at most one CDX_GATES field")
     data = json.loads(fields[0])
-    if not isinstance(data, dict) or data.keys() - {"feasibility", "pre_tr", "ruler", "pack", "po_reply", "audit"}:
+    if not isinstance(data, dict) or data.keys() - {"feasibility", "pre_tr", "ruler", "pack", "po_reply", "audit",
+                                                   "artifact_path"}:
         raise Refused("CDX_GATES has an unknown field")
     for key in ("feasibility", "po_reply", "audit"):
         if key in data and type(data[key]) is not bool:
             raise Refused(f"{key} must be a boolean")
-    for key in ("pre_tr", "pack"):
+    for key in ("pre_tr", "pack", "artifact_path"):
         if key in data:
             relative_file(data[key])
     if "ruler" in data:
         ruler_args(data["ruler"])
+    if "artifact_path" in data and not re.search(r"^[ \t]*E2E_COMMAND[ \t]*=", text, re.M):
+        raise Refused("artifact_path requires a pinned E2E_COMMAND")
     return data
 
 

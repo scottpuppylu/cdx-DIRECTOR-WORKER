@@ -15,10 +15,12 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import uuid
+from zipfile import ZipFile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cdx_audit
 import cdx_hook
+import cdx_manifest
 import cdx_release
 import cdx_review
 import cdx_session
@@ -209,11 +211,23 @@ FEASIBILITY: FEASIBLE
         self.assertEqual(json.loads(verified)["outcome"], "MATCH")
         receiving = self.root / "installed peer state"
         self.run_script("cdxdw.py", "setup", "--repo", clone, "--state", receiving, "--apply")
-        shutil.copytree(state, receiving, dirs_exist_ok=True, ignore=shutil.ignore_patterns("runtime", "PROJECT.json"))
+        shutil.copytree(state, receiving, dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("runtime", "PROJECT.json", "HANDOFF.json"))
         linked = self.root / "peer linked checkout"
         git(clone, "worktree", "add", "--detach", str(linked), head)
         text(linked / "notes.txt", "uncommitted fixture note\n")
-        self.run_script("cdxdw.py", "handoff", "--repo", clone, "attach", moved_manifest, "--worktree", linked)
+        receiving_reply = receiving / "po-replies" / (hashlib.sha256(raw).hexdigest() + ".txt")
+        receiving_reply.unlink()
+        command = ("cdxdw.py", "handoff", "--repo", clone)
+        mismatch = json.loads(self.run_script(*command, "verify", moved_manifest, "--worktree", linked, code=2))
+        self.assertIn(receiving_reply.relative_to(receiving).as_posix(), mismatch["state_mismatches"])
+        self.run_script(*command, "attach", moved_manifest, "--worktree", linked, code=2)
+        self.assertFalse((receiving / "work" / "WO-001" / "HANDOFF.json").exists())
+        receiving_reply.write_bytes(raw)
+        chat = str(uuid.uuid4())
+        self.run_script(*command, "attach", moved_manifest, "--worktree", linked, "--chat", chat)
+        self.run_script(*command, "attach", moved_manifest, "--worktree", linked, "--chat", chat)
+        self.assertEqual(read_json(receiving / "sessions" / f"{chat}.json")["worktree"], str(linked))
         received_status = json.loads(self.work(clone, "status", name))
         self.assertEqual(received_status["checkout"], str(linked))
         self.assertEqual(received_status["order_sha256"], status["order_sha256"])
@@ -230,7 +244,8 @@ FEASIBILITY: FEASIBLE
         policy = {"workflow": workflow, "workflow_sha256": hashlib.sha256(raw).hexdigest(), "jobs": ["delivery"]}
         meta = {"id": 17, "run_attempt": 1, "workflow_id": 3, "event": "merge_group",
                 "repository": {"full_name": slug}, "head_repository": {"full_name": slug},
-                "path": workflow, "head_sha": head, "status": "completed", "conclusion": "success",
+                "path": workflow, "head_branch": "codex/delivery", "head_sha": head,
+                "status": "completed", "conclusion": "success",
                 "created_at": "2026-11-24T00:00:00Z"}
         row = {"name": "delivery", "head_sha": head, "status": "completed", "conclusion": "success"}
         with patch.object(cdx_release, "github", side_effect=[meta, [{"jobs": [row]}], {"workflow_runs": [meta]}]):
@@ -243,11 +258,41 @@ FEASIBILITY: FEASIBLE
                                                              {"workflow_runs": [meta, newer]}]):
             with self.assertRaisesRegex(Refused, "supersedes"):
                 cdx_release.check_ci(repo, slug, head, 17, policy)
+        with patch.object(cdx_release, "github", side_effect=[
+                meta, [{"jobs": [row]}], {"workflow_runs": [meta, dict(newer, head_branch="main")]}]):
+            self.assertEqual(cdx_release.check_ci(repo, slug, head, 17, policy)["branch"], "codex/delivery")
+        with patch.object(cdx_release, "github", return_value=meta):
+            with self.assertRaisesRegex(Refused, "exact SHA"):
+                cdx_release.check_ci(repo, slug, head, 17, policy, branch="main")
         artifact = {"name": "build", "id": 12, "expired": False, "digest": "sha256:" + "a" * 64}
         with patch.object(cdx_release, "github", side_effect=[meta, [{"jobs": [row]}],
                                                              {"workflow_runs": [meta]}, [{"artifacts": [artifact]}]]):
             with self.assertRaisesRegex(Refused, "expected GitHub digest"):
                 cdx_release.check_ci(repo, slug, head, 17, dict(policy, artifact_name="build"), "b" * 64)
+        rerun = dict(meta, run_attempt=2)
+        attempt_artifact = dict(artifact, name="build-attempt-2")
+        with patch.object(cdx_release, "github", side_effect=[rerun, [{"jobs": [row]}],
+                {"workflow_runs": [rerun]}, [{"artifacts": [attempt_artifact]}]]):
+            evidence = cdx_release.check_ci(repo, slug, head, 17, dict(policy, artifact_name="build-attempt-{attempt}"),
+                                            "a" * 64)
+            self.assertEqual(evidence["artifact"]["name"], "build-attempt-2")
+
+    def test_publication_requires_the_accepted_output_inside_the_ci_archive(self):
+        bundle = self.root / "build.zip"
+        payload = b"the build that PO tested"
+        with ZipFile(bundle, "w") as archive:
+            archive.writestr("out/kit.zip", payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        proof = {"members": [{"order": "WO-001", "artifact": digest}]}
+        receipt = {"artifact": {"sha256": hashlib.sha256(bundle.read_bytes()).hexdigest()}}
+        policy = {"artifact_members": {"WO-001": "out/kit.zip"}}
+        with self.assertRaisesRegex(Refused, "attested CI archive"):
+            cdx_release.verify_delivery_archive(proof, receipt, None, policy)
+        self.assertEqual(cdx_release.verify_delivery_archive(proof, receipt, bundle, policy),
+                         {"WO-001": {"path": "out/kit.zip", "sha256": digest}})
+        with self.assertRaisesRegex(Refused, "differs from the accepted"):
+            cdx_release.verify_delivery_archive({"members": [{"order": "WO-001", "artifact": "b" * 64}]},
+                                                receipt, bundle, policy)
 
     def test_integration_conflict_keeps_release_target_and_no_passing_receipt(self):
         repo = self.git_project("conflicting")
@@ -434,7 +479,8 @@ CHECKS:
 - STOP_RULES: stop after 2 rounds without progress
 """)
         git(repo, "worktree", "add", "--detach", str(worker), base)
-        self.work(repo, "adopt", name)
+        desktop_chat = str(uuid.uuid4())
+        self.work(repo, "adopt", name, "--chat", desktop_chat)
         self.assertEqual(git(worker, "rev-parse", "HEAD"), base)
         self.assertTrue((worker / ".codex" / "hooks.json").is_file())
         self.assertEqual(len(list((worker / ".agents" / "skills").glob("cdx-*/SKILL.md"))), 5)
@@ -443,9 +489,20 @@ CHECKS:
         text(state / "reviews" / "WO-001-SPEC_REVIEW.md", "AC-1 explicitly verifies 42.\n")
         self.work(repo, "approve-spec", name, "--reviewer", "reviewer-1", "--author", "director-1")
         self.work(repo, "dispatch", name)
+        role = read_json(state / "sessions" / f"{desktop_chat}.json")
+        self.assertEqual((role["order_sha256"], role["worktree"]), (order_spec(state, name)["sha"], str(worker)))
+        compact = cdx_hook.handle({"hook_event_name": "PostCompact", "session_id": desktop_chat,
+                                  "cwd": str(worker), "trigger": "manual"})
+        self.assertIn("RESUME_STATE.md", compact["systemMessage"])
         self.assertEqual(len(list((state / "brief-history").glob("*.md"))), 1)
         self.assertEqual(len(list((state / "order-history").glob("*.md"))), 1)
         text(work / "PLAN.md", "AC-1: update calc.txt, then run the approved check.\n")
+        self.work(repo, "approve-plan", name)
+        text(work / "PLAN.md", "AC-1: run the approved check after updating calc.txt.\r\n")
+        self.work(repo, "approve-plan", name, "--approver", "fixture-director")
+        approval = read_json(state / "reviews" / "WO-001-plan.json")
+        self.assertEqual((approval["plan_revision"], approval["approver"]), (2, "fixture-director"))
+        self.assertEqual(len(list((state / "reviews" / "plan-history" / "WO-001").glob("*.json"))), 1)
         self.work(repo, "approve-plan", name)
         self.run_script("cdxdw.py", "session", "--repo", repo, "new", name)
         self.assertIn('"thread": null', self.run_script("cdxdw.py", "session", "--repo", repo, "status", name))
@@ -468,6 +525,10 @@ CHECKS:
             return next(folder.glob("*.json"))
 
         candidate("42\nfirst\n")
+        approved_plan_bytes = (work / "PLAN.md").read_bytes()
+        text(work / "PLAN.md", "Plan changed after construction.\n")
+        self.assertIn("Implementation has begun", self.work(repo, "approve-plan", name, code=2))
+        (work / "PLAN.md").write_bytes(approved_plan_bytes)
         stale = evidence(work / "stale-evidence")
         head = candidate("42\nsecond\n")
         shutil.copyfile(stale, work / "evidence" / "stale.json")
@@ -555,16 +616,19 @@ ACCEPTANCE:
         built = json.loads(self.work(repo, "e2e", name, "--candidate", head, "--artifact-path", "calc.txt"))
         artifact = built["artifact"]
         self.assertEqual(artifact, hashlib.sha256(b"42\nsecond\n").hexdigest())
-        self.assertIn("different build artifact", self.work(repo, "final", name, "--candidate", head, code=2))
+        self.assertIn("requires a build artifact", self.work(repo, "final", name, "--candidate", head, code=2))
         self.assertIn("Waiting for REVIEW", self.work(repo, "final", name, "--candidate", head,
                                                      "--artifact", artifact, code=2))
         self.work(repo, "record", name, "--candidate", head, "--kind", "review", "--outcome", "PASS",
                   "--artifact", artifact, *judgment)
         self.assertIn("CDX_FINAL", self.work(repo, "final", name, "--candidate", head, "--artifact", artifact))
-        self.work(repo, "e2e", name, "--candidate", head)
         self.work(repo, "record", name, "--candidate", head, "--kind", "po", "--outcome", "CHANGES_REQUESTED",
-                  *judgment)
-        self.assertIn("po=CHANGES_REQUESTED", self.work(repo, "final", name, "--candidate", head, code=2))
+                  "--artifact", artifact, *judgment)
+        self.assertIn("requires --artifact-path", self.work(repo, "e2e", name, "--candidate", head, code=2))
+        self.assertIn("requires a build artifact", self.work(repo, "final", name, "--candidate", head, code=2))
+        self.work(repo, "e2e", name, "--candidate", head, "--artifact-path", "calc.txt")
+        self.assertIn("po=CHANGES_REQUESTED", self.work(repo, "final", name, "--candidate", head,
+                                                       "--artifact", artifact, code=2))
         text(brief, brief_text.replace("版次：1", "版次：2").replace("42", "99"))
         self.work(repo, "lock-brief")
         self.assertIn("BRIEF_STALE", self.work(repo, "final", name, "--candidate", head, code=2))
@@ -655,6 +719,12 @@ CHECKS:
                          json_bytes({"candidate": head, "order_sha256": spec["sha"], "attempt": record["id"],
                                      "report_sha256": gate_check.order_hash(report.encode())}))
             member_args.extend(("--member", f"{name}={head}"))
+        single = json.loads(self.work(repo, "integrate", "--target", "refs/heads/main", "--base", base,
+                                      *member_args[:2], "--argv", json.dumps(entry)))
+        self.assertEqual(single["outcome"], "PASS")
+        self.assertEqual(single["head"], member_args[1].split("=")[1])
+        self.assertEqual(json.loads(self.work(repo, "integration-status", single["id"],
+                                             "--expect-head", single["head"]))["outcome"], "PASS")
         common = ("integrate", "--target", "refs/heads/main", "--base", base, *member_args, "--argv")
         failure = json.loads(self.work(repo, *common, json.dumps(entry), code=2))
         self.assertEqual(failure["outcome"], "FAIL")
@@ -817,6 +887,13 @@ FORBIDDEN:
         reply = cdx_hook.handle(dict(base, hook_event_name="SessionStart", source="compact"))
         self.assertIn("RESUME_STATE.md", reply["hookSpecificOutput"]["additionalContext"])
         self.assertNotIn("PROGRESS:", reply["hookSpecificOutput"]["additionalContext"])
+        compact = cdx_hook.handle(dict(base, hook_event_name="PostCompact", trigger="auto", turn_id="turn-1"))
+        self.assertIn("RESUME_STATE.md", compact["systemMessage"])
+        self.assertIn("RESUME_STATE.md", cdx_hook.handle(dict(base, hook_event_name="UserPromptSubmit"))
+                      ["hookSpecificOutput"]["additionalContext"])
+        self.assertEqual(cdx_hook.handle(dict(base, hook_event_name="UserPromptSubmit")), {})
+        log = list(cdx_audit.verified_entries(state / "audit" / f"{session}-hooks.jsonl"))
+        self.assertEqual((log[-1]["kind"], log[-1]["trigger"]), ("post-compact", "auto"))
         patch = f"*** Begin Patch\n*** Update File: {state / 'DIRECTOR_LOG.md'}\n*** End Patch"
         denied = cdx_hook.handle(dict(base, hook_event_name="PreToolUse", tool_name="apply_patch", tool_input={"command": patch}))
         self.assertEqual(denied["hookSpecificOutput"]["permissionDecision"], "deny")
@@ -909,6 +986,18 @@ FORBIDDEN:
         self.assertEqual(self.run_script("cdx.py", "work", "--help"), self.run_script("cdxdw.py", "work", "--help"))
         for path in ("README.md", "BOOTSTRAP.md", "CODEX-PORT.md", "tools/CDX-TOOLS.md"):
             self.assertTrue((ROOT / path).read_text(encoding="utf-8").strip())
+        copy = self.root / "bundle"
+        for path, raw in cdx_manifest.checked_files(ROOT):
+            atomic_write(copy / path.relative_to(ROOT), raw)
+        draft = copy / "tools" / "untracked-draft.txt"
+        text(draft, "unpublished test fixture\n")
+        product = self.git_project("bundle target")
+        self.run_script(copy / "tools" / "cdxdw.py", "setup", "--repo", product, "--apply")
+        installed = Path(load_project(product)[2]["kit"])
+        self.assertFalse((installed / "tools" / draft.name).exists())
+        text(copy / "BOOTSTRAP.md", "changed after the manifest\n")
+        self.assertIn("does not match the manifest", self.run_script(copy / "tools" / "cdxdw.py",
+                      "setup", "--repo", product, code=2))
 
 
 if __name__ == "__main__":
