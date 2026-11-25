@@ -1,6 +1,6 @@
 # DIRECTOR-WORK → cdx-DIRECTOR-WORKER
 
-`cdx-DIRECTOR-WORKER` 的產品簡稱是 `cdxdw`，本文件適用於 `2.6.0-cdx.6`。上游 `v2.6.0` commit `787f67bb7483cf07ac45f450a3f9e57262383359`。安裝、工單、審查和恢復由這個 repo 提供。
+`cdx-DIRECTOR-WORKER` 的產品簡稱是 `cdxdw`，本文件適用於 `2.6.0-cdx.7` 開發版。上游 `v2.6.0` commit `787f67bb7483cf07ac45f450a3f9e57262383359`。安裝、工單、審查和恢復由這個 repo 提供。
 
 ## 對照同系列移植
 
@@ -8,7 +8,7 @@
 |---|---|---|---|---|
 | `dsh-DIRECTOR-WORKER` | `dshdw` | `2.6.0-ds.7` | `dsh_` | 本機 session 事後稽核、獨立工作樹和核准前閘門。 |
 | `agy-DIRECTOR-WORKER` | `agydw` | `2.6.0-agy.6` | `agy_` | Antigravity 的事前 Hook、角色權限、分支工作區、復工與 transcript 稽核。 |
-| `cdx-DIRECTOR-WORKER` | `cdxdw` | `2.6.0-cdx.6` | `cdx_` | Desktop 工作樹交接核對、候選封存、受控發布與驗收。App Server 支援原生審查、回合、續航和稽核。 |
+| `cdx-DIRECTOR-WORKER` | `cdxdw` | `2.6.0-cdx.7` 開發版 | `cdx_` | Desktop 工作樹交接核對、候選封存、受控發布與驗收。App Server 支援原生審查、回合、續航和稽核。 |
 
 cdxdw 採 `<上游版號>-cdx.<移植版次>`。公開入口為 `tools/cdxdw.py`，既有 `tools/cdx.py` 仍可呼叫同一入口。外掛 ID、Skill ID 與儲存指標使用平台前綴。各版本採用的治理機制與此次實作見 [DW 系列比較](research/DW-FAMILY-REVIEW.md)。
 
