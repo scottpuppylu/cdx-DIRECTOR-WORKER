@@ -34,7 +34,8 @@ def manifest_from_checkout(root):
             files[name] = hashlib.sha256(path.read_bytes()).hexdigest()
     if not STOCK <= files.keys():
         raise Refused("Runtime manifest must cover all required bundle files")
-    return {"schema": 1, "version": (root / "VERSION").read_text(encoding="utf-8").strip(), "files": files}
+    entries = [{"path": name, "sha256": digest} for name, digest in files.items()]
+    return {"schema": 1, "version": (root / "VERSION").read_text(encoding="utf-8").strip(), "files": entries}
 
 
 def checked_files(root):
@@ -42,14 +43,19 @@ def checked_files(root):
     manifest_bytes = manifest.read_bytes()
     release = json.loads(manifest_bytes.decode("utf-8-sig"))
     version = state_path(root, "VERSION").read_text(encoding="utf-8").strip()
-    files = release.get("files")
-    if (release.get("schema") != 1 or release.get("version") != version or not isinstance(files, dict) or
-            not STOCK <= files.keys()):
+    entries = release.get("files")
+    if release.get("schema") != 1 or release.get("version") != version or not isinstance(entries, list):
         raise Refused("Runtime manifest is missing required files or has a different version")
     result = [(manifest, manifest_bytes)]
-    for name, expected in sorted(files.items()):
-        if not is_runtime_file(name) or not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+    files = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
             raise Refused("Invalid runtime manifest entry")
+        name, expected = entry.get("path"), entry.get("sha256")
+        if (not isinstance(name, str) or not is_runtime_file(name) or name in files or
+                not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected)):
+            raise Refused("Invalid runtime manifest entry")
+        files.add(name)
         path = state_path(root, *name.split("/"))
         if not path.is_file():
             raise Refused(f"Runtime source is missing {name}")
@@ -57,6 +63,8 @@ def checked_files(root):
         if hashlib.sha256(raw).hexdigest() != expected:
             raise Refused(f"Runtime source does not match the manifest: {name}")
         result.append((path, raw))
+    if not STOCK <= files:
+        raise Refused("Runtime manifest is missing required files")
     return result
 
 

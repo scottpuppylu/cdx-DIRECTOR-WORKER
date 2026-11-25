@@ -986,6 +986,10 @@ FORBIDDEN:
         self.assertEqual(self.run_script("cdx.py", "work", "--help"), self.run_script("cdxdw.py", "work", "--help"))
         for path in ("README.md", "BOOTSTRAP.md", "CODEX-PORT.md", "tools/CDX-TOOLS.md"):
             self.assertTrue((ROOT / path).read_text(encoding="utf-8").strip())
+        release_scan = cdx_release.release
+        scanner = release_scan.secret_module()
+        for line in (ROOT / cdx_manifest.NAME).read_text(encoding="utf-8").splitlines():
+            self.assertFalse(release_scan.line_findings(line, scanner), line)
         copy = self.root / "bundle"
         for path, raw in cdx_manifest.checked_files(ROOT):
             atomic_write(copy / path.relative_to(ROOT), raw)

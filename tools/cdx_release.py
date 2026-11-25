@@ -176,6 +176,9 @@ def check_delivery(repo, state, job, args, policy):
     if (job.head() != head or integration_receipt(repo, state, args.integration, landed_head=landed)["outcome"] != "PASS"):
         raise Refused("Delivery evidence changed during verification")
     job.delivery_head, job.delivery_base = head, proof["base"] if args.push_only else head
+    if not args.push_only:
+        ci_url = f"https://github.com/{slug}/actions/runs/{args.ci_run}"
+        job.notes += f"\n\n已驗證交付提交 `{head}`。 [目標分支 CI]({ci_url})\n"
     proof_path = state_path(state, "delivery", head, f"{args.ci_run}-{receipt['run_attempt']}.json")
     evidence = dict(receipt, integration=args.integration, checked=stamp(), integration_head=proof["head"],
                     stage="push" if args.push_only else "publish", outputs=outputs)
