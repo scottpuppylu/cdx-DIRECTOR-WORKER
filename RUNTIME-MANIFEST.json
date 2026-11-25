@@ -312,7 +312,7 @@
     },
     {
       "path": "tools/cdx_launcher.py",
-      "sha256": "cde3ae7768d32991f78d135f106f266d18a660d2c7b4c46426bc4ab1028f7cf6"
+      "sha256": "2cc6c6293d715ab40162e1bc19940acdf0f7b2b455b573f4f983d7f3d263368d"
     },
     {
       "path": "tools/cdx_manifest.py",
@@ -344,7 +344,7 @@
     },
     {
       "path": "tools/cdx_work.py",
-      "sha256": "48dc3a403035cbadcb5122d2dc3cee3f43e65abbc873aa2b16435bb86aa3832c"
+      "sha256": "44b75ee188001768b3bd2546b487994f480c133bb5c1c17f133b36dc29073bc4"
     },
     {
       "path": "tools/cdxdw.py",

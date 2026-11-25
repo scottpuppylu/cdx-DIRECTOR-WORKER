@@ -9,6 +9,10 @@ import sys
 
 def main():
     state = Path(__file__).resolve().parent
+    if sys.argv[1:] in (["--help"], ["-h"]) and not (state / "PROJECT.json").is_file():
+        print("Usage: python <project-state>/cdxdw.py [COMMAND] [ARGS]")
+        print("Run setup first to install this launcher in the project state.")
+        return 0
     try:
         project = json.loads((state / "PROJECT.json").read_bytes().decode("utf-8-sig"))
         version = project["version"]

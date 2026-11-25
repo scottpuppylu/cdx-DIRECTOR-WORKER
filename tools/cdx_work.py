@@ -1016,6 +1016,8 @@ def integration_status(repo, state, identifier, expected_head=None):
 
 
 def order_status(repo, state, spec, candidate, artifact=None):
+    records = gate_check.dispatch_records(state_path(state, "DIRECTOR_LOG.md").read_text(encoding="utf-8-sig"))
+    current = records.get(spec["order_id"]) == (str(spec["revision"]), spec["sha"])
     sessions = {}
     for role in ("worker", "reviewer"):
         path = state_path(state, "sessions", f"{spec['order_id']}-{role}.json")
@@ -1037,7 +1039,9 @@ def order_status(repo, state, spec, candidate, artifact=None):
     if statuses["e2e"] == "PASS" and latest["e2e"].get("artifact") != artifact:
         statuses["e2e"] = "DIFFERENT_ARTIFACT"
     final = None
-    if candidate:
+    if candidate and not current:
+        final = {"outcome": "SUPERSEDED", "reason": "Historical acceptance belongs to the archived order revision"}
+    elif candidate:
         try:
             check_final(state, spec, candidate, artifact, emit=False)
             final = {"outcome": "PASS"}
@@ -1061,12 +1065,14 @@ def order_status(repo, state, spec, candidate, artifact=None):
     recorded = {"manual_e2e", "review", "po"} & latest.keys()
     needed = [kind for kind, status in statuses.items()
               if status != "PASS" and (kind in required or kind in recorded or kind.upper() in levels)]
-    next_step = "Choose or seal a candidate" if not candidate else (
+    next_step = "Consult the active order revision for current work" if not current else (
+        "Choose or seal a candidate") if not candidate else (
         "Resolve " + ", ".join(needed) if needed else
         "Run final for this candidate" if final["outcome"] == "PASS" else final["reason"])
     plan_binding = revision_record(state, spec, f"plan-{candidate}.json")
     print(json.dumps({"order": spec["order_id"], "revision": spec["revision"], "order_sha256": spec["sha"],
-                      "snapshot": str(spec["path"]), "draft": draft_status, "sessions": sessions,
+                      "snapshot": str(spec["path"]), "revision_state": "ACTIVE" if current else "SUPERSEDED",
+                      "draft": draft_status, "sessions": sessions,
                       "desktop": desktop or None,
                       "resume": str(resume_location(state, spec)),
                       "sealed_plan": read_json(plan_binding) if plan_binding.is_file() else None,
@@ -1294,7 +1300,7 @@ def main(argv=None):
             dispatch(repo, state, spec)
             print(f"CDX_WORK DISPATCH {spec['order_id']} {spec['checkout']}")
             print(f"Worker instructions: approved order {dispatched_copy(state, spec)}. "
-                  f"Stay within SCOPE and keep work notes in {spec['work']}.")
+                  f"Stay within SCOPE. Resume from {resume_location(state, spec)}. Keep work notes in {spec['work']}.")
         return 0
     except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError) as error:
         return report_error(error)
