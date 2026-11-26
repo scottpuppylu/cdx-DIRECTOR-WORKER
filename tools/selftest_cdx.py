@@ -28,7 +28,7 @@ import audit_log
 import gate_check
 from cdx_acceptance import attempt, run_entry
 from cdx_common import ROOT, Refused, atomic_write, git, json_bytes, load_project, lock, read_json
-from cdx_delivery import delivery_spec
+from cdx_delivery import delivery_spec, target_position
 from cdx_usage import summarize_app
 from cdx_work import integration_series, order_spec, run_integration
 
@@ -390,6 +390,12 @@ FEASIBILITY: FEASIBLE
         result = cdx_release.verify_delivery_archive(receipts[0], {}, None, {}, staged=staged, state=state)
         self.assertEqual(result["artifact_source"], "retained")
         self.assertEqual((staged / name).read_bytes(), original.read_bytes())
+        git(repo, "commit", "--allow-empty", "-m", "Same tree at a new version")
+        other = git(repo, "rev-parse", "HEAD")
+        self.assertEqual(git(repo, "rev-parse", f"{other}^{{tree}}"), tree)
+        proof = dict(receipts[0], head=head, base="a" * 40)
+        self.assertEqual(target_position(repo, proof, head), "LANDED")
+        self.assertEqual(target_position(repo, proof, other), "TARGET_CHANGED")
         original.write_bytes(b"changed")
         with self.assertRaisesRegex(Refused, "missing or differs"):
             cdx_release.verify_delivery_archive(receipts[0], {}, None, {}, state=state)

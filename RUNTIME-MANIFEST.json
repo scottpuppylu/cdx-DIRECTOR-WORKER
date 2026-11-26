@@ -52,7 +52,7 @@
     },
     {
       "path": "docs/03_communication.md",
-      "sha256": "f6447f33caae05d09d1644f91b8047e281eadce51d64187b67fbb3b9368c8f9e"
+      "sha256": "deb39ddb1b6fc5c5cc292d5c4be902f4aea41dfbb76c28cf84839025c81ad94a"
     },
     {
       "path": "docs/04_quota_efficiency.md",
@@ -508,7 +508,7 @@
     },
     {
       "path": "tools/selftest_cdx.py",
-      "sha256": "6d0d91b64ab53fcc1c7c8b1e71f6589f53cd8b64ff92686364c41486bbd2cd15"
+      "sha256": "56fb5346ae894177d64eb5af7b36daad4e74bd47ae1b6fa8745752fbbf6edb90"
     },
     {
       "path": "tools/setup_check.py",
