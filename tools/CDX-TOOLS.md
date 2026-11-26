@@ -45,6 +45,8 @@
 
 REVIEW 或 PO 有多個 AC 時，每次 `work record` 用一個或多個 `--ac AC-N` 明列覆蓋範圍。單一 AC 的既有收據可沿用。多 AC 的舊總判定需按原文重新登記範圍，`status` 的 `criteria` 會逐項列出判定與來源。封存候選的獨立重審讀核准 PLAN 快照，現場工作稿可保留。
 
+工單可宣告 `CDX_GATES = {"environments":{"AC-2":["windows","wsl"]}}`。裁決用 `--environment-id` 選定一個環境，`--environment` 保存實際版本等描述。`criteria` 用 `AC-2@windows` 等鍵顯示每格判定。舊資料可在環境文字和聲明 ID 完全對應時沿用。其餘格子提示補驗，未宣告的 AC 沿用原有規則。`engineering`、`product` 和 `final` 分別供查工程證據、產品判定及整體放行。
+
 用 `work integrate` 驗證一張或多張工單，指定 `--target refs/heads/main`、`--base FULL_TARGET_SHA`、`--member ORDER.md=FULL_CANDIDATE_SHA` 和已核准的 `--argv` JSON 命令。單張可快轉時保留原候選 SHA。其他情況依提供順序合併並驗證實際結果。單項有工件時，追加 `--member-artifact ORDER.md=ARTIFACT_SHA256`。目標、工單、候選、封存 ref、單項證據或最新整合嘗試改變時，舊收據會失效。發版前用 `work integration-status UUID --expect-head FULL_DELIVERY_SHA` 核對實際提交。
 
 新版受控發版要先執行 `work approve-integration --target REF --base SHA --argv JSON --approved-by ID`，將傳回的 `approval` 交給 `work integrate --approval`。預設規格交付原始碼。交付建置產物時用 `--delivery FILE.json` 核准，例如下列內容。
@@ -59,7 +61,9 @@ REVIEW 或 PO 有多個 AC 時，每次 `work record` 用一個或多個 `--ac A
 }
 ```
 
-整合完成後請 PO 看指定工件。需要記錄其決定時，使用 `work record-delivery UUID --outcome PASS --actor PO --reply-file FILE --reply-ref MESSAGE`。如果建置流程無法重現相同 bytes，讓整合的核准指令驗證並交出同一份固定工件，CI 封存同一份檔案。發版會在草稿核對已上傳資產的摘要，再公開，重試會核對已存在的資產。 [GitHub Release assets](https://docs.github.com/en/rest/releases/assets)
+`approve-integration` 及 `integrate` 均接受 `--argv-file FILE.json`，適合 Windows PowerShell 5.1。指定 `"build_context": "git"` 可在獨立 Git checkout 建置，含本機可見的 tag。建置環境也提供 `CDX_DELIVERY_COMMIT`、`CDX_DELIVERY_TREE`，及來源有 `VERSION` 時的 `CDX_DELIVERY_VERSION`。
+
+整合完成後用 `work delivery-file UUID --asset FILE` 取得保留原件與 SHA-256，再請 PO 試用。舊收據可用 `work import-delivery UUID --asset NAME --file ORIGINAL` 匯入與已驗摘要一致的原件。需要記錄 PO 決定時，用 `work record-delivery UUID --outcome PASS --actor PO --reply-file FILE --reply-ref MESSAGE`。可重現建置預設使用 CI ZIP。若選 `"artifact_source": "retained"`，可發行已驗的同一份原件，交付 SHA 須與整合相同。已指定 CI 工件的專案仍核對 ZIP。發版會在草稿核對已上傳資產的摘要，再公開，重試會核對已存在的資產。 [GitHub Release assets](https://docs.github.com/en/rest/releases/assets)
 
 ## 中斷後對帳
 
@@ -113,17 +117,19 @@ cdxdw release --repo PROJECT --integration INTEGRATION_UUID --head FULL_DELIVERY
 
 需有可讀取 repo 的 GitHub CLI。遠端合併或 rebase 產生新 SHA 時，交付 tree 要符合驗過的整合結果，base 可追溯，該 SHA 自身的 CI 也要通過。GitHub Actions 工件可由 `artifact_name` 固定，重跑建議設成 `build-attempt-{attempt}`，由工具換成實際 attempt。若工單核准的是 CI ZIP 的內檔，將工單 ID 對應 ZIP 相對路徑填入 `cdx_release_ci.artifact_members`，再同時提供 `--artifact ZIP_SHA256` 與 `--archive DOWNLOADED_ZIP`。工具核對 GitHub 的封存指紋、下載的封存 bytes 和實際內檔 SHA，發行內容仍由專案的交付流程管理。 [GitHub workflow runs](https://docs.github.com/en/rest/actions/workflow-runs) · [GitHub Actions artifacts](https://docs.github.com/en/rest/actions/artifacts)
 
+必要 jobs 必須全數出現在同一有效 attempt。部分重跑缺少必要 job 時，使用 GitHub 的完整 workflow 重跑。每次驗證另寫 `delivery/<sha>/checks/`，`latest/` 以整合 UUID、CI run 及預覽／推送／發布階段索引。公開前再確認 run／attempt 仍有效。
+
 ## Desktop 交接核對
 
 ```text
 cdxdw handoff --repo PROJECT export ORDER.md --out HANDOFF.json
-cdxdw handoff --repo PROJECT verify HANDOFF.json --worktree DESTINATION
+cdxdw handoff --repo PROJECT verify HANDOFF.json --worktree DESTINATION --chat THREAD_UUID
 cdxdw handoff --repo PROJECT attach HANDOFF.json --worktree ISOLATED_DESTINATION --chat THREAD_UUID
 ```
 
 停止原工作線的寫入後匯出清單，在目的地核對候選 refs、暫存／未暫存變更、未追蹤檔及工作線狀態。跨主機時用既有交接方式搬移 Git 資料和狀態備份，以 `verify --state PATH` 核對副本。準備正式接手時，在目的地初始化專屬的 cdxdw 狀態，將確認過的工作紀錄複製到新狀態，使用目的地安裝產生的 `PROJECT.json` 和 `runtime/`。再在同專案的隔離工作樹執行 `attach`。工具保留已派工文件的原 bytes，另記目的地的工作樹與狀態位置。Desktop Local checkout 也可做唯讀核對。原 App Server thread 仍以原路徑及回合對帳。
 
-請用目前的 `handoff export` 重新匯出舊版清單。新版清單納入已核准的初衷、規格與計畫快照、驗收所引用的 PO 原文、原生 Review 與相關回合資料。比對成功後，接手前還會重新查工單與核准依賴。
+新版清單納入派工歷史、未派草稿、已核准的現行初衷與計畫、驗收引用的 PO 原文和相關回合資料。schema 3 可續接當時現行版。需要完整歷史時從來源重匯。以 `verify --chat` 預檢既有 UUID 及工作線。相同工單版次、相符來源聊天與工作樹才可移轉既有綁定，舊綁定另保存。
 
 預檢也會列出政策與最低 runtime 差異，以及目的地需同步的 Skill。對齊後執行 `attach --chat UUID`，工具會同步接收工作樹。用 `session status ORDER --live` 查實際宿主看到的 Skill、Hook 來源與信任。工單換 worktree 時先增加版次，在新 base 準備工作樹並登記新 chat，再核准及派工。舊版用 `work status ORDER --revision N` 回查。
 

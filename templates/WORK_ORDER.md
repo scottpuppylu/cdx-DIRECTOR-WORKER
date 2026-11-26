@@ -99,6 +99,8 @@ Standard 與 Strict 需鎖定驗收測試。用 `cdxdw work lock-tests --base <S
 
 有命令產出的交付檔時，可在同一個 `CDX_GATES` 物件加 `"artifact_path": "dist/product.zip"`，讓每次 `E2E_COMMAND` 都使用此相對路徑。總監以結果的 SHA-256 登記人工判定並執行 `final`。
 
+REVIEW 或 PO 條件若必須在多個環境通過，在同一個 `CDX_GATES` 物件加 `"environments": {"AC-2": ["windows", "wsl"]}`。環境 ID 用小寫英數、點、底線或連字號。每次用 `work record --ac AC-2 --environment-id windows ...` 登記該格的判定，同一條件的其他環境各自保留結果。
+
 ```text
 TESTS_LOCKED:
 - <repo 相對路徑> sha256=<64 位>

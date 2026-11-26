@@ -15,8 +15,8 @@ import gate_check
 from cdx_acceptance import (acceptance_lock, artifact_required, attempt, current_judgments, judgment_criteria,
                             latest_attempts, run_entry)
 from cdx_audit import check_report
-from cdx_delivery import (approve_integration, delivery_po_status, integration_approval, save_po_delivery,
-                          target_position)
+from cdx_delivery import (approve_integration, checked_retained, delivery_po_status, integration_approval,
+                          retain_output, save_po_delivery, target_position)
 from cdx_gates import feasibility, file_hash, invoke, pack_digest, policy, ruler_check, tail
 from cdx_common import (SHA, ROOT, THREAD_ID, VERSION, Refused, atomic_write, check_environment, checkout, common_dir,
                         detached_checkout, executor, git, git_environment, json_bytes,
@@ -38,7 +38,7 @@ def order_file_id(filename):
     return match[1]
 
 
-def order_spec(state, filename, source=None, *, location=None):
+def order_spec(state, filename, source=None, *, location=None, historical=False):
     file_id = order_file_id(filename)
     path = source or state_path(state, "orders", filename)
     data = path.read_bytes()
@@ -64,11 +64,12 @@ def order_spec(state, filename, source=None, *, location=None):
             raise Refused("Handoff worktree is not a canonical local path")
     else:
         worker_path = Path(field(text, "WORKTREE"))
-    if not worker_path.is_absolute() or (not location and Path(original_work) != work):
+    if not historical and (not worker_path.is_absolute() or (not location and Path(original_work) != work)):
         raise Refused(f"WORKTREE must be absolute, and WORK_DIR must be {work}")
     spec = {"order_id": order_id, "file": filename, "path": path, "text": text, "sha": digest,
             "revision": int(rev), "base": base, "branch": field(text, "NEW_BRANCH"), "work": work,
-            "checkout": worker_path.resolve(), "governance": field(text, "GOVERNANCE"), "gates": policy(text)}
+            "checkout": worker_path if historical and not location else worker_path.resolve(),
+            "governance": field(text, "GOVERNANCE"), "gates": policy(text)}
     if location:
         spec["handoff"] = location
     return spec
@@ -135,8 +136,19 @@ def desktop_chat(state, spec):
     return desktop_registration(state, spec).get("chat")
 
 
-def bind_desktop_chat(state, spec, chat, *, handoff=None):
+def desktop_binding(prior, record, source_worktree):
+    if any(prior.get(key) != record[key] for key in ("role", "source", "thread", "order")):
+        raise Refused("This Desktop chat is already bound to another role or checkout")
+    if prior.get("worktree") != record["worktree"] and (
+            not source_worktree or prior.get("worktree") != source_worktree or
+            prior.get("order_sha256") != record["order_sha256"]):
+        raise Refused("This Desktop chat is already bound to another role or checkout")
+
+
+def bind_desktop_chat(state, spec, chat, *, handoff=None, source_worktree=None, prepare=None):
     if chat is None:
+        if prepare:
+            prepare()
         return
     if not THREAD_ID.fullmatch(chat):
         raise Refused("Supply the UUID of the Desktop chat")
@@ -146,16 +158,19 @@ def bind_desktop_chat(state, spec, chat, *, handoff=None):
         record["handoff"] = handoff
     path = state_path(state, "sessions", f"{chat}.json")
     with lock(path.with_suffix(".lock")):
+        old = None
         if path.is_file():
-            prior = read_json(path)
-            if any(prior.get(key) != record[key] for key in ("role", "source", "thread", "order", "worktree")):
-                raise Refused("This Desktop chat is already bound to another role or checkout")
-            if prior == record:
-                return
-            if prior.get("order_sha256") != spec["sha"] and prior.get("order_sha256"):
-                archive = state_path(state, "sessions", "desktop-history", chat, prior["order_sha256"] + ".json")
-                atomic_write(archive, json_bytes(prior))
-        atomic_write(path, json_bytes(record))
+            old = path.read_bytes()
+            prior = json.loads(old.decode("utf-8-sig"))
+            desktop_binding(prior, record, source_worktree)
+            if prior != record:
+                archive = state_path(state, "sessions", "desktop-history", chat, hashlib.sha256(old).hexdigest() + ".json")
+                if not archive.is_file():
+                    atomic_write(archive, old)
+        if prepare:
+            prepare()
+        if old is None or prior != record:
+            atomic_write(path, json_bytes(record))
 
 
 def active_order(state, filename, *, location=None):
@@ -192,7 +207,10 @@ def historical_order(state, filename, revision):
     digest = gate_check.order_hash(snapshot.read_bytes())
     if snapshot.name != f"{order_id}-r{revision}-{digest}.md":
         raise Refused("Historical order snapshot fingerprint does not match")
-    return order_spec(state, filename, snapshot, location=handoff_location(state, order_id, digest))
+    log = state_path(state, "DIRECTOR_LOG.md").read_text(encoding="utf-8-sig")
+    if not any(gate_check.dispatch_records(line).get(order_id) == (str(revision), digest) for line in log.splitlines()):
+        raise Refused("Historical snapshot has no matching dispatch event")
+    return order_spec(state, filename, snapshot, location=handoff_location(state, order_id, digest), historical=True)
 
 
 def dispatch_check(state, spec):
@@ -777,6 +795,16 @@ def judgment(repo, state, spec, args):
             raise Refused("Each --ac needs a distinct criterion of the selected judgment kind")
         if len(criteria) > 1 and not chosen:
             raise Refused(f"Select the exact criteria with --ac: {', '.join(sorted(criteria))}")
+        matrix = spec.get("gates", {}).get("environments", {})
+        scoped = (chosen or criteria) & matrix.keys()
+        env_id = args.environment_id
+        if scoped:
+            env_id = env_id or args.environment.strip().casefold()
+            for ac in sorted(scoped):
+                if env_id not in matrix[ac]:
+                    raise Refused(f"{ac}: use --environment-id from {', '.join(matrix[ac])}")
+        elif env_id is not None:
+            raise Refused("--environment-id requires a criterion with declared environments")
         reply = {}
         if args.reply_file or args.reply_ref or (args.kind == "po" and spec.get("gates", {}).get("po_reply")):
             if args.kind != "po" or not args.reply_file or not (args.reply_ref or "").strip():
@@ -796,6 +824,7 @@ def judgment(repo, state, spec, args):
             with attempt(state, spec, args.candidate, kind, source="operator-recorded", actor=args.actor,
                          environment=args.environment, entry_point=args.entry, expected=args.expected,
                          observed=args.observed, artifact=args.artifact, criteria=sorted(chosen or criteria),
+                         **({"environment_id": env_id} if env_id else {}),
                          **reply) as record:
                 record["outcome"] = args.outcome
         print(json.dumps(record, ensure_ascii=False))
@@ -855,7 +884,7 @@ def integration_request(repo, args):
     if (not SHA.fullmatch(args.base) or not args.target.startswith(("refs/heads/", "refs/remotes/")) or
             git(repo, "rev-parse", "--verify", args.target + "^{commit}") != args.base):
         raise Refused("Pin the current full target ref and commit before integration")
-    command = json.loads(args.argv)
+    command = json.loads(args.argv_file.read_bytes() if getattr(args, "argv_file", None) else args.argv)
     if (not isinstance(command, list) or not command or
             not all(isinstance(part, str) and part.strip() and "\0" not in part for part in command)):
         raise Refused("Supply the approved integration entry point as a JSON argv array")
@@ -935,7 +964,8 @@ def run_integration(repo, state, args, members, command, series, *, delivery=Non
             result["head"] = head
             result["tree"] = git(worker, "rev-parse", "HEAD^{tree}")
             git(repo, "update-ref", f"refs/cdxdw/integrations/{integration}", head, "0" * len(head))
-            run_entry(repo, head, command, args.timeout, result, delivery_outputs=result["delivery"]["outputs"])
+            run_entry(repo, head, command, args.timeout, result, delivery_outputs=result["delivery"]["outputs"],
+                      delivery_state=state, build_context=result["delivery"].get("build_context", "snapshot"))
         if integration_stale(repo, state, result):
             result["outcome"] = "STALE"
         return 0 if result["outcome"] == "PASS" else 2
@@ -978,12 +1008,17 @@ def integration_stale(repo, state, result, landed_head=None):
     return False
 
 
-def integration_receipt(repo, state, identifier, expected_head=None, *, landed_head=None):
+def recorded_integration(state, identifier):
     if str(uuid.UUID(identifier)) != identifier:
         raise Refused("Use the integration UUID")
     result = read_json(state_path(state, "integrations", f"{identifier}.json"))
     if result.get("id") != identifier:
         raise Refused("Integration receipt ID does not match this attempt")
+    return result
+
+
+def integration_receipt(repo, state, identifier, expected_head=None, *, landed_head=None):
+    result = recorded_integration(state, identifier)
     if result["outcome"] == "PASS":
         if result.get("schema") not in (2, 3) or (
                 result["schema"] == 2 and any(row.get("artifact") for row in result["members"])):
@@ -1006,6 +1041,19 @@ def integration_receipt(repo, state, identifier, expected_head=None, *, landed_h
             result["outcome"] = "WRONG_DELIVERY_HEAD"
         else:
             result.update(target_head=current, delivery_state=position, po_delivery=delivery_po_status(state, result))
+    product = result.get("po_delivery", "NOT_RUN")
+    publication = {"state": "BLOCKED"}
+    if result["outcome"] != "PASS":
+        publication["reason"] = f"Integration is {result['outcome']}"
+    elif result.get("schema") == 3 and not result.get("approval"):
+        publication["reason"] = "Approve and rerun integration"
+    elif product not in ("PASS", "NOT_REQUIRED"):
+        publication["reason"] = f"Integrated product judgment is {product}"
+    elif result["delivery_state"] == "LANDING_PENDING":
+        publication["reason"] = "Land the verified delivery tree first"
+    else:
+        publication.update(state="CI_REQUIRED", reason="Verify current target-branch CI before publishing")
+    result["publication"] = publication
     return result
 
 
@@ -1013,6 +1061,18 @@ def integration_status(repo, state, identifier, expected_head=None):
     result = integration_receipt(repo, state, identifier, expected_head)
     print(json.dumps(result, ensure_ascii=False))
     return 0 if result["outcome"] == "PASS" else 2
+
+
+def delivery_file(state, args):
+    result = recorded_integration(state, args.id)
+    output = result.get("outputs", {}).get(args.asset)
+    if not output or result["outcome"] != "PASS":
+        raise Refused("Choose an output from a successful integration receipt")
+    if args.command == "import-delivery":
+        retain_output(state, args.id, args.asset, args.file, expected=output["sha256"])
+    path = checked_retained(state, args.id, args.asset, output)
+    print(json.dumps({"integration": args.id, "asset": args.asset, "path": str(path),
+                      "sha256": output["sha256"], "bytes": path.stat().st_size}, ensure_ascii=False))
 
 
 def order_status(repo, state, spec, candidate, artifact=None):
@@ -1031,7 +1091,7 @@ def order_status(repo, state, spec, candidate, artifact=None):
     prefix = f"refs/cdxdw/candidates/{spec['order_id']}"
     seals = git(repo, "for-each-ref", "--format=%(objectname)", prefix).splitlines()
     candidate = candidate or selected_candidate(state, spec)
-    desktop = desktop_registration(state, spec)
+    desktop = spec.get("handoff") or desktop_registration(state, spec)
     latest = latest_attempts(state, spec, candidate, artifact) if candidate else {}
     decisions = current_judgments(state, spec, candidate, artifact) if candidate else {}
     statuses = {kind: latest.get(kind, {}).get("outcome", "NOT_RUN")
@@ -1065,6 +1125,16 @@ def order_status(repo, state, spec, candidate, artifact=None):
     recorded = {"manual_e2e", "review", "po"} & latest.keys()
     needed = [kind for kind, status in statuses.items()
               if status != "PASS" and (kind in required or kind in recorded or kind.upper() in levels)]
+    open_criteria = sorted(ac for ac, record in decisions.items() if record["outcome"] != "PASS")
+    engineering = sorted(kind for kind in required | (recorded - {"review", "po"})
+                         if kind not in ("review", "po") and statuses[kind] != "PASS")
+    if not current:
+        product = "SUPERSEDED"
+    elif open_criteria:
+        product = "BLOCKED" if any(decisions[ac]["outcome"] not in ("NOT_RUN", "LEGACY_NEEDS_VERIFICATION")
+                                   for ac in open_criteria) else "PENDING"
+    else:
+        product = "PASS" if final and final["outcome"] == "PASS" else "PENDING"
     next_step = "Consult the active order revision for current work" if not current else (
         "Choose or seal a candidate") if not candidate else (
         "Resolve " + ", ".join(needed) if needed else
@@ -1077,9 +1147,12 @@ def order_status(repo, state, spec, candidate, artifact=None):
                       "resume": str(resume_location(state, spec)),
                       "sealed_plan": read_json(plan_binding) if plan_binding.is_file() else None,
                       "checkout": str(spec["checkout"]), "handoff": spec.get("handoff"),
+                      "source_checkout": field(spec["text"], "WORKTREE"), "source_work_dir": field(spec["text"], "WORK_DIR"),
                       "sealed_candidates": seals, "candidate": candidate, "artifact": artifact, "acceptance": statuses,
                       "criteria": {ac: {key: row.get(key) for key in ("kind", "outcome", "id", "reply_ref")}
                                    for ac, row in sorted(decisions.items())},
+                      "engineering": {"outcome": "PENDING" if engineering else "PASS", "unresolved": engineering},
+                      "product": {"outcome": product, "unresolved": open_criteria},
                       "final": final, "next": next_step}, ensure_ascii=False))
 
 
@@ -1183,6 +1256,7 @@ def main(argv=None):
             sub.add_argument("--chat", help="UUID of the Desktop chat for status and handoff")
         if command == "record":
             sub.add_argument("--ac", action="append", default=[], help="exact REVIEW or PO criterion, repeat as needed")
+            sub.add_argument("--environment-id", help="stable environment ID declared by this criterion")
             sub.add_argument("--reply-file", type=Path, help="UTF-8 file with the exact original PO reply")
             sub.add_argument("--reply-ref", help="original PO message reference")
             sub.add_argument("--kind", required=True, choices=("e2e", "review", "po"))
@@ -1203,7 +1277,9 @@ def main(argv=None):
     approval = commands.add_parser("approve-integration", help="pin the integration command and delivery contract")
     approval.add_argument("--target", required=True)
     approval.add_argument("--base", required=True)
-    approval.add_argument("--argv", required=True)
+    approval_entry = approval.add_mutually_exclusive_group(required=True)
+    approval_entry.add_argument("--argv")
+    approval_entry.add_argument("--argv-file", type=Path, help="JSON argv file (including for Windows PowerShell)")
     approval.add_argument("--delivery", type=Path, help="source or artifacts delivery JSON")
     approval.add_argument("--approved-by", required=True)
     integration = commands.add_parser("integrate", help="check an ordered combination of sealed candidates")
@@ -1211,7 +1287,9 @@ def main(argv=None):
     integration.add_argument("--base", required=True)
     integration.add_argument("--member", action="append", required=True)
     integration.add_argument("--member-artifact", action="append", default=[])
-    integration.add_argument("--argv", required=True, help="approved public entry command in JSON argv form")
+    integration_entry = integration.add_mutually_exclusive_group(required=True)
+    integration_entry.add_argument("--argv", help="approved public entry command in JSON argv form")
+    integration_entry.add_argument("--argv-file", type=Path, help="JSON argv file")
     integration.add_argument("--approval", help="fingerprint from approve-integration")
     integration.add_argument("--timeout", type=int, default=180)
     integration_check = commands.add_parser("integration-status")
@@ -1223,6 +1301,12 @@ def main(argv=None):
     po_delivery.add_argument("--actor", required=True)
     po_delivery.add_argument("--reply-file", required=True, type=Path)
     po_delivery.add_argument("--reply-ref", required=True)
+    for command in ("delivery-file", "import-delivery"):
+        deliver = commands.add_parser(command, help="locate retained output or import an exact previously accepted file")
+        deliver.add_argument("id")
+        deliver.add_argument("--asset", required=True)
+        if command == "import-delivery":
+            deliver.add_argument("--file", type=Path, required=True)
     tests = commands.add_parser("lock-tests", help="hash the tests as stored in the baseline commit")
     tests.add_argument("--base", required=True)
     tests.add_argument("paths", nargs="+")
@@ -1237,6 +1321,9 @@ def main(argv=None):
             return 0
         _, state, project = load_project(args.repo)
         repo = Path(project["repo"])
+        if args.command in ("delivery-file", "import-delivery"):
+            delivery_file(state, args)
+            return 0
         if args.command == "lock-brief":
             lock_brief(state)
             print("CDX_WORK BRIEF_LOCKED")

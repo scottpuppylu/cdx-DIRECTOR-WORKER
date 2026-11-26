@@ -15,7 +15,7 @@ import tempfile
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from cdx_common import (POINTER, ROOT, STATE_SCHEMA, VERSION, Refused, atomic_write, checkout, common_dir, git, json_bytes,
                         lock, primary_checkout, read_json, report_error, stamp, state_path, within)
-from cdx_manifest import checked_files
+from cdx_manifest import NAME, checked_files
 
 
 BEGIN, END = b"<!-- cdx:begin -->", b"<!-- cdx:end -->"
@@ -184,8 +184,17 @@ def plan(args, target=None):
         data["mode"] = mode
         files.append((config, json_bytes(data)))
     files.append((state_path(state, "cdxdw.py"), bundle[ROOT / "tools" / "cdx_launcher.py"]))
+    provenance = {"manifest_sha256": hashlib.sha256(bundle[ROOT / NAME]).hexdigest(), "source": "bundle"}
+    if (ROOT / ".git").exists():
+        provenance.update(source="checkout", checkout_head=git(ROOT, "rev-parse", "HEAD"))
+        tag = f"v{version}"
+        if (not git(ROOT, "status", "--porcelain", "--untracked-files=no") and
+                tag in git(ROOT, "tag", "--points-at", "HEAD").splitlines()):
+            provenance["source_tag"] = tag
+    if existing and existing["version"] == version and "provenance" in existing:
+        provenance = existing["provenance"]
     metadata = {"schema": STATE_SCHEMA, "git_common_dir": str(common), "repo": str(repo), "kit": str(kit),
-                "version": version, "mode": mode, "hooks": use_hooks, "managed_skills": manifest}
+                "version": version, "mode": mode, "hooks": use_hooks, "managed_skills": manifest, "provenance": provenance}
     return state, owner, pointer, metadata, files
 
 

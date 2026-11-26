@@ -10,8 +10,9 @@ from pathlib import Path
 
 import evidence_record
 import gate_check
+from cdx_delivery import retain_output
 from cdx_gates import cpu_checks, feasibility, ruler_check
-from cdx_common import (ROOT, SHA, Refused, atomic_write, check_environment, executor, git_environment, json_bytes,
+from cdx_common import (ROOT, SHA, Refused, atomic_write, check_environment, executor, git, git_environment, json_bytes,
                         lock, read_json, stamp, state_path)
 
 # Keep the upstream tree materializer on the same Git environment as cdxdw.
@@ -87,7 +88,9 @@ def current_judgments(state, spec, candidate, artifact):
     required = {kind: judgment_criteria(spec, kind) for kind in ("review", "po")}
     if spec.get("gates", {}).get("po_reply") and not required["po"]:
         required["po"] = {"po"}
-    decisions = {ac: {"kind": kind, "outcome": "NOT_RUN"} for kind, criteria in required.items() for ac in criteria}
+    matrix = spec.get("gates", {}).get("environments", {})
+    decisions = {ac if env is None else f"{ac}@{env}": {"kind": kind, "outcome": "NOT_RUN"}
+                 for kind, criteria in required.items() for ac in criteria for env in matrix.get(ac, [None])}
     for row in data["attempts"]:
         kind = row["kind"]
         if kind not in required or row.get("artifact") != artifact:
@@ -96,11 +99,23 @@ def current_judgments(state, spec, candidate, artifact):
         covered = row.get("criteria")
         if not covered and len(criteria) > 1:
             for ac in criteria:
-                decisions[ac] = dict(row, outcome="LEGACY_NEEDS_VERIFICATION")
+                for env in matrix.get(ac, [None]):
+                    decisions[ac if env is None else f"{ac}@{env}"] = dict(row, outcome="LEGACY_NEEDS_VERIFICATION")
             continue
         for ac in covered or criteria or {kind}:
             if ac in criteria or (not criteria and ac == kind):
-                decisions[ac] = row
+                environments = matrix.get(ac)
+                if not environments:
+                    decisions[ac] = row
+                    continue
+                env = row.get("environment_id") or (row.get("environment") or "").strip().casefold()
+                if env in environments:
+                    decisions[f"{ac}@{env}"] = row
+                else:
+                    for environment in environments:
+                        cell = f"{ac}@{environment}"
+                        if decisions[cell]["outcome"] == "NOT_RUN":
+                            decisions[cell] = dict(row, outcome="LEGACY_NEEDS_VERIFICATION")
     return decisions
 
 
@@ -133,7 +148,8 @@ def run_plan(repo, candidate, plan, record, stdout=None):
 
 
 def run_entry(repo, candidate, command, timeout, record, artifact_path=None, *, plan=None, gates=None,
-              input_root=None, preflight_only=False, delivery_outputs=()):
+              input_root=None, preflight_only=False, delivery_outputs=(), delivery_state=None,
+              build_context="snapshot"):
     if not preflight_only and (not command or not all(isinstance(arg, str) and arg.strip() and "\0" not in arg
                                                     for arg in command)):
         raise Refused("The entry point must be an argv array")
@@ -143,9 +159,16 @@ def run_entry(repo, candidate, command, timeout, record, artifact_path=None, *, 
         record["outcome"] = "INVALID"
         return
     with tempfile.TemporaryDirectory(prefix="cdxdw-e2e-") as directory:
-        root = Path(directory)
+        root = Path(directory).resolve()
         try:
-            evidence_record.materialize(repo, candidate, root)
+            if build_context == "git":
+                git(root, "init", "--template=")
+                git(root, "config", "core.hooksPath", str(root.parent / f"{root.name}-no-hooks"))
+                git(root, "config", "core.autocrlf", "false")
+                git(root, "fetch", "--tags", "--", str(repo), candidate)
+                git(root, "checkout", "--detach", candidate)
+            else:
+                evidence_record.materialize(repo, candidate, root)
         except evidence_record.Refused as error:
             raise Refused(str(error)) from error
         if gates:
@@ -161,7 +184,16 @@ def run_entry(repo, candidate, command, timeout, record, artifact_path=None, *, 
         if preflight_only:
             record["outcome"] = "PASS"
             return
-        result = subprocess.run(command, cwd=root, env=check_environment(), timeout=timeout, capture_output=True)
+        environment = check_environment()
+        if delivery_state is not None:
+            environment.update(CDX_DELIVERY_COMMIT=candidate, CDX_DELIVERY_TREE=record["tree"])
+            version = state_path(root, "VERSION")
+            if version.is_file():
+                value = version.read_text(encoding="utf-8-sig").strip()
+                if len(value) < 4096 and "\0" not in value:
+                    environment["CDX_DELIVERY_VERSION"] = value
+            record["build_context"] = build_context
+        result = subprocess.run(command, cwd=root, env=environment, timeout=timeout, capture_output=True)
         if result.returncode == 0 and artifact_path:
             if Path(artifact_path).is_absolute():
                 raise Refused("Artifact path must be relative to the candidate")
@@ -175,7 +207,8 @@ def run_entry(repo, candidate, command, timeout, record, artifact_path=None, *, 
                 if not path.is_file():
                     record.setdefault("missing_outputs", []).append(output["path"])
                     continue
-                outputs[output["asset"]] = dict(output, sha256=evidence_record.hash_file(path))
+                asset = output["asset"]
+                outputs[asset] = dict(output, **retain_output(delivery_state, record["id"], asset, path))
             record["outputs"] = outputs
     for stream in ("stdout", "stderr"):
         raw = getattr(result, stream)

@@ -15,6 +15,7 @@ from cdx_common import ROOT, Refused, check_environment, git, json_bytes, state_
 
 FILE = re.compile(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*")
 DIGEST = re.compile(r"[0-9a-f]{64}")
+ENVIRONMENT = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 
 
 def relative_file(name):
@@ -32,7 +33,7 @@ def policy(text):
         raise Refused("Work order needs at most one CDX_GATES field")
     data = json.loads(fields[0])
     if not isinstance(data, dict) or data.keys() - {"feasibility", "pre_tr", "ruler", "pack", "po_reply", "audit",
-                                                   "artifact_path"}:
+                                                   "artifact_path", "environments"}:
         raise Refused("CDX_GATES has an unknown field")
     for key in ("feasibility", "po_reply", "audit"):
         if key in data and type(data[key]) is not bool:
@@ -44,6 +45,15 @@ def policy(text):
         ruler_args(data["ruler"])
     if "artifact_path" in data and not re.search(r"^[ \t]*E2E_COMMAND[ \t]*=", text, re.M):
         raise Refused("artifact_path requires a pinned E2E_COMMAND")
+    environments = data.get("environments", {})
+    criteria = gate_check.ac_table(text)
+    if not isinstance(environments, dict):
+        raise Refused("environments must map REVIEW or PO criteria to lists of environment IDs")
+    for ac, values in environments.items():
+        if (criteria.get(ac, {}).get("type") not in ("REVIEW", "PO") or not isinstance(values, list) or not values or
+                not all(isinstance(value, str) and ENVIRONMENT.fullmatch(value) for value in values) or
+                len(set(values)) != len(values)):
+            raise Refused(f"{ac}: environments need distinct lowercase IDs on a REVIEW or PO criterion")
     return data
 
 

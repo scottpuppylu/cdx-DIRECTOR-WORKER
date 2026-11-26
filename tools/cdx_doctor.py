@@ -11,6 +11,8 @@ import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from cdx_common import ROOT, STATE_SCHEMA, Refused, executing_version, load_project, report_error, state_path
+from cdx_gates import file_hash
+from cdx_manifest import NAME
 from cdx_rpc import AppServer
 
 
@@ -80,7 +82,10 @@ def main(argv=None):
                    "executing_version": executing_version(), "active_version": project["version"],
                    "minimum_write_version": project["version"] if project["schema"] == STATE_SCHEMA else None,
                    "schema": project["schema"], "launcher": str(state / "cdxdw.py"),
-                   "missing": missing, "hooks_configured": project["hooks"], "codex": None, "sandbox": "NOT_PROBED"}
+                   "missing": missing, "hooks_configured": project["hooks"], "codex": None, "sandbox": "NOT_PROBED",
+                   "provenance": project.get("provenance"), "expected_release_tag": f"v{project['version']}",
+                   "manifest_sha256": file_hash(kit / NAME) if (kit / NAME).is_file() else None,
+                   "tool_paths": {name: shutil.which(name) for name in ("git", "gh", "ps")}}
         if codex:
             summary["codex"] = subprocess.check_output([codex, "--version"], encoding="utf-8", timeout=15).strip()
         if args.live or args.probe_sandbox:

@@ -9,13 +9,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 from urllib.parse import urlencode
 from zipfile import BadZipFile, ZipFile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import release
 from cdx_common import SHA, Refused, atomic_write, git, json_bytes, load_project, read_json, report_error, stamp, state_path
-from cdx_delivery import ASSET, delivery_spec
+from cdx_delivery import ASSET, checked_retained, delivery_spec
 from cdx_work import integration_receipt
 
 
@@ -71,6 +72,9 @@ def check_ci(repo, slug, head, run_id, policy, artifact_sha256=None, *, branch=N
     jobs = [job for page in github(jobs_url, pages=True) for job in page["jobs"]]
     for name in required:
         found = [job for job in jobs if job.get("name") == name]
+        if not found and attempt > 1:
+            raise Refused(f"Missing passing job at this exact SHA: {name}. Rerun all workflow jobs; delivery "
+                          "requires each required job in the same attempt.")
         if (len(found) != 1 or found[0].get("status") != "completed" or
                 found[0].get("conclusion") != "success" or found[0].get("head_sha") != head):
             raise Refused(f"Missing passing job at this exact SHA: {name}")
@@ -110,7 +114,7 @@ def stream_digest(handle):
     return digest.hexdigest()
 
 
-def verify_delivery_archive(proof, receipt, archive_file, policy, *, staged=None):
+def verify_delivery_archive(proof, receipt, archive_file, policy, *, staged=None, state=None):
     members = {row["order"]: row["artifact"] for row in proof["members"] if row.get("artifact")}
     archive_sha = receipt.get("artifact", {}).get("sha256")
     delivery = delivery_spec(proof.get("delivery", {"mode": "source"}))
@@ -124,7 +128,18 @@ def verify_delivery_archive(proof, receipt, archive_file, policy, *, staged=None
             raise Refused("Integrated output does not match the approved delivery contract")
     if archive_file is None:
         if final_outputs:
-            raise Refused("Provide the attested CI archive for the integrated final outputs")
+            if delivery.get("artifact_source") != "retained" or state is None or archive_sha or members:
+                raise Refused("Provide the attested CI archive for the integrated final outputs")
+            outputs = {}
+            for name, output in final_outputs.items():
+                path = checked_retained(state, proof["id"], name, output)
+                if staged is not None:
+                    shutil.copyfile(path, staged / name)
+                    with (staged / name).open("rb") as asset:
+                        if stream_digest(asset) != output["sha256"]:
+                            raise Refused(f"Retained asset changed while staging: {name}")
+                outputs[name] = {"path": path.relative_to(state).as_posix(), "sha256": output["sha256"]}
+            return {"final_outputs": outputs, "artifact_source": "retained"}
         if any(digest != archive_sha for digest in members.values()):
             raise Refused("Provide the attested CI archive and artifact_members for the accepted build outputs")
         return {order: {"sha256": digest} for order, digest in members.items()}
@@ -207,7 +222,7 @@ def check_delivery(repo, state, job, args, policy, *, staged=None):
         git(repo, "check-ref-format", f"refs/heads/{branch}")
     receipt = check_ci(repo, slug, head, args.ci_run, policy, args.artifact, branch=branch)
     outputs = verify_delivery_archive(proof, receipt, args.archive, policy,
-                                      staged=staged if not args.push_only and args.execute else None)
+                                      staged=staged if not args.push_only and args.execute else None, state=state)
     if (job.head() != head or integration_receipt(repo, state, args.integration, landed_head=landed) != proof):
         raise Refused("Delivery evidence changed during verification")
     job.delivery_head, job.delivery_base = head, proof["base"] if args.push_only else head
@@ -215,16 +230,22 @@ def check_delivery(repo, state, job, args, policy, *, staged=None):
         def recheck():
             if job.head() != head or integration_receipt(repo, state, args.integration, landed_head=head) != proof:
                 raise Refused("Delivery evidence changed before publication")
+            if check_ci(repo, slug, head, args.ci_run, policy, args.artifact, branch=branch) != receipt:
+                raise Refused("CI run or attempt changed before publication")
         job.delivery_recheck = recheck
         ci_url = f"https://github.com/{slug}/actions/runs/{args.ci_run}"
         job.notes += f"\n\n已驗證交付提交 `{head}`。 [目標分支 CI]({ci_url})\n"
         for name, output in outputs.get("final_outputs", {}).items():
             job.delivery_assets[name] = {"sha256": output["sha256"], "path": staged / name if staged else None}
             job.notes += f"\n- `{name}` 的 SHA-256 為 `{output['sha256']}`。"
-    proof_path = state_path(state, "delivery", head, f"{args.ci_run}-{receipt['run_attempt']}.json")
+    validation = str(uuid.uuid4())
+    stage = ("push" if args.push_only else "publish") if args.execute else ("preview-push" if args.push_only else "preview-publish")
+    proof_path = state_path(state, "delivery", head, "checks", f"{validation}.json")
     evidence = dict(receipt, integration=args.integration, checked=stamp(), integration_head=proof["head"],
-                    stage="push" if args.push_only else "publish", outputs=outputs)
+                    id=validation, stage=stage, outputs=outputs)
     atomic_write(proof_path, json_bytes(evidence))
+    latest = state_path(state, "delivery", head, "latest", f"{args.integration}-{args.ci_run}-{stage}.json")
+    atomic_write(latest, json_bytes({"id": validation, "receipt": proof_path.relative_to(state).as_posix()}))
     print("CDX_DELIVERY " + json.dumps(dict(evidence, receipt=str(proof_path)), ensure_ascii=False))
 
 

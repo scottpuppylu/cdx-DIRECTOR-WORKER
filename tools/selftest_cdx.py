@@ -26,8 +26,9 @@ import cdx_review
 import cdx_session
 import audit_log
 import gate_check
-from cdx_acceptance import attempt
+from cdx_acceptance import attempt, run_entry
 from cdx_common import ROOT, Refused, atomic_write, git, json_bytes, load_project, lock, read_json
+from cdx_delivery import delivery_spec
 from cdx_usage import summarize_app
 from cdx_work import integration_series, order_spec, run_integration
 
@@ -187,7 +188,8 @@ FEASIBILITY: FEASIBLE
         failure = json.loads(self.run_script(*handoff, "verify", manifest, "--worktree", peer, code=2))
         self.assertEqual(failure["checkout_mismatches"], ["untracked"])
         text(peer / "notes.txt", "uncommitted fixture note\n")
-        attached = json.loads(self.run_script(*handoff, "attach", manifest, "--worktree", peer))
+        chat = str(uuid.uuid4())
+        attached = json.loads(self.run_script(*handoff, "attach", manifest, "--worktree", peer, "--chat", chat))
         self.assertEqual(attached["outcome"], "ATTACHED")
         status = json.loads(self.work(repo, "status", name))
         self.assertEqual(status["checkout"], str(peer))
@@ -224,9 +226,15 @@ FEASIBILITY: FEASIBLE
         self.run_script(*command, "attach", moved_manifest, "--worktree", linked, code=2)
         self.assertFalse((receiving / "work" / "WO-001" / "HANDOFF.json").exists())
         receiving_reply.write_bytes(raw)
-        chat = str(uuid.uuid4())
+        occupied = str(uuid.uuid4())
+        atomic_write(receiving / "sessions" / f"{occupied}.json", json_bytes({"role": "director"}))
+        wrong_chat = json.loads(self.run_script(*command, "verify", moved_manifest, "--worktree", linked,
+                                                "--chat", occupied, code=2))
+        self.assertIn("already bound", wrong_chat["chat_mismatch"])
         self.run_script(*command, "attach", moved_manifest, "--worktree", linked, "--chat", chat)
         self.run_script(*command, "attach", moved_manifest, "--worktree", linked, "--chat", chat)
+        prior, = (receiving / "sessions" / "desktop-history" / chat).glob("*.json")
+        self.assertEqual(read_json(prior)["worktree"], str(peer))
         self.assertEqual(read_json(receiving / "sessions" / f"{chat}.json")["worktree"], str(linked))
         received_status = json.loads(self.work(clone, "status", name))
         self.assertEqual(received_status["checkout"], str(linked))
@@ -270,6 +278,9 @@ FEASIBILITY: FEASIBLE
             with self.assertRaisesRegex(Refused, "expected GitHub digest"):
                 cdx_release.check_ci(repo, slug, head, 17, dict(policy, artifact_name="build"), "b" * 64)
         rerun = dict(meta, run_attempt=2)
+        with patch.object(cdx_release, "github", side_effect=[rerun, [{"jobs": []}]]):
+            with self.assertRaisesRegex(Refused, "Rerun all workflow jobs"):
+                cdx_release.check_ci(repo, slug, head, 17, policy)
         attempt_artifact = dict(artifact, name="build-attempt-2")
         with patch.object(cdx_release, "github", side_effect=[rerun, [{"jobs": [row]}],
                 {"workflow_runs": [rerun]}, [{"artifacts": [attempt_artifact]}]]):
@@ -310,6 +321,82 @@ FEASIBILITY: FEASIBLE
         staged.mkdir()
         cdx_release.verify_delivery_archive(proof, receipt, bundle, policy, staged=staged)
         self.assertEqual((staged / "product.txt").read_bytes(), product)
+
+    def test_delivery_checks_preserve_attempts_and_recheck_before_publication(self):
+        repo = self.git_project("publication history")
+        git(repo, "commit", "--allow-empty", "-m", "Delivery base")
+        base = git(repo, "rev-parse", "HEAD")
+        git(repo, "commit", "--allow-empty", "-m", "Delivery candidate")
+        head = git(repo, "rev-parse", "HEAD")
+        git(repo, "remote", "add", "origin", "https://github.com/example/fixture.git")
+        git(repo, "update-ref", "refs/remotes/origin/main", head)
+        state = self.root / "receipts"
+        state.mkdir()
+        receipt = {"run_id": 17, "run_attempt": 1, "artifact": {}, "head": head}
+        ids = [str(uuid.uuid4()), str(uuid.uuid4())]
+        for identifier in ids:
+            proof = {"id": identifier, "schema": 3, "outcome": "PASS", "po_delivery": "NOT_REQUIRED",
+                     "members": [], "base": base, "target": "refs/heads/main", "head": head, "approval": "accepted"}
+            job = SimpleNamespace(head=lambda: head, remote="origin", branch="main", config={}, notes="", delivery_assets={})
+            args = SimpleNamespace(head=head, integration=identifier, push_only=False, ci_run=17, artifact=None,
+                                   archive=None, execute=False)
+            with patch.object(cdx_release, "check_ci", side_effect=[receipt, dict(receipt, run_attempt=2)]):
+                with patch.object(cdx_release, "integration_receipt", return_value=proof):
+                    cdx_release.check_delivery(repo, state, job, args, {})
+                    with self.assertRaisesRegex(Refused, "changed before publication"):
+                        job.delivery_recheck()
+        directory = state / "delivery" / head
+        records = [read_json(path) for path in (directory / "checks").glob("*.json")]
+        self.assertEqual({row["integration"] for row in records}, set(ids))
+        self.assertTrue(all(row["stage"] == "preview-publish" for row in records))
+        self.assertEqual(len(list((directory / "latest").glob("*.json"))), 2)
+
+    def test_retained_outputs_keep_the_exact_git_build(self):
+        repo = self.git_project("isolated git build")
+        text(repo / "VERSION", "fixture.1\n")
+        text(repo / "build.py", "import os, subprocess, uuid\nfrom pathlib import Path\n"
+             "head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()\n"
+             "tag = subprocess.check_output(['git', 'describe', '--tags', '--always'], text=True).strip()\n"
+             "assert head == os.environ['CDX_DELIVERY_COMMIT'] and tag == 'test-1'\n"
+             "assert os.environ['CDX_DELIVERY_VERSION'] == 'fixture.1'\n"
+             "Path('delivery').mkdir()\n"
+             "Path('delivery/成果 export.txt').write_text(head + '\\n' + str(uuid.uuid4()), encoding='utf-8')\n")
+        git(repo, "add", ".")
+        git(repo, "commit", "-m", "Recorded build context")
+        git(repo, "tag", "test-1")
+        head = git(repo, "rev-parse", "HEAD")
+        tree = git(repo, "rev-parse", "HEAD^{tree}")
+        state = self.root / "private evidence"
+        state.mkdir()
+        staged = self.root / "verified assets"
+        staged.mkdir()
+        name = "product.txt"
+        spec = delivery_spec({"mode": "artifacts", "artifact_source": "retained", "build_context": "git",
+                              "outputs": [{"path": "delivery/成果 export.txt", "ci_path": "報告/成品 export.txt",
+                                           "asset": name}]})
+        receipts = []
+        for _ in range(2):
+            record = {"id": str(uuid.uuid4()), "tree": tree, "delivery": spec, "members": []}
+            run_entry(repo, head, [sys.executable, "-I", "-B", "build.py"], 20, record,
+                      delivery_outputs=spec["outputs"], delivery_state=state, build_context="git")
+            self.assertEqual(record["outcome"], "PASS", record.get("stderr"))
+            receipts.append(record)
+        first, second = [record["outputs"][name] for record in receipts]
+        original = state / first["retained"]
+        self.assertNotEqual(first["sha256"], second["sha256"])
+        self.assertEqual(original.read_bytes().splitlines()[0], head.encode())
+        self.assertEqual(original.stat().st_size, first["bytes"])
+        self.assertEqual(git(repo, "status", "--porcelain"), "")
+        result = cdx_release.verify_delivery_archive(receipts[0], {}, None, {}, staged=staged, state=state)
+        self.assertEqual(result["artifact_source"], "retained")
+        self.assertEqual((staged / name).read_bytes(), original.read_bytes())
+        original.write_bytes(b"changed")
+        with self.assertRaisesRegex(Refused, "missing or differs"):
+            cdx_release.verify_delivery_archive(receipts[0], {}, None, {}, state=state)
+        for key, value in (("path", "../file.txt"), ("ci_path", "file:stream"), ("asset", "成品.txt")):
+            contract = {"mode": "artifacts", "outputs": [dict(spec["outputs"][0], **{key: value})]}
+            with self.assertRaisesRegex(Refused, key):
+                delivery_spec(contract)
 
     def test_existing_release_draft_is_published_before_completion(self):
         release = cdx_release.release
@@ -705,6 +792,7 @@ ACCEPTANCE:
             work = state / "work" / order_id
             human_rows = ("| AC-2 | PO | First result | Open entry | correct |\n"
                           "| AC-3 | PO | Output format | Open entry | correct |") if index == 1 else ""
+            environments = 'CDX_GATES = {"environments": {"AC-2": ["windows", "wsl"]}}\n' if index == 1 else ""
             text(state / "orders" / name, f"""# {order_id} — check capacity
 ISSUED_BY = director 2026-01-02 10:00
 REVISION = 1
@@ -717,7 +805,7 @@ BASE_REF = main @ {base}
 NEW_BRANCH = codex/{order_id}
 WORKTREE = {worker}
 WORK_DIR = {work}
-E2E_COMMAND = {json.dumps(entry)}
+{environments}E2E_COMMAND = {json.dumps(entry)}
 
 SCOPE:
 - {filename}
@@ -758,13 +846,20 @@ CHECKS:
                        "--actor", "fixture-po", "--environment", "fixture", "--entry", "product",
                        "--expected", "correct", "--observed", "checked")
         self.work(repo, *observation, "--outcome", "CHANGES_REQUESTED", "--ac", "AC-3")
-        self.work(repo, *observation, "--outcome", "PASS", "--ac", "AC-2")
+        self.work(repo, *observation, "--outcome", "CHANGES_REQUESTED", "--ac", "AC-2", "--environment-id", "windows")
+        self.work(repo, *observation, "--outcome", "PASS", "--ac", "AC-2", "--environment-id", "wsl")
         blocked = ("integrate", "--target", "refs/heads/main", "--base", base, *member_args[:2],
                    "--argv", json.dumps(entry))
-        self.assertIn("AC-3", self.work(repo, "final", first_order, "--candidate", first_head, code=2))
+        self.assertIn("AC-2@windows", self.work(repo, "final", first_order, "--candidate", first_head, code=2))
+        self.assertIn("AC-2@windows", self.work(repo, *blocked, code=2))
+        status = json.loads(self.work(repo, "status", first_order))
+        criteria = status["criteria"]
+        self.assertEqual(criteria["AC-2@windows"]["outcome"], "CHANGES_REQUESTED")
+        self.assertEqual(criteria["AC-2@wsl"]["outcome"], "PASS")
+        self.assertEqual(status["engineering"]["outcome"], "PASS")
+        self.assertEqual(status["product"]["outcome"], "BLOCKED")
+        self.work(repo, *observation, "--outcome", "PASS", "--ac", "AC-2", "--environment-id", "windows")
         self.assertIn("AC-3", self.work(repo, *blocked, code=2))
-        criteria = json.loads(self.work(repo, "status", first_order))["criteria"]
-        self.assertEqual((criteria["AC-2"]["outcome"], criteria["AC-3"]["outcome"]), ("PASS", "CHANGES_REQUESTED"))
         self.work(repo, *observation, "--outcome", "PASS", "--ac", "AC-3")
         single = json.loads(self.work(repo, "integrate", "--target", "refs/heads/main", "--base", base,
                                       *member_args[:2], "--argv", json.dumps(entry)))
@@ -801,7 +896,9 @@ CHECKS:
             approved = json.loads(self.work(repo, "approve-integration", "--target", "refs/heads/main", "--base",
                                            base, "--argv", json.dumps([*entry[:-1], "4"]), "--approved-by", "fixture"))
             self.work(repo, *observation, "--outcome", "PASS", "--artifact", built["artifact"], "--ac", "AC-2",
-                      "--ac", "AC-3")
+                      "--ac", "AC-3", "--environment-id", "windows")
+            self.work(repo, *observation, "--outcome", "PASS", "--artifact", built["artifact"], "--ac", "AC-2",
+                      "--environment-id", "wsl")
             with_artifact = json.loads(self.work(repo, *common, json.dumps([*entry[:-1], "4"]),
                                                  "--member-artifact", f"{first['filename']}={built['artifact']}",
                                                  "--approval", approved["approval"]))

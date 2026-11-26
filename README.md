@@ -2,7 +2,7 @@
 
 **cdxdw** 是 DIRECTOR-WORK v2.6.0 的獨立 Codex 版。你說明要做什麼和怎麼算完成。Codex 總監把工作交給隔離的工作線，最後拿可試用的候選和驗收證據回來。中斷後可從工單、工作樹和紀錄接回。
 
-**目前正式版是 `v2.6.0-cdx.9`。** 日常使用請從正式發行下載 `cdxdw-kit.zip`，解壓到產品 repo 以外。要從 Git 安裝，可 checkout 相同的發行 tag。 [下載安裝包](https://github.com/scottpuppylu/cdx-DIRECTOR-WORKER/releases/download/v2.6.0-cdx.9/cdxdw-kit.zip) · [正式發行](https://github.com/scottpuppylu/cdx-DIRECTOR-WORKER/releases/tag/v2.6.0-cdx.9) · [版本紀錄](CHANGELOG.md)
+**目前正式版是 `v2.6.0-cdx.10`。** 日常使用請從正式發行下載 `cdxdw-kit.zip`，解壓到產品 repo 以外。要從 Git 安裝，可 checkout 相同的發行 tag。 [下載安裝包](https://github.com/scottpuppylu/cdx-DIRECTOR-WORKER/releases/download/v2.6.0-cdx.10/cdxdw-kit.zip) · [正式發行](https://github.com/scottpuppylu/cdx-DIRECTOR-WORKER/releases/tag/v2.6.0-cdx.10) · [版本紀錄](CHANGELOG.md)
 
 第一次使用，**在 Codex 開啟要開發的專案 → 貼啟動提示詞 → 選模式**。已有 cdxdw 專案可直接使用續航提示詞。
 
@@ -11,7 +11,7 @@
 | 第一次讓 Codex 帶專案 | [啟動提示詞](#方法一在-codex-貼上啟動提示詞) · [手動安裝](#方法二手動安裝到指定專案) |
 | 已經在用 cdxdw | [續航提示詞](#可直接貼的續航提示詞) · [換工作樹或主機](#desktop-工作線交接) · [升級與回復](#升級與回復) |
 | 操作工單、驗收或發版 | [從交辦到驗收](#從交辦到驗收) · [受控發版](#受控發版) · [指令速查](#指令速查) |
-| 比較平台與確認適用範圍 | [同系列比較](#codex-特化與同系列比較) · [防護與證據](#防護與證據怎麼讀) · [`.9` 驗證與限制](#驗證與已知限制) |
+| 比較平台與確認適用範圍 | [同系列比較](#codex-特化與同系列比較) · [防護與證據](#防護與證據怎麼讀) · [驗證與限制](#驗證與已知限制) |
 
 ## 第一次讓 Codex 做專案
 
@@ -74,7 +74,7 @@ https://github.com/scottpuppylu/cdx-DIRECTOR-WORKER
 
 1. 優先用我提供的套件或指定版本。新安裝未指定時，從 GitHub Releases 取正式 cdxdw-kit.zip，或 checkout 對應 tag。
    把套件放在產品 repo 以外、已可寫的目錄，記下 VERSION 與來源 tag。使用指定 Git 提交時記完整 SHA。
-   不要把規則包下載到產品 repo 內。網路或路徑受沙箱限制時，說明需要的路徑或下載動作，保留其餘可做的唯讀工作。
+   規則包放在產品 repo 以外。網路或路徑受限時，說明欠缺的路徑或下載動作。小白模式可先和我談不依賴檔案的需求，保留安裝待辦。
    讀 README.md、PURPOSE.md、BOOTSTRAP.md。一般模式讀 docs/ 01 到 13（含 06b）。
    小白模式先讀 01、03、06、08、11、12，選好模式的同一輪就問「給誰用、要做什麼、第一版怎麼試」，
    需求先留在聊天或已有狀態，先不改產品 repo。其餘規則在派第一張工單前讀完。
@@ -93,14 +93,15 @@ https://github.com/scottpuppylu/cdx-DIRECTOR-WORKER
 
 4. 初衷核准後鎖定 BRIEF.md。取得首批開工同意，再依工單建立或登記隔離工作樹，審過規格與計畫才施工。
    每張工單寫清楚初衷條目、完整 base、可改範圍、逐項 AC 及公開入口。需要換版時增加 REVISION，保留舊工單與斷點。
-   交件附封存候選、工件或整合 SHA、可重走的產品入口、獨立重跑與審查。逐項標出通過、退件與待我判定的條件。
+   交件附封存候選、工件或整合 SHA、可重走的產品入口、獨立重跑與審查。逐項列出通過、退件和待我判定的條件，有必驗環境時逐環境列出。
+   若產品有建置檔，從整合收據取得實際驗過的原件，讓我試用同一份。
    依我的實際回覆登記 PO 判定。要發布時，先確認會發布的版本及資產，依授權走受控發版。
    採用本專案既有指示和我的要求，並把衝突與未驗證的部分寫入回報。
 ```
 
 ### 方法二：手動安裝到指定專案
 
-在產品專案以外解壓正式安裝包，或執行 `git clone --branch v2.6.0-cdx.9 https://github.com/scottpuppylu/cdx-DIRECTOR-WORKER.git` 取得同版原始碼。在 **cdxdw 套件根目錄**執行下列指令，將 `$project` 換成產品 Git 專案**主 checkout** 的完整路徑。第一個 `setup` 是預覽，確認專案與狀態目錄後再加 `--apply`。
+在產品專案以外解壓正式安裝包，或執行 `git clone --branch v2.6.0-cdx.10 https://github.com/scottpuppylu/cdx-DIRECTOR-WORKER.git` 取得同版原始碼。在 **cdxdw 套件根目錄**執行下列指令，將 `$project` 換成產品 Git 專案**主 checkout** 的完整路徑。第一個 `setup` 是預覽，確認專案與狀態目錄後再加 `--apply`。
 
 ```powershell
 $project = 'D:\Projects\my-app'
@@ -115,9 +116,9 @@ python -I -B -X utf8 tools/cdxdw.py doctor --repo $project
 - 預設狀態目錄是專案旁的 `DIRECTOR-<repo>`，可用 `--state` 指定另一個專屬目錄。安裝器會在 Git 共用目錄留一份指標，讓同 repo 的各工作樹找到同一套狀態。
 - `--agents` 在專案 `AGENTS.md` 追加有標記的 cdxdw 區塊。需要原生 Hooks 時，加 `--hooks` 預覽再套用，並在 Codex 審查與信任。安裝、信任、實際命中各有自己的證據。
 - 想先從對話談需求可選 `--mode beginner`。已有安裝時，`setup` 接回既有模式和狀態。
-- 要檢查 Codex 原生能力，再跑 `doctor --repo PROJECT --live`。要驗實體檔案邊界，加 `--probe-sandbox`。若 PATH 上的版本不合，可用 `doctor --codex PATH` 或 `session native-review --codex PATH` 指定執行檔。
+- 要檢查 Codex 原生能力，再跑 `doctor --repo PROJECT --live`。要驗實體檔案邊界，加 `--probe-sandbox`。若要指定執行檔，可用 `doctor --codex PATH`。審查預覽的完整參數順序是 `session --repo PROJECT --codex PATH native-review ORDER --candidate SHA`。
 
-安裝後把 `doctor` 顯示的 `launcher` 存下來，日常用 `python -I -B -X utf8 "狀態目錄\cdxdw.py"` 開啟作用中的版本。接著在產品專案的 Codex 對話貼[續航提示詞](#可直接貼的續航提示詞)，把要接回的工作填成「和我確認第一版範圍與驗收方式」。
+安裝後把 `doctor` 顯示的 `launcher` 存下來，日常用 `python -I -B -X utf8 "狀態目錄\cdxdw.py"` 開啟作用中的版本。診斷也會列出 manifest SHA-256、安裝來源和從 Git 已核實的 tag。接著在產品專案的 Codex 對話貼續航提示詞，把要接回的工作填成「和我確認第一版範圍與驗收方式」。 [續航提示詞](#可直接貼的續航提示詞)
 
 [完整建置步驟](BOOTSTRAP.md) · [平台與沙箱診斷](docs/11_codex_operations.md) · [Codex Worktree 與交接](https://learn.chatgpt.com/docs/environments/git-worktrees)
 
@@ -236,7 +237,8 @@ python -I -B -X utf8 $launcher work --repo $project dispatch $order
 ```text
 你是工單〔ORDER.md〕的 Worker。先核對目前 checkout 是〔WORKTREE〕、起點是〔完整 BASE SHA〕。
 讀派工快照〔SNAPSHOT〕及復工檔〔RESUME_PATH〕，核對工單 SHA-256〔ORDER_SHA256〕。
-尚未核准計畫時，先依工單寫 PLAN.md，列出每項驗收和會改的路徑，回報總監。
+尚未核准計畫時，以唯讀方式查看必要資料，在聊天提出計畫，列出每項驗收和會改的路徑。
+總監將確認的計畫存成 PLAN.md 並核准。如需修訂，回到總監對話提出變更。
 計畫已核准時，依 SCOPE 施工並維護復工檔。遇到規格不明、需要越界或入口無法驗證，交回總監裁決。
 提交候選後回報完整 SHA、TASK_REPORT.md、逐項驗收結果、證據位置與待驗證事項，交由總監獨立確認。
 ```
@@ -307,11 +309,13 @@ python -I -B -X utf8 $launcher work --repo $project final $order --candidate $ca
 | `CHANGES_REQUESTED` | 查看哪個 AC 被退回，保存原回覆，等該項修正與重驗後登記新判定。 |
 | `CDX_FINAL` | 此工單候選可交件。發布或多線合併另驗實際交付的整合提交。 |
 
+同一個人工驗收條件若要在兩個環境都通過，派工前在工單宣告 `CDX_GATES = {"environments":{"AC-2":["windows","wsl"]}}`。每次裁決在 `--ac AC-2` 之外帶 `--environment-id windows` 或 `--environment-id wsl`。`--environment` 可保存更詳細的實際版本。`status.criteria` 會分別顯示 `AC-2@windows` 與 `AC-2@wsl`，兩項都通過才會放行。未宣告環境的條件沿用單項裁決。
+
 ### 5. 整合與交付
 
 一張或多張工單通過後，先核准實際交付要跑的命令與目標，再整合。單張可快轉時保留封存候選 SHA。多張工單按 `--member` 的順序整合，測試會跑在實際整合提交。每張有工件判定的工單另用 `--member-artifact ORDER.md=HASH` 指定該工件。
 
-下例用 PowerShell 7.3 以上，以一張已通過的工單交付原始碼。把命令換成產品實際入口。交付建置檔時，在核准命令加 `--delivery DELIVERY.json`。
+下例以一張已通過的工單交付原始碼。把 JSON 陣列內的命令換成產品實際入口。以 `--argv-file` 傳入可用在 Windows PowerShell 5.1 與新版 PowerShell。交付建置檔時，在核准命令加 `--delivery DELIVERY.json`。
 
 ```powershell
 git -C $project fetch origin
@@ -319,8 +323,9 @@ if ($LASTEXITCODE -ne 0) { throw 'Fetch failed' }
 $target = 'refs/remotes/origin/main'
 $targetSha = git -C $project rev-parse --verify $target
 if ($LASTEXITCODE -ne 0) { throw 'Missing release target' }
-$entry = '["python","-m","my_app","--smoke-test"]'
-$integrationArgs = @('--target', $target, '--base', $targetSha, '--argv', $entry)
+$argvFile = Join-Path (Split-Path $launcher) 'integration-argv.json'
+Set-Content -LiteralPath $argvFile -Encoding utf8 -Value '["python","-m","my_app","--smoke-test"]'
+$integrationArgs = @('--target', $target, '--base', $targetSha, '--argv-file', $argvFile)
 $approval = python -I -B -X utf8 $launcher work --repo $project approve-integration @integrationArgs `
   --approved-by director | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw 'Integration approval failed' }
@@ -355,7 +360,14 @@ python -I -B -X utf8 $launcher release --repo $project --integration $integratio
 }
 ```
 
-規格設定 `require_po=true` 時，請 PO 試用該次整合的成品。收到答覆後，用 `work record-delivery INTEGRATION_UUID --outcome PASS --actor ID --reply-file FILE --reply-ref MESSAGE` 保存實際的通過判定。兩階段發版都提供各自 CI 的 `--archive ZIP` 和 `--artifact ZIP_SHA256`。外層 ZIP 各自核對，內檔須和整合驗過的成品位元組一致。非可重現建置需由專案流程保存並重用同一份定版檔。 [發版與 CI 設定範例](tools/CDX-TOOLS.md#受控發版)
+整合成品會保留在狀態內，每次整合各有一份。用 `work delivery-file INTEGRATION_UUID --asset product.zip` 找到並驗證原件，回傳路徑、大小及 SHA-256。`require_po=true` 時，請 PO 試用該檔，再用 `work record-delivery INTEGRATION_UUID --outcome PASS --actor ID --reply-file FILE --reply-ref MESSAGE` 保存實際判定。
+
+| 交付設定 | 發布時用哪一份 |
+|---|---|
+| `"artifact_source": "ci"`，預設 | 候選與目標分支各提供本次 CI 的 `--archive ZIP`、`--artifact ZIP_SHA256`。每份 ZIP 的內檔須等同受驗成品。 |
+| `"artifact_source": "retained"` | 以本次整合保留的原件發布。若專案沒有配置 CI ZIP，CI 證明目標提交和必要 jobs，原件以整合收據的摘要驗證。若有配置，仍比對 ZIP。適用每次重建會產生不同 bytes 的產品。 |
+
+保留原件及 `"build_context": "git"` 都要求落地提交 SHA 和受驗提交一致。依賴 `git describe` 的建置可選獨立 Git 環境。一般建置也能讀 `CDX_DELIVERY_COMMIT`、`CDX_DELIVERY_TREE`，專案有 `VERSION` 時另有 `CDX_DELIVERY_VERSION`。`path` 和 `ci_path` 可用中文和空格，正式 `asset` 用英數及常見檔名符號。 [發版與 CI 設定範例](tools/CDX-TOOLS.md#受控發版)
 
 ## 中斷後怎麼接手
 
@@ -385,12 +397,12 @@ Desktop 先核對已登記的聊天與位置。App Server 先用 session status 
 
 ```text
 handoff --repo SOURCE export ORDER.md --out HANDOFF.json
-handoff --repo DESTINATION verify HANDOFF.json --worktree DEST_WORKTREE
+handoff --repo DESTINATION verify HANDOFF.json --worktree DEST_WORKTREE --chat THREAD_UUID
 handoff --repo DESTINATION attach HANDOFF.json --worktree DEST_WORKTREE --chat THREAD_UUID
 session --repo DESTINATION status ORDER.md --live
 ```
 
-`verify` 會列出工件或狀態、政策、runtime 與工作樹差異。符合後在隔離目的工作樹 `attach`，再核對對話及宿主是否載入並信任 Hook。使用較早版的清單時先在來源重新匯出。跨 clone 的接收端使用自己安裝所建立的專案指標、runtime 和 `PROJECT.json`。 [逐步交接與跨主機搬運](tools/CDX-TOOLS.md#desktop-交接核對) · [Codex Worktree 交接](https://learn.chatgpt.com/docs/environments/git-worktrees)
+`verify` 會列出狀態缺件、政策、runtime、工作樹及聊天衝突。符合後在隔離目的工作樹 `attach`，再核對宿主所見的聊天、Skill 與 Hook 信任。若 Desktop 搬移後仍是來源 UUID，可以沿用同一聊天，也可換新 UUID。新清單列出派工歷史和未派草稿。`.9` 的清單可續接現行版，欲搬歷史時從來源重匯。接收端使用自己安裝的專案指標、runtime 和 `PROJECT.json`。 [逐步交接與跨主機搬運](tools/CDX-TOOLS.md#desktop-交接核對) · [Codex Worktree 交接](https://learn.chatgpt.com/docs/environments/git-worktrees)
 
 ### 專案會多出哪些檔案
 
@@ -464,7 +476,7 @@ DIRECTOR-my-app/                        安裝工具建立的外部狀態
 | 審查指定候選 | `work review ORDER --candidate FULL_COMMIT_SHA --rerun` 或 `session native-review ORDER --candidate SHA` |
 | 執行入口、登錄判定和放行 | `work e2e`、`work record`、`work final` |
 | 核准與驗收實際交付組合 | `work approve-integration`、`work integrate --approval HASH`、`work integration-status UUID --expect-head SHA` |
-| 保存 PO 對整合成品的判定 | `work record-delivery UUID --outcome PASS --actor ID --reply-file FILE --reply-ref MESSAGE` |
+| 取得受驗原件並保存 PO 判定 | `work delivery-file UUID --asset NAME`、`work record-delivery UUID --outcome PASS --actor ID --reply-file FILE --reply-ref MESSAGE` |
 | 開啟付費／裝置前檢查 | `work preflight ORDER --candidate SHA` |
 | 驗交付包、外部稽核頭或裝置量尺 | `work verify-evidence ORDER --candidate SHA` |
 | 核對 Desktop 交接 | `handoff export`、`handoff verify`、`handoff attach` |
@@ -491,17 +503,16 @@ DIRECTOR-my-app/                        安裝工具建立的外部狀態
 
 ## 驗證與已知限制
 
-以下驗證對應正式 `v2.6.0-cdx.9` 的提交 `231795004b0bdfc4611aa44abc173e7a96799f3a`。
+正式發行說明會列出交付 SHA、目標分支 CI 和安裝包 SHA-256。GitHub 上的 README、對應 tag 和正式安裝包可以分別核對。 [`.10` 發行證據](https://github.com/scottpuppylu/cdx-DIRECTOR-WORKER/releases/tag/v2.6.0-cdx.10)
 
-| 驗證項目 | `.9` 結果 |
+| 驗證項目 | 覆蓋範圍 |
 |---|---|
-| 工單與相容性 | 候選與主線 CI 各 6 個工作通過。四組 Windows／Ubuntu 與 Python 3.9／3.12 組合各跑 19 個 cdxdw 案例，另跑上游相容自檢及打包。 [候選 CI](https://github.com/scottpuppylu/cdx-DIRECTOR-WORKER/actions/runs/45601588926) · [主線 CI](https://github.com/scottpuppylu/cdx-DIRECTOR-WORKER/actions/runs/45602153613) |
-| 換版、交接、復工 | 用獨立工作樹驗證換版、重複派工、舊版斷點和候選查詢。跨 clone 驗證政策不合會列出差異，核對後可接手及重新驗收原候選。 |
-| 升級與回復 | 隔離專案驗證 `.8 → .9` 時舊入口拒絕操作、固定入口保留原驗收。Windows 與 WSL 驗證 `.3 → .4 → .9` 及回復至 `.4`。 |
-| Codex 原生能力 | Windows 沙箱通過實體讀寫測試。Codex CLI 與 Desktop 隨附執行檔，皆以本機測試模型完成手動 compact 續航及原生 Review 流程。 |
-| 正式發行 | 候選與主線 CI 的安裝包與整合成品摘要一致。正式 GitHub 資產已匿名下載、核對 SHA-256 並安裝到乾淨專案。 [正式發行與摘要](https://github.com/scottpuppylu/cdx-DIRECTOR-WORKER/releases/tag/v2.6.0-cdx.9) |
+| 工單與相容性 | CI 在 Windows／Ubuntu 及 Python 3.9／3.12 跑 cdxdw 自檢，另跑上游相容案例與正式包裝。回歸包含逐環境判定及整合原件核對。 [GitHub Actions](https://github.com/scottpuppylu/cdx-DIRECTOR-WORKER/actions) |
+| 換版、交接、復工 | 以獨立工作樹和 clone 核對新版派工、接收端的歷史快照、草稿、候選 ref 和續航路徑。 |
+| 安裝、升級與回復 | 用獨立專案核對舊入口、固定 launcher、候選 refs 與備份還原。 [升級重跑](research/reproduce_cdxdw.py) |
+| Codex 原生能力 | 歷史實測使用本機測試模型驗證 App Server、手動 compact 與原生 Review。每個新工作環境可另跑實體沙箱探針。 [平台探針](research/probe_app_server.py) |
 
-`.9` 的跨 clone CLI 交接已有測試。跨實體主機的 Desktop GUI、真實模型審查品質、自動 compact 的宿主事件和 macOS 仍需在對應環境驗證。`.6` 曾在單機實測 Desktop Local → Worktree → Local 和真實模型 Review，該次證據可從歷史報告查回。 [`.6` 歷史驗證](research/CDXDW-2026-11-24-FOLLOWUP.md)
+跨實體主機的 Desktop GUI、當前付費模型審查品質、自動 compact 的宿主事件和 macOS 仍待對應環境驗證。`.6` 曾在單機實測 Desktop Local → Worktree → Local 和真實模型 Review。 [`.6` 歷史驗證](research/CDXDW-2026-11-24-FOLLOWUP.md)
 
 日常桌面操作依宿主版本與專案信任設定而異。可以用 `doctor --live --probe-sandbox` 查實際宿主，再選擇手動工作線或原生 App Server 路徑。外部裝置、量測或瀏覽器成品由專案配置實際入口與可接受證據。 [量測裝置與外部證據](tools/CDX-TOOLS.md#量測裝置與外部證據)
 

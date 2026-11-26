@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "version": "2.6.0-cdx.9",
+  "version": "2.6.0-cdx.10",
   "files": [
     {
       "path": ".agents/plugins/marketplace.json",
@@ -16,7 +16,7 @@
     },
     {
       "path": "CHANGELOG.md",
-      "sha256": "65a445aa709ec7a850941871a35ad9ce28219d9a5a36a0818e301181a7cc34b8"
+      "sha256": "a78139ad8179ccc3b8ff75c6fa561fda92cea6b373105b39764790660d4c8ffe"
     },
     {
       "path": "CODEX-PORT.md",
@@ -32,11 +32,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "25c2eeeffbcdec0580b9cdff3fb14b067fedddeb4956965ff2766eae03546665"
+      "sha256": "255a799e93a72186892f4515991f2eee3da4b20f75f7f852cb272ae7826bf223"
     },
     {
       "path": "VERSION",
-      "sha256": "0609964d8e47480851b5276a6ffebfafe9202b226f76071445177af87cc45a35"
+      "sha256": "7486c2d569ad35c78597d47614861281b7127d745c7c4be0af447fd250b0cd1b"
     },
     {
       "path": "director_work.example.json",
@@ -52,7 +52,7 @@
     },
     {
       "path": "docs/03_communication.md",
-      "sha256": "6c9a6209c908b8979f8f56701d0348bc739592ac37255a553db2bf62d672c71f"
+      "sha256": "f6447f33caae05d09d1644f91b8047e281eadce51d64187b67fbb3b9368c8f9e"
     },
     {
       "path": "docs/04_quota_efficiency.md",
@@ -92,7 +92,7 @@
     },
     {
       "path": "docs/12_chat_to_product.md",
-      "sha256": "88d84f120f3a1682deda218d7d96eaa5e96f9b29943af499d9478759d9ef2cc9"
+      "sha256": "ce61bc7dadf7a7d7d1aca19fdbdd779ff77cdc9293bbf16c50174041cdffc303"
     },
     {
       "path": "docs/13_safety_gates.md",
@@ -100,7 +100,7 @@
     },
     {
       "path": "plugin/cdx/plugin.json",
-      "sha256": "e6014d7bd2444a8d00ff7be1feb30b7519a8550630795cd6b8f1c66b70be254f"
+      "sha256": "f297a793472f5b9c52958f1192b90d6ee8fc2dbfe7b74cb26f9b8e26bead375b"
     },
     {
       "path": "plugin/cdx/skills/cdx-bootstrap/SKILL.md",
@@ -108,7 +108,7 @@
     },
     {
       "path": "plugin/cdx/skills/cdx-dispatch/SKILL.md",
-      "sha256": "c61a4216f2febc3ae9718323f865c798a9551220a4e1509b5d89039ae0dcbafd"
+      "sha256": "32279d44d93774f412775bd2e90cb4ab3ceae4e4aa411d4eba9a3dffc8c30ef2"
     },
     {
       "path": "plugin/cdx/skills/cdx-release/SKILL.md",
@@ -116,7 +116,7 @@
     },
     {
       "path": "plugin/cdx/skills/cdx-resume/SKILL.md",
-      "sha256": "4710d7c550a921c03b92bbea7ffc1d79bd58c204670a2f7353988514edfed1c1"
+      "sha256": "857c8a41a62dd9205f5bbcdceac1c472c7be9f40b2c8d52575c56a42d36ad199"
     },
     {
       "path": "plugin/cdx/skills/cdx-review-gate/SKILL.md",
@@ -228,7 +228,7 @@
     },
     {
       "path": "templates/WORK_ORDER.md",
-      "sha256": "9794480d4913252b55b4d99ebefc5c9f300d99594b72ce45f38e18ce6af3d3ef"
+      "sha256": "f757cb42d52bf3d1104731e3f6efc65565a85b9d0ecdc951a560ca4f90081b92"
     },
     {
       "path": "templates/choice_page.html",
@@ -260,7 +260,7 @@
     },
     {
       "path": "tools/CDX-TOOLS.md",
-      "sha256": "fef0a88aee29228ab7e63cf39baa2538b23c25e9c3b1a89a4879f3ba9e8d1b11"
+      "sha256": "05928b908ffafb7946a7bbdfff4fe12818ad5168fdf540631f4a7d6fde2dcebc"
     },
     {
       "path": "tools/README.md",
@@ -280,7 +280,7 @@
     },
     {
       "path": "tools/cdx_acceptance.py",
-      "sha256": "1979be6934d9db860a0e39abc00a3116788da38229f7e7c2fa015774be5009a2"
+      "sha256": "c80daeeb391cb40b7159b185eb32898290d2b83ec11f532dc6fec89b43d4e4ca"
     },
     {
       "path": "tools/cdx_audit.py",
@@ -292,19 +292,19 @@
     },
     {
       "path": "tools/cdx_delivery.py",
-      "sha256": "0103ec0284b167c5689171f7193507f952ca3ae3a9ded55567805bdd6d4d257d"
+      "sha256": "dd746c1017dad9a7b1f332a6bb4aedba1fda58625acf0da88934b769e651cf21"
     },
     {
       "path": "tools/cdx_doctor.py",
-      "sha256": "24ac6900d200a79e4aeb4ff77d91966230c475d314252352cb769743e6164f54"
+      "sha256": "5ee9a3f59bc97d9a386520c35c3c38bf7c0dc5fadb85a2553b5511b987d85987"
     },
     {
       "path": "tools/cdx_gates.py",
-      "sha256": "4f4d200dfc63077d5a3181b82b83a4a5d38feba7ae36a71edfd275e0c2454fbf"
+      "sha256": "de6dae3b381de7a69356a47e44ed82865062fc9ddefcd2eaa391484d484e98e7"
     },
     {
       "path": "tools/cdx_handoff.py",
-      "sha256": "e6a0e498ac2028b2fc30c8692289b3216b2b9119f3fcb5adb46d528144f6e035"
+      "sha256": "0bf5a1acb0d1defd3be561090b4457b2c55325f9af4e97217ca9f50c752f609f"
     },
     {
       "path": "tools/cdx_hook.py",
@@ -320,7 +320,7 @@
     },
     {
       "path": "tools/cdx_release.py",
-      "sha256": "fc7b06917181a5039d8acc1ad6a7415ff2feb611831caf6da2d919a34329bf2f"
+      "sha256": "77dff19b619a208754aa5d037b2c34abffa74c9b18bddf2732a17120a86e020f"
     },
     {
       "path": "tools/cdx_review.py",
@@ -336,7 +336,7 @@
     },
     {
       "path": "tools/cdx_setup.py",
-      "sha256": "a5938eccef343919448a53b1287897063ffce3313ec6f6d3d25475fa52f0bcab"
+      "sha256": "db5af12bd855923ff381430c7f3eaaf56a600e21a7b1b053c392659ee43fb9ac"
     },
     {
       "path": "tools/cdx_usage.py",
@@ -344,7 +344,7 @@
     },
     {
       "path": "tools/cdx_work.py",
-      "sha256": "44b75ee188001768b3bd2546b487994f480c133bb5c1c17f133b36dc29073bc4"
+      "sha256": "b87c8b627e3214b9d7015b08e121ea51a5d0a688953e7bf852fe80c54d359edf"
     },
     {
       "path": "tools/cdxdw.py",
@@ -508,7 +508,7 @@
     },
     {
       "path": "tools/selftest_cdx.py",
-      "sha256": "7c64a56b44d14dc5e7e19a89764ab745c67d4505eec2d3a1a5309f97f2dc0dca"
+      "sha256": "6d0d91b64ab53fcc1c7c8b1e71f6589f53cd8b64ff92686364c41486bbd2cd15"
     },
     {
       "path": "tools/setup_check.py",

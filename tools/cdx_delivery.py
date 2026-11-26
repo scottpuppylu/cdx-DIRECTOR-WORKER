@@ -1,18 +1,35 @@
 """Approved integration entry point, final outputs, and product decision."""
 
 import hashlib
+import os
+from pathlib import PureWindowsPath
 import re
+import tempfile
+import unicodedata
 
-from cdx_common import SHA, Refused, atomic_write, git, json_bytes, read_json, stamp, state_path
-from cdx_gates import file_hash, relative_file
+from cdx_common import SHA, Refused, atomic_write, git, json_bytes, lock, read_json, stamp, state_path
+from cdx_gates import file_hash
 
 
 DIGEST = re.compile(r"[0-9a-f]{64}")
 ASSET = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
+def output_name(key, value):
+    if not isinstance(value, str):
+        raise Refused(f"Delivery {key} must be a string")
+    if key == "asset":
+        if not ASSET.fullmatch(value) or value.endswith(".") or PureWindowsPath(value).is_reserved():
+            raise Refused("Delivery asset needs a flat ASCII filename using letters, numbers, dots, underscores or hyphens")
+    elif (any(char in '\\:<>|?*"' or unicodedata.category(char) in ("Cc", "Cs") for char in value) or
+          any(not part or part.casefold() in (".", "..", ".git") or part != part.strip() or
+              part.endswith(".") or PureWindowsPath(part).is_reserved() for part in value.split("/"))):
+        raise Refused(f"Delivery {key} needs a portable relative path without traversal")
+    return value
+
+
 def delivery_spec(data):
-    if not isinstance(data, dict) or data.keys() - {"mode", "outputs", "require_po"}:
+    if not isinstance(data, dict) or data.keys() - {"mode", "outputs", "require_po", "artifact_source", "build_context"}:
         raise Refused("Delivery approval needs a source or artifacts specification")
     mode, outputs = data.get("mode"), data.get("outputs", [])
     require_po = data.get("require_po", False)
@@ -24,11 +41,66 @@ def delivery_spec(data):
         if not isinstance(output, dict) or set(output) != seen.keys():
             raise Refused("Each output needs path, ci_path, and asset")
         for key in seen:
-            value = relative_file(output[key])
-            if (key == "asset" and not ASSET.fullmatch(value)) or value.casefold() in seen[key]:
-                raise Refused("Delivery output names must be unique and asset names must be flat")
-            seen[key].add(value.casefold())
-    return {"mode": mode, "outputs": outputs, "require_po": require_po}
+            value = unicodedata.normalize("NFC", output_name(key, output[key])).casefold()
+            if value in seen[key]:
+                raise Refused(f"Delivery {key} values must be unique")
+            seen[key].add(value)
+    source = data.get("artifact_source", "ci")
+    build = data.get("build_context", "snapshot")
+    if source not in ("ci", "retained") or (source == "retained" and mode != "artifacts"):
+        raise Refused("artifact_source must be ci, or retained for artifacts delivery")
+    if build not in ("snapshot", "git"):
+        raise Refused("build_context must be snapshot or git")
+    result = {"mode": mode, "outputs": outputs, "require_po": require_po}
+    if source != "ci":
+        result["artifact_source"] = source
+    if build != "snapshot":
+        result["build_context"] = build
+    return result
+
+
+def retained_path(state, integration, asset):
+    return state_path(state, "integrations", "artifacts", integration, output_name("asset", asset))
+
+
+def retain_output(state, integration, asset, source, *, expected=None):
+    target = retained_path(state, integration, asset)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256()
+    size = 0
+    with lock(target.parent / ".outputs.lock"):
+        with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as dst:
+            temporary = target.parent / dst.name
+            try:
+                with source.open("rb") as src:
+                    for chunk in iter(lambda: src.read(1024 * 1024), b""):
+                        dst.write(chunk)
+                        digest.update(chunk)
+                        size += len(chunk)
+                dst.flush()
+                os.fsync(dst.fileno())
+                value = digest.hexdigest()
+                if expected and value != expected:
+                    raise Refused(f"File does not match the accepted SHA-256 for {asset}")
+                dst.close()
+                if target.exists():
+                    if not target.is_file() or file_hash(target) != value:
+                        raise Refused(f"Existing retained output differs for {asset}")
+                else:
+                    os.replace(temporary, target)
+                return {"sha256": value, "bytes": size, "retained": target.relative_to(state).as_posix()}
+            finally:
+                dst.close()
+                if temporary.exists():
+                    temporary.unlink()
+
+
+def checked_retained(state, integration, asset, output):
+    path = retained_path(state, integration, asset)
+    if (not path.is_file() or file_hash(path) != output.get("sha256") or
+            ("bytes" in output and path.stat().st_size != output["bytes"])):
+        raise Refused(f"Retained output is missing or differs for {asset}")
+    return path
 
 
 def approve_integration(state, target, base, command, spec, actor):
@@ -61,6 +133,9 @@ def target_position(repo, result, current):
     if current == result["base"]:
         return "LANDING_PENDING"
     if not SHA.fullmatch(current or "") or not result.get("head"):
+        return "TARGET_CHANGED"
+    delivery = result.get("delivery", {})
+    if delivery.get("build_context") == "git" or delivery.get("artifact_source") == "retained":
         return "TARGET_CHANGED"
     if git(repo, "rev-parse", f"{current}^{{tree}}") != git(repo, "rev-parse", f"{result['head']}^{{tree}}"):
         return "TARGET_CHANGED"
