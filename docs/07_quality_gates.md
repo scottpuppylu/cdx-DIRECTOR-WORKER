@@ -26,7 +26,7 @@
 - 盲審 reviewer 是總監開的 subagent，工具只給 Read / Glob / Grep，只指向 `BLIND/`。
 - 每個審查包附 manifest（檔名、大小、SHA-256、來源 commit、分類）；單檔大小設上限（原專案 50 MB）。
 - 不准為了好看而準備審查包：不挑隱藏缺陷的視角、不修圖、不在盲審層放任何暗示。
-- **盲審稽核**：審完後檢查 subagent 的對話紀錄，每一個工具呼叫都必須是 Read / Glob / Grep，且路徑都在 `BLIND/` 內；不合格的審查作廢（`REVIEW_INVALID`）。審查因額度或錯誤中斷，也寫 `REVIEW_INVALID`，不寫通過。
+- **盲審稽核**：審完後檢查 subagent 的對話紀錄，每一個工具呼叫都必須是 Read / Glob / Grep，且路徑都在 `BLIND/` 內；不合格的審查作廢（`REVIEW_INVALID`）。審查因額度或錯誤中斷，也寫 `REVIEW_INVALID`，不寫通過。隔離要能驗證：MCP、外掛、hook、網搜「關掉了」只寫設定不算，要有這份稽核或 `doctor.py` 的 ENFORCED 證明（各平台的檢查程式放在 adapter）。
 - 盲審一次只跑一個；只用在正式候選，中間迭代由總監看關鍵總覽。
 - 總監自己的審查標 `DIRECTOR_REVIEW`，不是第三方獨立審查。
 - 送審前跑 `tools/pack_check.py check <審查包>`（2.3.0）：抽格會不會漏掉短的動作階段或剛好和週期同步（aliasing）、主體每個機位每格都在畫面內、近景真的拍到那個部位、檔名沒有洩漏版本或結論（`_v3`、`_fix`、`_after`）、渲染設定不會自己做出假缺陷（動態模糊、景深、非 100% 解析度、有損格式、和參考不同的設定）。審查包的 README 用 `pack_check.py readme` 從包裡實際的檔案產生，不手寫。

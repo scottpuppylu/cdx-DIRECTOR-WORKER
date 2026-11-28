@@ -1,5 +1,22 @@
 <!-- BOOTSTRAP 第 3 步其餘檔案的骨架。每段複製成 DIRECTOR/ 下的同名檔，把 <...> 換掉。 -->
 
+## INDEX.md
+
+換總監的唯一入口（3.0.0，R5；`templates/DIRECTOR_HANDOFF.md`）。五個檔名都要寫到，`handoff.py` 會查。
+
+```text
+# INDEX — <專案名稱>
+這是什麼：<一句話，和初衷卡一樣>
+回報語言：<繁體中文…>
+- 規格：BRIEF.md（快照在 brief-history/）
+- 決策：DECISION_REGISTER.md
+- 目前進度和下一步：RESUME_STATE.md 頂部四行
+- 未決事項：PO_PENDING.md（待決頁網址見 DIRECTOR_STATE.md）
+- 日誌：DIRECTOR_LOG.md
+- 換手清單：HANDOFF_MANIFEST.md（`handoff.py export` 產生）
+- 其他：DIRECTOR_STATE.md、ACTIVE_WORKSTREAMS.md、GUARDS.md、orders/
+```
+
 ## DIRECTOR_OPERATING_RULES.md
 
 ```text
@@ -13,7 +30,8 @@
 ```text
 # DIRECTOR_STATE — <專案名稱>
 UPDATED: <讀 date>
-PENDING_METHOD: chat + PO_PENDING.md
+PO_PAGE_URL: <待決頁網址 https://claude.ai/...；用不了寫 NONE reason=<原因>>
+PO_PAGE_PINNED: <yes；置頂失敗寫 no reason=<原因>>
 ## 專案概況
 目標 / 目前階段 / 已知 PO 決定 / repo、分支、worktree / build 與測試方式、時間 / 共用重資源 / 輸出位置與磁碟 / 成品怎麼看
 ## 各工作線狀態
@@ -72,6 +90,6 @@ PLAN_APPROVED 要早於 worker 在這張工單的第一個 commit（標題以 `W
 ```text
 # BASELINE_METRICS
 | 日期（讀 date） | 指令 | 指標 | 數值 | 證據等級（VERIFIED_LOCAL / ESTIMATED / UNKNOWN） |
-用量來源：cdx usage 的近期輸入、快取與累計。未回傳視窗時不估百分比。
+固定成本：context_probe 的 totalTokens 與各類別；歷史用量：usage_report 的上下文中位數、≥25 萬讀入比例。
 沒有資料寫 UNKNOWN，不寫 0。
 ```

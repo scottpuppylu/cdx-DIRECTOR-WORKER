@@ -1,5 +1,5 @@
 {
-  "_comment": "cdxdw project config copied into the project state directory. The installer chooses project skills and optional native Hooks. Shared controls are read by the upstream gate, resume, metrics and release tools. verdict_self_check=warn reports a missing director rerun; fail makes that a gate failure.",
+  "_comment": "Copy to DIRECTOR/director_work.json. schema_version: the config format; tools refuse a version they do not know. window: 100000-1000000. plugins_off: only user-installed plugins, as name@marketplace, after the PO ticked them. backup_dir: null = inside the repo's .git folder. skip_worktrees: path substrings to leave alone. hooks: true adds the hook_guard.py PreToolUse hook. protect_director (optional): the DIRECTOR folder; the hook then also blocks Write / Edit on its orders/ and DIRECTOR_LOG.md (implies hooks). director_worktree (optional): the Director's own worktree, which keeps the plain hook.trace_id_pattern (optional): regex for the requirement or decision IDs that orders list in TRACES_TO; trace_report.py flags IDs that do not fit. Use the project's own IDs. mode (optional): general or beginner, picked right after the starting prompt (docs/12); tools do not read it. po_pending_files / po_item_pattern / po_open_pattern (optional): where metrics_report.py counts PO entries; the defaults read PO_PENDING.md entries `ID: OD-..` / `ID: ACT-..` with `STATUS: open`. resume (2.2.2, optional): RESUME_STATE size limits (max_bytes, max_line_bytes; read by gate_check --resume, setup_check and memory_size_check --kind resume) and what resume_archive.py never moves (the newest keep_recent sections and Before: chain entries, by count, never by age; sections whose heading holds a protect_headings word). base_ref (2.2.2, optional): gate_check --order fetches and compares the order's BASE_REF commit with its remote branch; missing or behind is a WARN note, strict: true (or --strict-base) fails; fetch: false compares with the local copy. release (2.2.2, optional): release.py settings; {version} is filled in; gh_repo null = read from the remote URL. verdict_self_check (2.3.0, optional): what gate_check --verdict does when a PASS-type verdict has no self-checked `- `<command>` exit=<n> at=<HH:MM>` line: \"warn\" (default in 2.3.x: a WARN note, exit code unchanged) or \"fail\" (the verdict fails); the default may become \"fail\" in 3.0. strength (3.0.0, optional): light | standard | strict, which safety gates gate_check --order / --match runs on Standard / Strict orders (tools/safety_gate.py); default standard = tests_first only (the order carries TESTS_LOCKED); strict = all. safety (3.0.0, optional): switches that tighten the strength (tests_first, plan_gate, spec_review_for_standard: true / false; stop_after_rounds: a whole number, 0 = not checked; prefer_auto). Anything looser than the strength, or strength light, fails Standard / Strict orders until a PO_PENDING entry naming it is answered: a worker may not turn a gate off. order_limits / protected_tests (3.0.0 B4, optional, read by scope_check.py): size limits for Standard / Strict orders (max_files_per_order, max_lines_per_order, max_test_lines_per_order; 0 = off) and globs of test files that may only grow; not set = not checked, at every strength. An order can set its own with ORDER_LIMITS = files=<n> lines=<n> test_lines=<n>.",
   "schema_version": 1,
   "mode": "general",
   "window": 250000,
@@ -12,39 +12,29 @@
   "protect_director": null,
   "director_worktree": null,
   "trace_id_pattern": "^(B|DD|OD)-\\d+$",
-  "cdx_require_brief_pins": true,
-  "po_pending_files": [
-    "PO_PENDING.md"
-  ],
+  "po_pending_files": ["PO_PENDING.md"],
   "po_item_pattern": "^\\s*ID\\s*:\\s*(OD|ACT)-\\w+",
   "po_open_pattern": "^\\s*STATUS\\s*:\\s*open\\b",
   "resume": {
     "max_bytes": 20480,
     "max_line_bytes": 4096,
     "keep_recent": 10,
-    "protect_headings": [
-      "現況",
-      "未結",
-      "OPEN",
-      "BLOCKED",
-      "TODO",
-      "待辦",
-      "IN_FLIGHT",
-      "DO_NOT_REPEAT"
-    ]
+    "protect_headings": ["現況", "未結", "OPEN", "BLOCKED", "TODO", "待辦", "IN_FLIGHT", "DO_NOT_REPEAT"]
   },
   "verdict_self_check": "warn",
+  "strength": "standard",
+  "safety": {},
   "base_ref": {
     "check": true,
-    "fetch": false,
+    "fetch": true,
     "strict": false
   },
   "release": {
     "remote": "origin",
     "branch": "main",
-    "title": "cdx-DIRECTOR-WORKER {version}",
-    "tag_message": "cdx-DIRECTOR-WORKER {version}",
-    "selftest": "python -I -B -X utf8 tools/selftest_cdx.py",
+    "title": "DIRECTOR-WORK {version}",
+    "tag_message": "DIRECTOR-WORK {version}",
+    "selftest": "python -I -X utf8 tools/selftest.py",
     "gh_repo": null
   }
 }

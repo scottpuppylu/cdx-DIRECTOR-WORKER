@@ -11,7 +11,7 @@ Each line is one item:
 Last line: DOCTOR: enforced=n not_verified=m not_enforced=k missing=j warn=w; exit 1 when not_enforced or missing.
 
 Settings layers: user (~/.claude/settings.json), project (.claude/settings.json), local (.claude/settings.local.json)
-and managed (Windows C:/Program Files/ClaudeCode/managed-settings.json, else /etc/claude-code/managed-settings.json).
+and managed (Windows %ProgramFiles%\ClaudeCode\managed-settings.json, else /etc/claude-code/managed-settings.json).
 Hooks and permission lists add up across layers; env keys and defaultMode take the highest layer that sets them;
 disableAllHooks true in any layer turns every hook item into NOT_ENFORCED.
 
@@ -227,12 +227,22 @@ def read_layer(path):
         return {}
 
 
+def program_files(variable, *parts):
+    """A path under %ProgramFiles% or %ProgramFiles(x86)% (3.0.0 privacy ruling: no drive letter written in the
+    source); %SystemDrive% plus the usual folder name when the variable is not set."""
+    folder = {"ProgramFiles": "Program Files", "ProgramFiles(x86)": "Program Files (x86)"}[variable]
+    base = os.environ.get("ProgramW6432" if variable == "ProgramFiles" else variable) or os.environ.get(variable)
+    base = base or os.environ.get("SystemDrive", "C:") + chr(92) + folder
+    return str(pathlib.PureWindowsPath(base, *parts))
+
+
 def git_bash():
     """Where Git Bash is, or None. CLAUDE_CODE_GIT_BASH_PATH, when set, is the only place looked at."""
     named = os.environ.get("CLAUDE_CODE_GIT_BASH_PATH")
     if named is not None:
         return named if named and pathlib.Path(named).is_file() else None
-    for place in (r"C:\Program Files\Git\bin\bash.exe", r"C:\Program Files (x86)\Git\bin\bash.exe"):
+    for place in (program_files("ProgramFiles", "Git", "bin", "bash.exe"),
+                  program_files("ProgramFiles(x86)", "Git", "bin", "bash.exe")):
         if pathlib.Path(place).is_file():
             return place
     return None
@@ -384,7 +394,7 @@ def main():
     repo = pathlib.Path(top)
     home = pathlib.Path(a.home) if a.home else pathlib.Path.home()
     managed = pathlib.Path(a.managed) if a.managed else pathlib.Path(
-        r"C:\Program Files\ClaudeCode\managed-settings.json" if os.name == "nt" else "/etc/claude-code/managed-settings.json")
+        program_files("ProgramFiles", "ClaudeCode", "managed-settings.json") if os.name == "nt" else "/etc/claude-code/managed-settings.json")
     layers = [("user", home / ".claude" / "settings.json"), ("project", repo / ".claude" / "settings.json"),
               ("local", repo / ".claude" / "settings.local.json"), ("managed", managed)]
     data = [(name, read_layer(path)) for name, path in layers]
@@ -470,7 +480,7 @@ def main():
             log, problem = None, str(error)
         if log is None:
             item("MISSING", "audit_log", problem)
-        elif not log.exists():
+        elif not log.exists() or (log.is_file() and log.stat().st_size == 0):  # 3.0.0 (G2): verify calls an empty log EMPTY
             item("CONFIGURED_NOT_VERIFIED", "audit_log", f"hooks set; {log.as_posix()} has no entries yet")
         else:
             done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(HERE / "audit_log.py"), "verify", "--log", str(log)],

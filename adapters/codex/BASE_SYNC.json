@@ -1,0 +1,30 @@
+{
+  "schema": "dw-base-sync/1",
+  "adapter": "adapters/codex/",
+  "base_commit": "0e9ae223339bce379a8cfc4164503979bb863ff1",
+  "overrides": {
+    "README.md": {
+      "why": "Codex entry point, series, installation and platform choices",
+      "base_sha256": "33ec0cce4dcab786711dfe438a3ee180a33d5e5144cbf6bb14c5f9034f3e5755"
+    },
+    "CHANGELOG.md": {
+      "why": "Variant release history and upstream handling table",
+      "base_sha256": "75f71e10d130fbd1bd69a12c2b7996d411f9bdacf7e6c4ace16853850b7bfcbe"
+    },
+    "VERSION": {
+      "why": "Codex variant version with the serial continued from cdx.10",
+      "base_sha256": "2985be8b28d3ade858e8d8fb4bc22f565b1bf6020dff982dce141f7721b9999c"
+    }
+  },
+  "not_ported": {},
+  "variant_files": {
+    "AGENTS.md": "Codex native resident rules derived from the common project rules",
+    "BASE_VERSION": "Frozen upstream version",
+    "CHANGELOG-upstream.md": "Frozen upstream CHANGELOG.md",
+    ".github/workflows/codex-adapter.yml": "Test the Codex adapter and frozen base sync on Windows and Ubuntu"
+  },
+  "variant_rules": {
+    "beginner fast path": "Install the Codex PreToolUse hook before the first requirements question as in the Claude adapter",
+    "PO decisions": "Keep the canonical local pending page and get answers in Codex chat"
+  }
+}

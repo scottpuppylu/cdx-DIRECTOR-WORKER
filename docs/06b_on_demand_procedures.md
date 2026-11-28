@@ -1,13 +1,13 @@
 # 06b 需要時才讀的程序
 
-只在做這些事時讀：被打斷後恢復（含總監自身）、建立或修改續航機制、額度中斷後接續、刪檔之前、用 stash / hook / 備份推送、下載或裝開源工具。平常的規則在 `docs/06`、`docs/08`。
+只在做這些事時讀：被打斷後恢復（含總監自身）、建立或修改續航機制、設定額度重置後的喚醒、刪檔之前、用 stash / hook / 備份推送、下載或裝開源工具。平常的規則在 `docs/06`、`docs/08`。
 
 ## 規則
 
 ### 恢復程序（任何 session 被打斷後第一件事）
 
-1. 重讀：工單 → 自己的 RESUME_STATE → 專案 AGENTS.md → 本專案版規則（總監另讀 `DIRECTOR_STATE.md`）。
-2. `git status`、`git log -3`，和 RESUME_STATE 的 HEAD 比對；不一致先查原因，不覆寫。
+1. 重讀：工單 → 自己的 RESUME_STATE → 專案 CLAUDE.md → 本專案版規則（總監另讀 `DIRECTOR_STATE.md`）。
+2. `git status`、`git log -3`，和 RESUME_STATE 的 HEAD、`LAST_VERIFIED_CHECKPOINT` 比對（`gate_check.py --resume` 只查格式，內容對不對靠這一步）；不一致先查原因，不覆寫。
 3. IN_FLIGHT：只檢查自己的 PID。程序不在了，就看完成判定檔；不完整就列入重做。**中斷的擷取、量測、打包、匯入一律重做，不沿用。**
 4. 被中斷的 GO：通知總管「RESUMED <task>，需要重新排程」，不假設時段還有效。
 5. 自己設的計時器、背景等待、監看程序：全部視為可能失效，逐項確認或重建。
@@ -20,24 +20,46 @@ PO 手動停止後再讓它繼續，也要先完整跑一次這個程序：停�
 
 總監每次喚醒、壓縮或恢復後只有一個第一步：**先唯讀檢查並收集輸入，再處理待決頁**。收集完之前不改檔、不派工、不重建。
 
-1. 唯讀收集：跑 `cdxdw doctor`，讀本機待決帳、未處理的 PO 聊天回答、`DIRECTOR_LOG.md` 最新段落和工作線。對帳不清楚時用 `cdxdw session status … --live` 和 `reconcile`；保留找不到的來源和原因。
+1. 唯讀收集：跑機制檢查腳本（下面「機制要能重建」）和 `status.py`；讀本機待決頁、`DIRECTOR_LOG.md` 最後 30 行（找還沒處理完的 PO 指示）、`ACTIVE_WORKSTREAMS.md`、未讀的 worker 訊息。選擇頁用 `ArtifactData` 讀兩層：2.1 新題的 `choiceReplies`（每次送出一筆）和 2.0 舊題的 `decisions`（`status == "answered"`），加上 `notes`，存成一份 JSON 跑 `choice_reconcile.py ingest`（`docs/12` 第四、六節）。恢復時另做「恢復程序」第 1、2 步，有 session 清單工具就對照各 session 的狀態。
 2. 處理待決頁：照收件帳本套用 PO 的回覆和新留言，同輪執行或派工並關閉；未能完成寫續辦紀錄（`docs/03`）。
 3. 檢查腳本報缺的才重建；補發被中斷的工單或決定。
 4. 巡查時（2.2.2）量一次所有工作線的 RESUME_STATE：`tools/memory_size_check.py --kind resume --workstreams <DIRECTOR>/ACTIVE_WORKSTREAMS.md`（或 `--glob "<根>/**/RESUME_STATE*.md"`），只讀。OVER 的工作線，由總監叫它照下面「RESUME_STATE 瘦身」做；巡查本身不搬檔。
 
-**合併工具呼叫**（題 5）：第 1 步的本機檔案和檢查腳本用同一個本機唯讀呼叫讀完，逐項印出來源和成功 / 失敗，讀不到的那一項照實列出，不當成「沒有新事」。待決帳照 `docs/12` 讀回覆原文和版次；worker 狀態只在恢復或要採取行動時才查。
+**合併工具呼叫**（題 5）：第 1 步的本機檔案和檢查腳本用同一個本機唯讀呼叫讀完，逐項印出來源和成功 / 失敗，讀不到的那一項照實列出，不當成「沒有新事」。選擇頁照 `docs/12` 另外讀，不用計數、`brief/current` 或本機副本代替；worker 狀態只在恢復或要採取行動時才查。
 
-### 接手演練
+### PO 訊息的細節（3.0.0 從 `docs/03` 移來）
 
-隔離 Git fixture 準備兩版簡單成品。一條工單完成第一個 checkpoint 後中斷，保存工作樹、工單與狀態。PO 在待決帳填一項選擇，新總監只收到「繼續這個專案」，用本機檔與 thread 史找回原候選。確認 PO 回覆只記一次，工作線沒有重派；候選若改版，舊證據不得自動延用。
+- 跨 session 訊息的首行用一句話說明是什麼。
+- 處理晚了照實寫：幾點才讀到、晚了多久。總監提出的待決項目已經不需要，主動撤回並寫原因，不讓舊題一直掛著。
+- 有總管時，總管在例行排程時順便查一次：已回覆超過 10 分鐘還沒關閉的，通知總監。
+- 要 PO 到某個 worker 的對話回覆時，ACT 寫明對話名稱和可照抄的句子。
 
-以 `metrics_report.py --run` 記 asked、answer_received、applied、closed 和 preview_ready，記下無法實測的步驟。
+### 換總監：換平台、換帳號（3.0.0，R5）
+
+新總監只靠專案裡的紀錄和一句提示詞接手，不靠對話紀錄或平台的記憶功能。`DIRECTOR/INDEX.md` 是唯一入口，寫明規格、決策、進度和下一步、未決事項、日誌各在哪個檔。交出去的總監先把紀錄寫完，跑 `handoff.py export`；接手的總監先跑 `handoff.py verify`，PASS 才照 INDEX 接著做，STALE 照實回報。提示詞、步驟和 15 題換手測試見 `templates/DIRECTOR_HANDOFF.md`。
+
+### 接手演練：社團出門清單（題 4 P-1）
+
+驗證換總監時 PO 的回覆不漏、不重問、不重派。只用演練假資料和隔離 repo，不碰正式專案；成品是一個可離線開啟的 `index.html`（三項：水壺、鑰匙、雨傘）。一條 worker 線，盲審另開 reviewer。故障注入只有一個：造出**PO 已在選擇頁送出、舊總監沒讀到**的狀態，再新開一個總監接手。先關舊總監對話、後送出：送出會觸發通知，通知可能比關閉先叫醒舊總監。
+
+| 步驟 | PO 的話或操作 | 總監要做的事與留下的檔案 | 當步通過條件 |
+|---|---|---|---|
+| 1. 啟動 | 貼啟動詞，附「可以用私人頁顯示這個演練的假資料」；被問模式時答「小白模式」 | 第一則之前發布並置頂待決頁，第一則問模式並附網址；照 BOOTSTRAP 建 `DIRECTOR/`，登記模式和授權；記 `run_started` | 第一則只有一題；PO 不用選模型、外掛或設定 |
+| 2. 談需求 | 「出門前用手機勾水壺、鑰匙、雨傘，要看到勾了幾個、能清空，不用登入、不要廣告，外觀給我看兩版」 | 一到三題澄清，寫 `BRIEF.md` DRAFT（B-1 至 B-5，各附驗法）給 PO 看 | 每個 B 都能實際操作驗證；還沒有 `DISPATCH` |
+| 3. 鎖卡與開工 | 「對，就是這樣，請開一個幫手開始做」 | 鎖卡、存 `brief-history/r1.md`、登記決策；派工規劃後寫 `WO-001`（`TRACES_TO` 對 B），記 `DISPATCH` 再開 worker | 鎖卡早於派工；工單可追溯到 B |
+| 4. 第一個可用預覽 | 打開試，不必回覆 | 總監親自開頁勾一項看到 1/3、清空看到 0/3；送出可用連結時記 `preview_ready` | 頁面真的能勾；起點和終點都有可查的時間 |
+| 5. A/B 與斷點 | 看 A（每項一張卡）和 B（一項一列）；研究員說舊總監已停住，就關掉舊總監對話，再選 B 送出；新開同資料夾的對話，只說「繼續這個專案」 | 舊總監在已驗證 checkpoint 停住，RESUME_STATE、LOG、工單都已存檔；研究員確認 `choiceReplies` 有這次送出（記下 `submissionId`），收件帳本還沒有它 | 舊總監沒有讀到答案；新對話沒有帶舊摘要；舊總監在關閉前被叫醒、帳本已有這筆收件，這次注入作廢，換一題重做 |
+| 6. 接手 | 等，不提示自己選了什麼 | 新總監照「每輪第一步」先跑檢查並唯讀收集（`choiceReplies`、`decisions`、`notes` → `ingest`、LOG、工作線），照恢復程序核對 HEAD 和證據，再處理：寫收件回條、套用 B、關題，寫 `RESUMED WO-001 … redo=NONE` | 這個 `submissionId` 在帳本只記一次，B 只套用一次；沒有重問、重派、重做已驗證的輸出 |
+| 7. 改版 | 「再加『只看沒勾的』，能切回全部，原本功能都要留」；看到新卡回「對，照這張做」 | 保留 r1，B-3 改成 r2 DRAFT 給 PO 確認；鎖 r2 後才改工單（REVISION +1、重算雜湊、受影響 AC 重驗），沿用原 worker | 一次改版、一次新卡確認；新功能有當前候選的證據 |
+| 8. 收貨 | 打開總監給的固定候選逐條試；符合就回「對，可以收貨」 | 審查、發固定入口、把這則回覆綁到候選（`docs/07`） | B-1 至 B-5 都能指出位置並驗到 |
+
+**記錄**：每步的時間讀 `date`。決策事件（`asked` / `answer_received` / `applied` / `closed`）和 PO 的實際操作（`po_action`，例如選項、送出、關對話）照 `tools/README.md`「metrics_report --run」寫進 `DIRECTOR/research/<run>/events/`，`metrics_report.py --run` 算到第一個可用預覽的時間、同題重問次數和 PO 操作數；跟一般模式比，加 `--compare <基準 run>`。工具做不到的步驟（例如不能直接開 worker）照實記卡在哪裡，不改劇本。
 
 ### git 細節（2.1.0 從 `docs/08` 移來）
 
 - stash 是所有 worktree 共用的，可能拿到別的 session 的修改。真的要 stash，用 `git stash push -u -m "<唯一標記>"`，記下 SHA，用 `git stash apply <sha>` 還原。
-- 選用 `cdxdw setup --hooks` 提供 Codex 工具護欄。用 `cdxdw doctor --live` 分別查配置、信任與適用版本。
-- 子代理承接父線權限，Hook 覆蓋逐種工具驗證。獨立唯讀 reviewer 使用新 root thread 與寫入探針。
+- 可選：`tools/setup_project_settings.py --hooks` 裝 hook，提醒 `docs/08` 的 git 禁止事項和依名稱結束程序（`--guard-mode block` 才擋）；只是安全帶，規則照樣要守。
+- **hook 在 subagent 裡的限制（2.4.0）**：社群有回報說 subagent 的工具呼叫可能不經過 PreToolUse hook：NOT_VERIFIED（沒有實測；要另一個 CLI 登入才能測）。官方 hooks 文件（https://code.claude.com/docs/en/hooks ，2026-11-15 查）寫的是 PreToolUse / PostToolUse 在 subagent 裡也會觸發，輸入帶 `agent_id` / `agent_type`。兩者對不上，所以不要把 hook 當成 subagent 的唯一防線：派 subagent 的工作線，事後用 `tools/transcript_audit.py`（讀主 transcript 旁的 `subagents/*.jsonl`）重建 subagent 的動作，和動作紀錄對照；`loop_guard.py scan --transcript` 也會一起讀 subagent 的 transcript。
 - PO 授權了私人備份推送時，用一支會拒絕大檔與疑似秘密、只做一般 push、事後核對遠端 SHA 的腳本；腳本拒絕就停下回報，不繞過。
 
 ### 下載與開源工具（2.1.0 從 `docs/08` 移來）
@@ -56,15 +78,19 @@ PO 手動停止後再讓它繼續，也要先完整跑一次這個程序：停�
 
 - 每條工作線一支 `status.py`：`tools/status_gen.py --config <設定> --out <線的資料夾>/status.py` 產生，一次印出 log 尾段、雜湊、磁碟（GiB）、git 摘要、最新輸出，總長有上限。在每輪第一步跑它，不逐項重查（L-042）。
 - 總監版從 `templates/status_director.json` 改起：多印待決頁的計數（PO 已回覆 / 新的）、未結案工單、還沒送出的訊息、每份動作紀錄最近 1 小時的筆數 / 被擋次數 / 讀 log 次數 / session 數，以及該常駐的程序（例如閒置監看）有沒有在跑。讀不到待決頁或程序沒在跑就 exit 1；路徑換成專案自己的。
-- cdxdw 以 Git common directory 綁定狀態。Hook 按已註冊的 session ID 讀角色，App Server 稽核按 thread ID 記。
-- 用 `cdxdw doctor --live` 查工作區的設定與 Hook 信任；用 `cdxdw session status` 檢查當前工單的分支及 thread。
+- 同一個資料夾啟動的 session（總監、worker、清理員）共用同一份 settings。要依 session 給不同的防護，用 `setup_project_settings.py --session-map <sessions 檔>`（`templates/guard_sessions.json`），`hook_guard.py --sessions` 依 `session_id` 選 director / worker / cleaner；受保護清單對每個角色都有效。
+- settings 只從 session 啟動的資料夾讀。`tools/doctor.py` 列出各 worktree 最近啟動過幾個 session：`settings unread`（有防護、卻沒有 session 從那裡啟動）或 `launch folder unguarded`（session 從沒有防護的資料夾啟動）都要處理。
 - 每週用 `tools/poll_hint.py report --log <動作紀錄> --days 7` 看各線手動讀 log 的次數，次數高的線提醒它等完成通知（L-041）。
 - 單一工作線的摘要（2.3.0）：`tools/line_brief.py <線名> --config <status 設定>` 一次印那條線的看板行、git 狀態和最後一個 commit、最新結果檔的開頭、log 尾段；設定寫在 status 設定的 `"lines"`（`templates/status_director.json`）。要看某條線時跑它，不逐項查；不是每輪必讀。
 - 授權快到期（2.3.0）：`tools/doctor.py --licenses <授權清單>` 列出剩不到 3 天（`--license-days`）的授權和是哪個工具持有的；只檢查授權用 `--licenses-only`。清單是 JSON 或 Markdown 表（tool / license / expires）。
 
-### 用量中斷後復工
+### 額度重置後的喚醒
 
-保存待決、目前候選 SHA 和回合結果。額度恢復時間以使用者介面為準。重新開啟時先對帳，從 P0 和最接近交付的線處理；cdxdw 的復工不依賴排程。只有 PO 明確需要定期提醒時才設定宿主排程。
+- 主要機制：總監 session 的背景計時器，睡到「下一次重置 + 3 分鐘」。醒來時：確認重置生效 → 找出被額度打斷、之後沒有完成回報的 session → 送 `RESUME` → **立刻設下一個計時器** → 在 DIRECTOR_LOG 記一行。
+- 備援：環境若有 app 層的排程任務，設一個在週重置後執行的恢復任務，和計時器互為備援。排程任務需要電腦開著、app 開著、連網；需要的權限模式由 PO 設定，先演練一次確認不會卡在權限詢問。
+- 背景程序在重開機或關 app 後會消失，所以不能假設計時器一定會響；恢復鏈要有一條不依賴 session 記憶的路。
+- 各 worker 收到 RESUME 後自己讀檔接續；總監不替別人讀它的檔案。
+- 有限額度時唯一的取捨是**順序**：重置後先恢復 P0 和 gate 收尾的工作線。
 
 ### RESUME_STATE 瘦身（2.2.2）
 
@@ -81,6 +107,7 @@ RESUME_STATE 每次續接都整份讀進 context，太大就是每輪多花額�
 
 - 刪除前逐條比對三份清單：擁有者的保留段、總監的保留清單、受保護清單，各寫「無衝突」或「衝突 → 不刪」。有疑問就不刪。
 - 不在版控內的工作資料（例如 worktree 裡的本機資料夾），刪除前先產生盤點清單（路徑、大小、SHA-256）存檔。
+- 每個 worktree 只留一份大型 build；舊的當證據時才留，RESUME_STATE 註明（3.0.0 從 `docs/08` 移來）。
 - 同一路徑不能同時出現在「保留」和「可回收」，改標記要附系統時間並刪掉舊標記。
 - 擁有者同意還不夠：刪 build 或審查匯出前，先 grep 所有工單、PLAN、RESUME_STATE 有沒有提到這個名稱；有提到的等總監確認。可以重建的，也先寫明重建用的 commit（L-026）。
 - **刪除五步**（2.5.0，L-072）：① 先列清單（路徑一行一個）② `tools/delete_guard.py --list <清單> --repo <每個 repo> --refs "<各線>/**/RESUME_STATE*.md"`，exit 1 的項目不刪，等總監確認 ③ 搬進隔離區或備份，記 SHA-256 ④ 過一段保留期才真刪 ⑤ 對帳：刪了哪些、留下哪些、清單和實際一致。先隔離、可復原期過了才刪，是雲端儲存「soft delete」的做法（Google Cloud Storage〈Soft delete〉，https://docs.cloud.google.com/storage/docs/soft-delete ，2026-11-16 查）。

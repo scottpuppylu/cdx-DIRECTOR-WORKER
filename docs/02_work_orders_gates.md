@@ -13,7 +13,7 @@
 
 - 一律落檔：`DIRECTOR/orders/WO-<編號>-<短名>.md`，格式見 `templates/WORK_ORDER.md`。訊息只附路徑、一句摘要和必要的決定。
 - 必填：`PRIMARY_WORKER / MODEL / EFFORT / FALLBACK / GOVERNANCE / BASE_REF / SCOPE / FORBIDDEN / ACCEPTANCE / DELIVERABLES / STOP_RULES`。
-- BASE_REF 寫 `origin/main @ <commit>`：派工前先 `git fetch`，填 fetch 後遠端分支的最新 commit（2.2.2）。`gate_check.py --order <工單> --repo <專案>` 依設定比對本地遠端追蹤 ref 或 fetch：commit 不存在或落後遠端時印 `~ WARN BASE_REF`，加 `--strict-base` 判不過；fetch 失敗或不是 git checkout 會印「not compared with the remote」，不當作通過。故意從舊版開工就在工單寫明理由。開關在 `director_work.json` 的 `"base_ref"`（`check`、`fetch`、`strict`，cdxdw 預設 true／false／false）。
+- BASE_REF 寫 `origin/main @ <commit>`：派工前先 `git fetch`，填 fetch 後遠端分支的最新 commit（2.2.2）。`gate_check.py --order <工單> --repo <專案>` 會自己 fetch 再比：commit 不存在或落後遠端時印 `~ WARN BASE_REF`，加 `--strict-base` 判不過；fetch 失敗或不是 git checkout 會印「not compared with the remote」，不當作通過。故意從舊版開工就在工單寫明理由。開關在 `director_work.json` 的 `"base_ref"`（`check`、`fetch`、`strict`，預設 true／true／false）。
 - 內容分段：A 背景、B 目標（MUST / OPTIONAL / OUT OF SCOPE，加上 SCOPE / FORBIDDEN 路徑清單）、C 執行前檢查、D 實作要求、E 驗收條件、F 安全與版控、G 完成定義。
 - 驗收條件每項有：ID、類型、要求、驗證方法、預期。結果（實際、證據、狀態）寫在 TASK REPORT 的 ACCEPTANCE 表，不寫回工單。Mock 和單元測試不能當成真實環境的驗收。
 - 類型 `AUTO / REVIEW / PO`：
@@ -25,7 +25,7 @@
 - 初衷卡改了以後（2.1，shadow：只加 `~` 提示，不改 exit code；舊工單照樣通過）：
   - 工單可以選填 `BRIEF_REVISION` 和 `BRIEF_FINGERPRINTS_V1`，值照抄 `gate_check.py --brief BRIEF.md` 印的兩行。每條 B 的指紋是 `brief-row-v1\n` 加上 [ID, 類別, 內容, 怎麼算做到] 精簡 JSON 的 sha256。
   - `--order / --match / --preflight` 加 `--brief BRIEF.md`：工單記的那條 B 被改掉，印 `~ BRIEF_STALE <WO> <B> <受影響的 AC>`（舊條件驗過，新條件待重驗）；被刪掉是「需求已取消，待調整範圍」。同一編號出現兩次、欄數不對，或工單沒記指紋，印 `~ BRIEF_UNCONFIRMED`（依據未確認）。
-  - 初衷卡定版時跑 `gate_check.py --brief BRIEF.md --snapshot brief-history`：只收狀態 LOCKED、有版次的卡，原子寫入快照，印一行 `BRIEF_LOCKED rev=<n> sha=<雜湊> snapshot=<路徑>`，原樣寫進 `DIRECTOR_LOG`。之後加 `--dispatch-log` 時，以最新一行 BRIEF_LOCKED 為依據；定版後的草稿不算。
+  - 初衷卡定版時跑 `spec_gate.py approve --brief BRIEF.md`（3.0.0；舊的 `gate_check.py --brief BRIEF.md --snapshot brief-history` 寫同一個快照）：只收 LOCKED、有版次、有使用者確認時間和原話、未決事項清掉、現成方案調查有寫的卡，原子寫入快照，印一行 `BRIEF_LOCKED rev=<n> sha=<雜湊> snapshot=<路徑>`，原樣寫進 `DIRECTOR_LOG`。沒過這一關，`--hash` 不印工單的 DISPATCH 行。之後加 `--dispatch-log` 時，以最新一行 BRIEF_LOCKED 為依據；定版後的草稿不算。
   - 派工時用 `--hash 工單 --snapshot order-history` 留下工單原檔。工單改版、用 `EVIDENCE_EQUIVALENT` 沿用舊證據時，`--match ... --order-history order-history` 拿舊工單記的指紋比對；條件變了就印 `BRIEF_STALE`，找不到舊工單就印 `BRIEF_UNCONFIRMED`。
 - Worker 不改工單的驗收條件和規格。發現條件做不到、互相矛盾或有錯，回報 `BLOCKED` 並寫明原因，由總監裁決後改工單。
 - 總監改工單時 `REVISION` 加 1，在 H 節記一列（誰改、原因、影響的 AC）。派工時用 `gate_check.py --hash` 印出工單雜湊，把它印的 `DISPATCH <WO-ID> rev=<n> sha=<雜湊>` 那行原樣寫進 `DIRECTOR_LOG`（同一工單以最新一行為準）；worker 在報告填 `ORDER_SHA256`。審查時 `--match ... --dispatch-log DIRECTOR_LOG.md` 拿派工紀錄比對：工單被改過再重算雜湊也會被查出；DISPATCH 必須獨占一行，引用、縮排或圍欄裡的不算；沒有紀錄時各模式都失敗。這是事後查出，不是事前防止：誰都還是改得動工單。
@@ -54,9 +54,10 @@
 - 交接時用 `RESUME_STATE.md`（`docs/06`）；原 worker 先停在安全狀態，接手者先核對 repo 和交接資料一致，不重做已通過的工作。
 - TASK REPORT 可以加 `SESSION_ID:` 和 `RAN:`（一行一個實際跑過的指令，寫 exit 和時間）。總監用 `tools/report_vs_audit.py --report 報告 --log <動作紀錄>` 核對：報告說跑過的 selftest、Unity、Blender、雜湊檢查，動作紀錄裡有沒有、結果和時間對不對得上。它只核對有沒有跑，不代表跑的內容對。
 - RAN 行和時間戳（2.2.5）：RAN 行用 `tools/ran_line.py` 產生（代跑指令或剛跑完補記），裁決表頭和 DIRECTOR_LOG 的時間用 `ran_line.py --stamp`，不手打。報告的 `WORKTREE:` 行照抄 `scope_check.py` 印的那一行（依 `git worktree list` 判斷隔離 worktree 或共用 checkout）。共用 checkout 裡用 `scope_check.py --shared` 只算這張工單自己的 commit。
+- 安全閘門強度（3.0.0，D1，`tools/safety_gate.py`）：`director_work.json` 的 `strength` 決定 Standard / Strict 工單要過哪些閘門，Direct 不受影響。light 全關；standard（預設）只開 `tests_first`；strict 全開：`tests_first`、`plan_gate`、`spec_review_for_standard`、`stop_after_rounds` 1、`prefer_auto`。`tests_first`：工單寫 `TESTS_LOCKED`（見 `templates/WORK_ORDER.md` E 節；2.2.3 的一行寫法照樣讀），鎖住的測試檔變了就 FAIL；`--match --candidate` 從候選 commit 讀檔比對（取自 dshdw ds.7）。路徑可以有空白、可以加引號（取自 agy）。**worker 不能自己關掉開關**：`strength` 設成 light，或在 `safety` 把開關調得比強度鬆，都要 PO_PENDING 裡有一筆寫明這個開關、PO 已回覆的紀錄，否則 FAIL；值的型別不對、設定檔讀不了也 FAIL，不會往寬鬆的方向猜。調嚴不需要 PO。各開關的作用見 `tools/README.md` 的 safety_gate 一節。大小上限和保護測試（3.0.0 B4）有宣告才查，三種強度都一樣：工單的 `ORDER_LIMITS = files=<n> lines=<n> test_lines=<n>`、`TESTS_LOCKED`，或 `director_work.json` 的 `order_limits`、`protected_tests`；`scope_check.py` 判超過上限、保護的測試檔被改（只能在檔尾加），報告照抄它印的 `PROTECTED_CHANGED:` 行。
 - 閘門順序（2.2.5，Standard / Strict）：先 DISPATCH、SPEC_REVIEW，再 PLAN_APPROVED，然後 worker 才開工（格式見 `templates/DIRECTOR_FILES.md` 的 DIRECTOR_LOG）。`gate_check.py --sequence 工單 --dispatch-log DIRECTOR_LOG.md --repo <repo>`：核准晚於 worker 的第一個 commit、沒有核准、沒有規格審查、審查和作者同一個 session，都 FAIL；缺 session id 是 WARN。
 - 裁決之後鎖程式碼（2.2.5）：`gate_check.py --after-verdict` 預設 FAIL。裁決之後的 commit 只改文件（`DIRECTOR/`、`docs/`、`.md` / `.rst` / `.txt`）照樣放行；改到程式碼（SCOPE 內也算）要再審、寫指向新 commit 的裁決；裁決的 commit 已不在分支上（歷史被改寫）也 FAIL。導入舊專案時加 `--warn`。
-- 最終驗收（2.2.5）：最終裁決前，lead 照規格的情境，從交付物唯一的公開入口（CLI 或可呼叫的函式）實際跑一次，證據放 `evidence/E2E/`，每份紀錄寫 `ENTRY_POINT:`。`gate_check.py --final <DIRECTOR 資料夾>` 找不到證據就 FAIL；DECISION_REGISTER 的 DD 沒有「驗收案例」印 WARN。清單在 `templates/GATE_VERDICT.md` G 節。
+- 最終驗收（2.2.5）：最終裁決前，lead 照規格的情境，從交付物唯一的公開入口（CLI 或可呼叫的函式）實際跑一次，證據放 `evidence/E2E/`，每份紀錄寫 `ENTRY_POINT:`。`gate_check.py --final <DIRECTOR 資料夾>` 找不到證據就 FAIL；3.0.0 起（硬底線）紀錄要寫出結束結果：至少一份有 `EXIT_CODE: 0` 或 `RESULT: PASS`，任何非零結束碼、Traceback、`RESULT: FAIL`（或 BLOCKED、PARTIAL、ERROR）、「N failed」都擋，`--warn` 也不能放行；DECISION_REGISTER 的 DD 沒有「驗收案例」印 WARN。3.0.0 起也查交付紀錄（硬底線，C2、C4）：`delivery.py record` 只在候選 commit 就是要交付的 HEAD、也是這張工單最新裁決的 `CANDIDATE_HEAD` 時寫 `evidence/DELIVERY.json`（一定要 `--order`；只有 `GOVERNANCE = Direct` 的工單不用裁決），記下每個交付檔的大小和 SHA-256；`check` 再比一次目前的 HEAD（或 `--delivered <要推的 SHA>`），紀錄之後又有 commit 就是 `HEAD_MOVED`；`delivery.py judge` 每個驗收條件、每個環境各記一筆，自動跑（auto）和手動 E2E（manual）分開記；沒有紀錄、沒寫工單、成品變了、哪個環境少判定、驗收表的類型讀不懂（`UNKNOWN_KIND`）或一列都沒有（`NO_CONDITIONS`）、E2E 紀錄沒寫 `CANDIDATE:`，`--final` 都是 FAIL，PO 條件只印 `PENDING_PO`。清單在 `templates/GATE_VERDICT.md` G 節。
 - worker 輪數上限與交接（2.2.5）：worker 預設到 80 輪或 context 60% 就停（工單 `WORKER_LIMIT` 可改），寫 `HANDOFF.md`（`templates/HANDOFF.md`）回報 lead；lead 開新的 worker 接續，不讓原 worker 繼續長下去。lead 只讀 TASK REPORT 的摘要段（首行到 RESULT）和 HANDOFF.md，不讀 worker 的完整過程。
 - 要看「哪個需求做到哪裡」時，用 `tools/trace_report.py` 從工單、報告和裁決產生追溯表（需求 → 工單 → AC → 證據 → 裁決），不另外人工維護。
   - 加 `--brief BRIEF.md` 時，每條 B 多一列三欄：有人負責／這版有驗證紀錄／你看過這個成品嗎。
@@ -71,7 +72,7 @@
 
 ### 發版（2.2.2）
 
-- 用 `tools/release.py`：先 dry run，乾淨再加 `--execute`。它從 HEAD 讀 VERSION 和 CHANGELOG，工作樹有沒 commit 的改動就停並印下一步；遠端主線比本機新就停（落後），分岔要 `--merge` 另開 `release/<版本>`；selftest 和公開掃描（金鑰、私人 email、使用者路徑、私人檔案）過了才 push、打 annotated tag、建 GitHub Release（Latest），每步用 ls-remote／`gh release view` 驗。細節見 `tools/README.md`。
+- 用 `tools/release.py`：先 dry run，乾淨再加 `--execute`。它從 HEAD 讀 VERSION 和 CHANGELOG，工作樹有沒 commit 的改動就停並印下一步；遠端主線比本機新就停（落後），分岔要 `--merge` 另開 `release/<版本>`；selftest 和公開掃描（金鑰、私人 email、使用者路徑、私人檔案）過了、有 `DIRECTOR/evidence/DELIVERY.json` 時要發的 commit 就是交付驗過的那個（3.0.0），才 push 那個 SHA（遠端在驗證後動了就停）、打 annotated tag、建 GitHub Release（Latest），每步用 ls-remote／`gh release view` 驗。細節見 `tools/README.md`。
 - 有 PR 和 CI 時照順序：PR → CI 全綠 → merge → 在 merge 後的主線 commit（例如 `git switch --detach origin/main`）跑 `release.py`，這時 push 是 SKIP，只打 tag 和建 Release。CI 沒全綠不發版。
 - push、tag、Release 都要 PO 核准（`docs/08`）；release.py 不代替核准。
 
@@ -88,7 +89,7 @@
 - 長批次腳本每一步開跑前檢查暫停旗標（看板的 QUIET）；有暫停就自己停下。
 - 收尾範本（2.3.0）：`templates/run_closing.py`。`run` 模式第一行就寫 ACK，跑完不論成敗在 `finally` 自己寫 DONE（含 exit code），不靠人記得；`go` 模式寫 GO 後等 5 分鐘，沒 ACK 先看有沒有 DONE / RESULT 檔（已經跑完就不吵），沒有才補通知一次，再沒有就印 `NO_ACK`。接到專案只改 `signal()` 和 `seen()` 兩個函式（寫看板、送訊息的方式）。
 - 豁免要有期限和觸發條件（2.3.0）：`tools/waiver.py`。`add` 寫 `--until`（解除它的事件）和 `--watch`（那個事件會改到的檔，記內容雜湊），存在 WAIVERS.json，重開也讀得回來；檔案內容變了或 snooze 時間到才 `WAKE`，沒變就不吵醒人。沒寫 until 印 WARN。`block` 記錄卡在整合的分支，超過 N 小時（預設 8）印 `INTEGRATION_BLOCKED`，建議改成「在預設關閉的開關後面先合進去」，不要一直等。閒置監看每次跑 `waiver.py check --wake-only`。
-- 工具：`tools/pause_ctl.py on|off|status` 管暫停旗標，總監把暫停旗標納入派工及重資源時段檢查；停完用 `pause_ctl.py procs` 依 CPU 增量確認沒有殘留（見 `tools/README.md`）。
+- 工具：`tools/pause_ctl.py on|off|status` 管暫停旗標，worker 的 `hook_guard.py --pause-flag` 在每個工具呼叫前檢查它；停完用 `pause_ctl.py procs` 依 CPU 增量確認沒有殘留（見 `tools/README.md`）。
 
 ### 測試預算
 

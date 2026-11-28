@@ -6,15 +6,29 @@ large cache rebuilds, compactions, tool-result size per tool, images per tool, m
 
 <project-dir> is the folder name Claude Code uses for a project: the start folder's path with every
 character that is not a letter or digit replaced by '-'. Without --project-dir the current folder is used.
+
+3.0.0 (D7): a usage value that is not a non-negative number (a bool, text, a negative number) counts as 0, the
+result says `partial: true` with the field names and a `PARTIAL usage:` line; the totals are then a lower bound.
 """
 import argparse
 import collections as C
 import datetime as D
+import importlib.util
 import json
 import os
 import pathlib
 import re
 import sys
+
+
+def load_common():
+    spec = importlib.util.spec_from_file_location("dw_common", pathlib.Path(__file__).with_name("_common.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+USAGE_KEYS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens")
 
 
 def project_dir_name(path):
@@ -56,6 +70,7 @@ def main():
     big_create, gap_create, part = C.Counter(), C.Counter(), {"main": C.Counter(), "subagent": C.Counter()}
     sizes, first_ctx, per_turn = [], [], []
     compacts = files = 0
+    common, invalid = load_common(), []  # 3.0.0 (D7): values that are not token counts
     for d in dirs:
         if not d.is_dir():
             print(f"NOT_FOUND {d.name}")
@@ -114,8 +129,7 @@ def main():
                         continue
                     seen.add(key)
                     calls_turn += 1
-                    inp, cr, cc, out = (u.get(k) or 0 for k in ("input_tokens", "cache_read_input_tokens",
-                                                                 "cache_creation_input_tokens", "output_tokens"))
+                    inp, cr, cc, out = common.usage_numbers(u, USAGE_KEYS, "usage.", invalid)
                     ctx = inp + cr + cc
                     tot["calls"] += 1
                     tot["input"] += inp
@@ -164,8 +178,11 @@ def main():
         "tool_result_chars": dict(tool_chars.most_common(10)),
         "tool_result_images": dict(tool_imgs.most_common(8)),
     }
+    res.update(common.usage_partial(invalid))
     for k, v in res.items():
         print(f"{k}: {json.dumps(v, ensure_ascii=False)}")
+    if invalid:
+        print(common.partial_line(invalid))
     if a.json_out:
         with open(a.json_out, "w", encoding="utf-8") as fh:
             json.dump(res, fh, ensure_ascii=False, indent=2)

@@ -6,6 +6,159 @@
 - **MINOR**：新增規則、文件、工具或選項，舊檔案照樣通過。
 - **PATCH**：修正文字、修 bug，規則不變。
 
+## 3.0.0 — 2026-11-28
+
+MAJOR（PLAN §6.9：一個基板加四個 adapter；這是基板，分支 v3-base）。照常的舊檔案和舊設定大多照樣通過；會從通過變成不通過的情況列在「行為改變」，該怎麼改寫在「遷移」，這次沒做的寫在「延後」。兩個原則：每加一條規則就要併掉另一條；硬線靠工具，不靠文字。
+
+### 新增
+
+- `tools/_common.py`（G1）：工具共用的原子寫入（`write_bytes_atomic`／`write_text_atomic`／`write_json_atomic`）、log 尾端讀取（`tail_lines`／`tail_jsonl`）和 git 路徑判斷。waiver、gate_check、setup_project_settings、transcript_audit、line_brief、loop_guard 改用它。
+- `_common.exit_code_from`／`gate_status`（G2）：從命令輸出讀結束碼。要剛好讀到一個結束碼才算數；沒有結束行、兩個不同的碼、空字串或不是文字，結果都是 INVALID，不會是 PASS。
+- `tools/bootstrap_repo.py`（D6，取自 dshdw）：把只在本機用的檔（預設 `.claude/settings.local.json`，`--add` 可加 `CLAUDE.local.md` 等）寫進 git 真正讀的 exclude 檔（`git rev-parse --git-path info/exclude`，所有 worktree 共用）。在 linked worktree 裡 `.git` 是檔案，以前文件教的 `echo ... >> <REPO>/.git/info/exclude` 會失敗。寫完用 `git check-ignore` 確認才算 DONE；已被追蹤的檔是 FAIL（要 PO 決定）；`--check` 只回報。不 commit、不改 `.gitignore`。
+- `memory_size_check --chain FILE...`（D4，取自 dshdw）：量一條必讀鏈（開工前一起讀的檔）。每個檔一行 `CHAIN`（位元組、CRLF 檔另列 LF 位元組、約略 token），再列出兩個檔共有、連續 3 行以上的段落（`DUP a:行-行 = b:行-行 (n lines)`；空行略過，只有標點的行不當段落開頭），最後一行 `CHAIN: PASS|FAIL|INVALID|MISSING files= bytes= (limit) lf_bytes= ~tokens= dups=`。上限預設 24576 位元組（PLAN §6.9-2 的 24 KB 必讀上限），`--max-bytes` 可改。超過是 FAIL；空檔、不是 UTF-8 的檔是 INVALID（照 G2）；重複段落只列出，不會 FAIL。除了 `--max-bytes` 不能和別的選項一起用。
+- `_common.usage_number`／`usage_numbers`／`usage_partial`／`partial_line`（D7，取自 dshdw ds.7）：基板共用的用量格式。token 數必須是非負的有限數；布林值（`True` 不是 1 個 token）、文字（連 `"12"` 也不收）、負數、無限大、清單都算 0，並記下欄位名稱。只要有一個這種值，結果就是 `partial`。哪個檔、哪些欄位存用量，由各平台的轉接自己讀；遇到不是數字的值怎麼處理，統一照這裡。
+- `usage_report`、`usage_mix`（D7）：改用上面的共用規則。輸出多 `partial`、`invalid_count`、`invalid_fields` 三個欄位；有壞值時多印一行 `PARTIAL usage: …`，說明總數是下限，不是實測值。以前布林值 `True` 會被當成 1、負數會照加、`"12"` 會讓 `usage_report` 噴 traceback。exit code 不變。
+- selftest 新增 `test_usage_partial_300`（D7）：單元案例、兩支工具的壞值和乾淨案例、`--since` 範圍外的壞值不算，加上 6 個 mutation。
+- `tools/safety_gate.py`（D1，合併 dshdw ds.7 和 agydw）：安全閘門的規則。`director_work.json` 新增 `"strength"`（light／standard／strict，預設 standard）和選用的 `"safety"` 開關。light 全關；standard 只開 `tests_first`；strict 全開（`tests_first`、`plan_gate`、`spec_review_for_standard`、`stop_after_rounds` 1、`prefer_auto`）。`--lock-tests` 印 `TESTS_LOCKED` 清單（路徑有空白就加引號），`--plan-hash` 印 `PLAN_APPROVED` 行，`--show` 印目前的設定。
+- `gate_check --order`／`--match`（D1）：Standard／Strict 工單跑上面的安全閘門。`--match --candidate` 從候選 commit 讀鎖住的測試檔比對（dshdw ds.7 的做法）；`TESTS_LOCKED` 的路徑可以有空白、可以加引號（agy 的路徑解析）。`--match` 現在也收 `--repo` 和 `--config`。
+- `setup_check`（D1）：認得 `strength`、`safety` 兩個欄位，並用同一套規則檢查值。
+- `templates/WORK_ORDER.md`（D1）：E 節加 `TESTS_LOCKED` 欄位和寫法；`director_work.example.json` 加 `"strength": "standard"`、`"safety": {}` 和說明。
+- selftest 新增 `test_safety_gate_300`（D1）：三種強度、鎖住的測試（帶空白和引號的路徑、2.2.3 一行寫法、候選 commit 裡改過或刪掉）、沒有 PO 回覆就放鬆、PO 回覆後放行、型別不對的值、strict 的 STOP_RULES、計畫核准和規格審查、三個指令、setup_check，加上 9 個 mutation。
+- selftest 新增 `test_gate_fail_closed_300`（G2）：每個閘門工具在缺檔、空檔、解析失敗、逾時、子程序非 0、程式找不到時，都必須 exit 1 或 2、沒有 traceback、沒有 PASS／OK／CLEAN 結論行；另有 mutation test，把每個新檢查拿掉後要有案例變錯。
+- `tools/spec_gate.py`（R6、R7、C1，硬底線）：規格閘門。初衷卡要 `LOCKED`、版次是數字、有「使用者確認時間」和「使用者確認原話」、「未決事項」每項寫「已解決」或「暫緩」加使用者原話（沒有就寫「- 無」）、「現成方案調查」至少一項；`approve` 寫 `<版次>-<sha>.md` 快照（和 `gate_check --brief --snapshot` 同一個檔）並印 `BRIEF_LOCKED` 行，`check` 核對卡在確認後沒再改過（改了是 CHANGED，回到關卡重談、重新確認）。讀不到、空檔、不是 UTF-8 是 INVALID。不靠 hook：`gate_check --hash`、`dispatch_check --log`、`worktree.py open` 都先跑它，所以小白模式（不裝 hook_guard）走這三個工具時也擋得住；總監不經過這些工具、自己開 worker 或寫檔，基板擋不到，要靠各平台 adapter 的 hook（審查 5-3）。
+- `templates/BRIEF.md`：加「使用者確認原話」欄、「限制」「未決事項」「現成方案調查」三節；`templates/CLAUDE_PROJECT_SECTION.md` 的「品質」一句併入「動手前先深入找現成的，找到就採用」（R7，併進原句，沒有多一條）。
+- selftest 新增 `test_spec_gate_300`：完整卡、核准前、核准後、CRLF、確認後改卡、13 種不完整的卡、已解決／暫緩、空白範本、缺檔／空檔／非 UTF-8，以及 `gate_check --hash`、`dispatch_check --log` 兩個入口。反向對照：同一組測試對 HEAD 的工具跑，53 項有 36 項失敗。
+- selftest 新增 `test_director_in_project_300`（R3、G4）：預設忽略 `DIRECTOR/`、git status／`git add -A` 看不到總監的檔、linked worktree 也忽略、快速路徑的 `DIRECTOR/.gitignore`、已被追蹤是 FAIL、舊的 repo 外 DIRECTOR 照樣能用，加上文件檢查。
+- `tools/handoff.py`（R5、C3，取自 baton 的做法）：換總監（換平台、換帳號）用。`export` 查 `DIRECTOR/INDEX.md` 有沒有指到規格、決策、進度、待決、日誌五個檔，再把派工紀錄、還沒派出的草稿、未關閉的待決事項、各 worktree 沒 commit 的工作、候選分支、stash、外部狀態（待決頁網址、GUARDS、工作線）寫成 `DIRECTOR/HANDOFF_MANIFEST.md`，路徑都是相對的；`verify` 比對現況，有變動是 STALE；`quiz`／`score` 是 15 題換手測試，答對 14 題才過，key 放在總監資料夾裡會被拒絕。缺檔、壞 JSON、非 UTF-8 是 INVALID（exit 2）。
+- `templates/DIRECTOR_HANDOFF.md`（R5、C10）：一句提示詞「讀 `DIRECTOR/INDEX.md`，照它接手，不要重問已確認的需求。」、讀不到檔時的長版提示詞、交出和接手的步驟、換手測試和路線。`templates/DIRECTOR_FILES.md` 加 `INDEX.md` 骨架；README 和 BOOTSTRAP 第 3 步列出 `INDEX.md`；`docs/06` 一句提到 `INDEX.md`、`handoff.py`（拿掉只剩一行的「為什麼」，常駐規則大小不變），`docs/06b` 加「換總監」一節。
+- selftest 新增 `test_handoff_300`（R5、C3、C10）：export 的計數和清單內容、清單沒有絕對路徑、清單不進 git、verify PASS 和三種 STALE（規格改了、多了沒 commit 的檔、多派一張工單）、INDEX 缺檔或沒指到、INVALID 四種、key 放錯位置、quiz 不洩漏答案、15/15、14/15 過、13/15 不過、缺答案、紀錄太薄時 quiz FAIL，以及文件裡的提示詞和工具列。
+- `tools/delivery.py`（C2 硬底線、C4，取自 cdxdw 的交付合約和驗收紀錄，簡化成平台無關的一個檔）：`record` 要帶 `--order`，候選 commit 要是要交付的 HEAD，而且要等於那張工單最新裁決（`*VERDICT*.md`）寫的 `CANDIDATE_HEAD`（`GOVERNANCE = Direct` 的工單沒有裁決，免比），才寫 `DIRECTOR/evidence/DELIVERY.json`；候選是呼叫的人填的，所以要對回裁決驗過的那一個（審查 P1-4、5-4）。記下每個交付檔的大小和 SHA-256（commit 裡的檔取 commit 的版本，有沒 commit 的改動是 `DIRTY`；建置產物取磁碟上的）；換候選就清掉舊判定（`JUDGMENTS_RESET`）。`judge` 每個驗收條件、每個環境、每種判定各記一筆：auto（自動跑）、manual（手動 E2E）、review、po，附證據檔的雜湊。`check` 重新核對：交付 SHA、檔案大小雜湊、E2E 紀錄的 `CANDIDATE:`、證據有沒有被改、每個 AUTO／REVIEW 條件在每個環境都有 PASS（手動跑不能代替自動跑），PO 條件只印 `PENDING_PO`。缺紀錄、壞 JSON、非 UTF-8 是 INVALID（exit 2）。
+- selftest 新增 `test_delivery_300`（C2、C4）：候選不是 HEAD、短 SHA、repo 外和絕對路徑、缺檔、沒 commit 的改動；紀錄內容（大小、雜湊、相對路徑）；判定的錯誤輸入；手動跑不算自動跑、一個環境不能代替另一個、最後一筆算數、PO 判定；成品變了、證據變了、E2E 跑的是別的候選、交付 SHA 被改、壞紀錄；`--final` 沒紀錄、找不到 repo 都 FAIL，`--warn` 不放行；換候選清掉判定；拿掉 SHA 比對的 mutation。`test_final_225`、`test_final_outcome_300` 會過的案例補一份交付紀錄。
+- `tools/worktree.py`（D3、G6，取自 dshdw 的 worker worktree 和 cwd 檢查）：`open` 每個 worker 開一個 git worktree，放在專案旁邊（預設 `<REPO>/../wt/<工單>`，分支 `wt/<工單>`）；開在專案資料夾裡面、資料夾已存在、工單代號有怪字元都拒絕，不刪任何東西。`status` 印報告要抄的 `WORKTREE:` 行（從 git 資料夾判斷，子模組不會被當成 worktree）；`cwd` 是開工第一步，目前資料夾不是工作區（子資料夾也不算）就 BLOCKED、什麼都不寫；`temp` 把 TEMP／TMP／TMPDIR 指到 `<工作資料夾>/tmp`；`same` 用 git common dir 判斷兩個資料夾是不是同一個 repo（G6）。
+- `tools/install.py`（C7）：安裝或升級 `DIRECTOR/tools/`。`manifest` 是有版號的檔案清單（每個檔的大小和 SHA-256）；`install` 預設只列要做的事，`--execute` 才裝：拿鎖（第二個安裝印 BUSY）、在暫存資料夾組好並逐檔驗雜湊、舊資料夾整個改名成 `.bak-<舊版>-<時間>` 並驗過、再換上新的，任何一步失敗就放回舊的；專案自己加的檔保留，裝過後被改的檔列 `~ EDITED`（備份裡有）。`check` 照 `INSTALL_MANIFEST.json` 核對。
+- `templates/VARIANT_README.md`（D8、G8）：變體 README 範本：三段（新增、沿用上游（轉接覆寫要列理由）、拿掉（NOT_PORTED：為什麼沒做、少了會怎樣、替代做法））加一段「跟上游的紀錄」（審查 5-5）。
+- selftest 新增 `test_worktree_300`、`test_loop_wait_tools_300`、`test_install_300`、`test_audit_source_300`、`test_variant_readme_300`（上面各項，含 mutation）。
+- `docs/13_bootstrap_details.md`、`docs/14_user_guide.md`（plan 6.9-2、G5）：BOOTSTRAP 第 0～14 步的完整做法、README 的使用說明，原文搬過來，需要時才讀。selftest 新增 `test_chain_size_300`：常駐四份 ≤ 8 KB、`memory_size_check --chain` 量 README＋BOOTSTRAP＋常駐四份 ≤ 24 KB、每份 docs 都在檔案地圖、啟動提示詞只讀這條鏈、R4 和 D9 併進原句。
+- 「隔離要能驗證」（C8，原理）：併進 `docs/07` 盲審稽核那一行，沒有新條目；各平台的檢查程式留在 adapter（cdxdw 已有）。selftest `test_optional_items_300` 檢查它和 C5、C6 的延後紀錄。
+
+### 行為改變
+
+- `gate_check --final`（C2，硬底線）：也跑 `delivery.py check`。沒有 `evidence/DELIVERY.json`（`NO_DELIVERY`）、交付的 commit 不是驗過的候選、交付的檔變了、找不到 repo 核對檔案、E2E 紀錄寫的是別的候選、哪個環境少了 AUTO／REVIEW 判定，都是 FAIL；`--warn` 不放行。
+- `setup_project_settings` 的 `NOT_IGNORED`（D6）：提示改成 `bootstrap_repo.py`，並印出要寫的 exclude 檔實際位置（linked worktree 也對）。判定本身沒變。`BOOTSTRAP.md` 第 4、7 步改用 `bootstrap_repo.py`。
+- agy adapter（G2，agy P0，`build/agy-base` 另一個 repo）：`templates/workflows/gate_verify_workflow.py` 拿不到結束碼時判 `INVALID`，不再判 `PASS`。舊版只看回覆第一行，沒有「非 0 結束碼」那行就當通過，所以命令還在跑、格式改了、空回覆、結束碼前多一行標頭都會假 PASS；新版要整段回覆裡剛好一個結束碼。agy 自己的 selftest 新增一組，8 種回覆比對：舊版 4 個假 PASS → 新版 0。agy 的 CHANGELOG 要求最上面是版本號，所以記在這裡。
+- `gate_check --final`（D2，取自 dshdw，硬底線）：只有「`evidence/E2E/` 有非空的檔」不夠了，還要真的跑完而且成功。任何一份紀錄有非零結束碼（`EXIT_CODE: 1`、`exit=1`、`Command exited with code 1`），或有一行以 `FAIL`、`FAILED`、`ERROR:`、Python traceback 開頭，就 FAIL；至少一份紀錄要有 `EXIT_CODE: 0`（或 `exit=0`）或 `RESULT: PASS`（RESULT／STATUS／VERDICT 配 PASS／OK／SUCCESS），否則 `E2E_INCOMPLETE`；不是 UTF-8 文字的紀錄也是 FAIL。`--warn` 不再把 `--final` 降成 WARN。`templates/GATE_VERDICT.md` G 節、`docs/02`、`tools/README.md` 跟著改。
+- `gate_check --order`／`--match` 的 Standard／Strict 工單（D1，預設強度 standard）：工單沒有 `TESTS_LOCKED` 就 FAIL（沒有測試檔的工作寫 `- NONE  # 原因`）；鎖住的測試檔變了也 FAIL。`director_work.json` 把強度調成 light 或關掉開關，沒有 PO 在 PO_PENDING 回覆就 FAIL（worker 不能自己關）；`strength`／`safety` 的值型別不對，或 `director_work.json` 讀不了，也 FAIL。Direct 工單不受影響。已知限制：把 `"strength": "strict"` 刪掉會回到 standard，工具看不出來。
+- `line_brief`（G1）：讀 log 尾端時，被截斷的第一行會丟掉，不再印出半行。
+- `line_brief --log-lines 0`（G1）：什麼都不印。2.6.0 會印出整段。
+- `gate_check --hash`（R6）：工單（有 `GOVERNANCE =` 行的檔；審查 P2-8 起，放在 `orders/` 或檔名是 `WO-<n>` 開頭的手寫工單也算，報告、裁決、審查、請求、RESUME 檔不算）的初衷卡沒過 `spec_gate` 就不印 DISPATCH 行，exit 1。初衷卡依序找 `--brief`、工單同資料夾、工單旁的 `DIRECTOR/`、上一層（`DIRECTOR/orders/` 的情形）；都沒有就是 FAIL。報告、裁決不受影響。`gate_check --brief --snapshot` 也要求上面的內容檢查。
+- `dispatch_check --log`（R6）：log 裡有 DISPATCH 行，而 log 旁的 `BRIEF.md`（或 `--brief`）沒過 `spec_gate`，就是 FAIL、exit 1，不必加 `--strict`。沒有 DISPATCH 行的 log（還在談需求、做調查）不受影響。
+- 總監資料夾的位置（R3、G4）：預設從 repo 外（`<WS>/DIRECTOR/`）改成專案資料夾裡的 `<REPO>/DIRECTOR/`，但不進 git。`bootstrap_repo.py` 的預設清單多了 `DIRECTOR/`（寫進所有 worktree 共用的 exclude 檔）；git 已經在追蹤 `DIRECTOR/` 是 FAIL，要不要移出版控由 PO 決定。小白快速路徑先寫 `DIRECTOR/.gitignore`（內容 `*`），不必等工具。`BOOTSTRAP`、`README`、`docs/12` 跟著改。
+- `loop_guard`（D5）：`--config` 檔可設 `wait_tools`（等 subagent 結果的工具名稱）。這些呼叫不算重複、輪流或輪詢；參數被拒、subagent 失敗沒人處理照舊報。判斷和門檻只有 `loop_guard.py` 這一份，各平台的 hook 都呼叫它。
+- `transcript_audit`（C9）：重建紀錄的 `sources` 每個檔多一個 `lines`（行數），和 `sha256`、`bytes` 一起記。
+- 必讀瘦身（plan 6.9-2、G5、R4、D9）：總監開工前讀的鏈從 89 KB（README 53.6 KB、BOOTSTRAP 26.1 KB、常駐 docs 9.5 KB）降到約 22 KB：README 只留啟動提示詞、接手那一句和檔案地圖（6.8 KB），BOOTSTRAP 只留第一則回覆的做法和步驟清單（7.0 KB），常駐四份 8.2 KB。啟動提示詞第 1 步改成「README → BOOTSTRAP → 每輪必讀的 01、03、06、08，其他照地圖需要時才讀」，不再要求讀完 docs/01～10；`PURPOSE.md` 改在談需求前讀。常駐規則搬走的細節（範圍、PO 訊息的晚讀與撤回、ACT、IN_FLIGHT 欄位、大型 build、git／下載細節）移到 `docs/06b`、`docs/08`，意思不變。R4（講白話、術語先解釋）併進 `docs/03` 回報那一行，D9（同一呼叫失敗兩次，先寫一行原因和下一步）併進 `docs/01` 換人那一行，都沒有新條目。selftest 的 `MUST_READ_LIMIT` 從 9550 降到 8192；檢查 README／BOOTSTRAP 字句的測試改成兩份一起查（`doc_text`：README＋docs/14、BOOTSTRAP＋docs/13）。`docs/06` 補回 63edfb0 拿掉的「其他理由見 docs/10。」（`test_must_read_reasons` 從那時起是失敗的）。
+- `release.py`（plan 6.9-3）：變體版號改成「上游版號＋`-標籤.N`」整組比較，只要整組比遠端每個 tag 都大就可以。上游版號變大時序號可以從 1 重來（`v2.2.1-x.2` 之後可以發 `2.2.2-x.1`）；比遠端小的照舊停下。2.6.0 要求序號永遠不重來。工具雖然收從 1 重來的序號，DW 系列的規定是序號接續前一版（cdx.11、agy.7、dsh 的 ds.8；總監 11-28），不從 1 重來。
+- 下面是 G2 的硬線「閘門拿不到結果，就是 FAIL 或 INVALID，不能是 PASS」：
+  - `gate_check --po-acceptance`：空檔或不是 JSON 的檔，從 `~ UNBOUND_PO_REPLY` 註記（OK）改成 `INVALID PO_ACCEPTANCE file`（FAIL，exit 1）。檔案可讀但記錄清單是空的，照舊是註記。
+  - `round_check`：空檔，或不是 UTF-8 的檔，從 `ROUNDS: PASS` 改成 FAIL（`INVALID empty file`／`INVALID not UTF-8 text`）。內容沒有 FIX_ROUNDS 的檔照舊通過。
+  - `memory_size_check`：空檔或不是 UTF-8 的檔是 `INVALID EMPTY`／`INVALID NOT_UTF8`（exit 1）。多檔模式的最後一行可能是 `SIZE: INVALID`，並多一個 ` invalid=n` 欄位。
+  - `audit_log verify`：空的 log 從 `OK` 改成 `INVALID EMPTY`，最後一行是 `EMPTY`，exit 1。`doctor` 把空的 log 視為「設定了但還沒驗證」（CONFIGURED_NOT_VERIFIED），和不存在的 log 一樣。
+  - `dispatch_check --log`：空的 log 從 `DISPATCH_CHECK: OK records=0` 改成 `FAIL input`（exit 2）。log 有內容但沒有 DISPATCH 行，照舊是 OK。
+  - `setup_check`：目標檔不是 UTF-8 時，從 traceback 改成一行 `INVALID not UTF-8 text`（FAIL）。
+  - `delete_guard`：
+    - 沒有東西可搜（沒給 `--repo` 也沒給 `--refs`）時，從 `DELETE_GUARD: CLEAN`（exit 0）改成 `DELETE_GUARD: NOT_RUN`（exit 2）。
+    - 有一個 `--refs` 對不到任何檔，或有參考檔讀不了：exit 2。
+    - `--list` 不是 UTF-8：exit 2，不再噴 traceback。
+
+對齊初衷：
+1. 幫到誰：總監和 worker。閘門沒有拿到結果時，不會再顯示成通過；在 worktree 裡設定忽略規則不會再寫錯地方。依據：PLAN §6.9 G2、D6、D4、D2、D7、D1、agy `run_checked` P0。
+2. Desktop：都是本機命令列工具，沒有新的每輪步驟。
+3. 服務的初衷：
+   - 初衷 5（成品要真的對）：沒跑到或讀不到，就不算過；端到端沒跑完、跑失敗，不能給最終 PASS。
+   - 初衷 5（成品要真的對）：驗收測試先寫好、鎖住，worker 改測試來過關會被抓到；安全閘門只有 PO 能放鬆。
+   - 初衷 2（省額度）：用量數字讀不懂時標成 partial，不會把壞值算進總數，報表不會看起來比實際省。
+   - 初衷 2（省額度）：共用 `_common`，不用每支工具各寫一份。
+4. 核心：每輪必讀沒有變長；只用標準庫；git 只讀。
+5. 舊檔案和舊指令：照常的檔案照樣通過。只有上面列出的「拿不到結果」情況，從通過改成 FAIL、INVALID 或 NOT_RUN；初衷卡沒過規格閘門（R6）的工單不再印 DISPATCH 行；`--final` 的端到端紀錄現在要寫出結束結果。所以是 MAJOR。
+
+### 審查修正（獨立審查第一階段，總監裁定）
+
+- P1-1、P2-2 `spec_gate approve`：卡在核准後改過（CHANGED），要用比最新快照高的版次、新的確認時間和使用者原話才能再核准，不然是 `REAPPROVE_WITHOUT_CONFIRM`，`gate_check --brief --snapshot` 也一樣擋；最新快照照版次的數字挑（10 在 9 後面）。
+- P1-2 `spec_gate`：R6 也查內容，空的是 `INCOMPLETE_SPEC`：一句話要寫；B 表要有「給誰」和「一定要有」兩列；每列的內容和怎麼算做到都要填，不能留 `<佔位>`；「## 限制」要有一項（「- 無」也算回答）。寫在 ``` 區塊裡的列不算。
+- P1-3 `worktree.py open`：開 worktree 前先跑規格閘門，卡沒過就不開。
+- P1-4、P1-5、P1-6、P2-6、P2-7 `delivery.py`：`record` 要帶 `--order`，候選要等於最新裁決的 `CANDIDATE_HEAD`（Direct 例外）；`check` 再核對 HEAD 還是交付的 commit（`HEAD_MOVED`）、最新裁決還是同一個候選；驗收列的類型不是 AUTO／REVIEW／PO 是 `UNKNOWN_KIND`；E2E 紀錄沒有 `CANDIDATE:` 是 `E2E_NO_CANDIDATE`；同一個編號有兩張工單是 `AMBIGUOUS_ORDER`，不再挑排序第一個。
+- P1-7、P2-13 `handoff.py`：`WO-003-login.md` 認得是 WO-003（`WO-0010` 不是 WO-001）；計分時「無」要完全相等，「無法確定」不算答「無」。
+- P1-8、P2-3 `safety_gate`：`TESTS_LOCKED:` 底下沒有項目，或 `- NONE` 沒寫 `# 原因`，都是 FAIL。
+- P2-1 `spec_gate`：未決事項要以「已解決：」或「暫緩：」開頭才算處理完，句中出現這兩個詞不算。
+- P2-8 `gate_check --hash`：放在 `orders/` 底下、或檔名是 `WO-<n>` 開頭的手寫工單，少了 `GOVERNANCE =` 行也照樣先過規格閘門才印 DISPATCH 行。
+- P2-10 `bootstrap_repo.py`：`--repo` 給子資料夾時，先換成 checkout 的最上層再檢查；同一行不會再寫第二次。
+- 5-2（裁定為 P1）小白模式必讀鏈：談需求前要讀的部分拆成 `docs/12a_before_brief.md`，整條鏈 23,785 bytes，在 24 KB 上限內；`memory_size_check --chain` 量得到小白鏈。
+- 5-1、5-3、5-4、5-5 文件：`install.py` 不再說 base_sync_check 已經在讀清單；規格閘門寫清楚只有 `gate_check --hash`、`dispatch_check --log`、`worktree.py open` 會跑，其他路要靠 adapter 的 hook；`record` 要帶 `--order`，候選要等於裁決的 `CANDIDATE_HEAD`；VARIANT_README 是三段加「跟上游的紀錄」。
+- 隱私（裁定）：新增 `tools/privacy_scan.py` 和 `tools/privacy_allow.txt`。掃整棵樹的每個檔和路徑名稱：磁碟代號路徑、使用者資料夾、email、token 格式、擁有者其他專案的代號、帳號名（公開 repo 網址除外）、本機詞表。允許清單每條都要理由，只放公開 repo 網址、測試網域和 DW 系列自己的公開名稱。`release.py` 多一步 `privacy`（掃 HEAD 的檔），任何 HIT 都停在 push 之前。範本和文件裡的 `<碟>:/PROJECT`、`<碟>:/X` 等改成 `<WS>`；`doctor.py` 改讀 `%ProgramFiles%`，原始碼裡不寫磁碟代號；selftest 的測試資料改成執行時才組出來。
+
+### 跨變體補齊（盤點 `CROSS_VARIANT_AUDIT_300` 第 2 節 B1–B12，PO 11-28「所有版本都是最先進最新的」）
+
+- B6 `tools/readme_check.py`：DW 系列 README 少了哪一節（規格 §1-9），缺節、空節都 FAIL；`release.py` 在 version 之後、selftest 之前多一步 `readme`，HEAD 有這支工具才跑，拿不到 exit code 或沒有 PASS 行也停。`tools/base_sync_check.py`：cld 的 `adapters/claude/base_sync_check.py` 平台無關，升到基板，每個變體跑同一支；`--variant` 預設目前資料夾，`--registry` 預設變體裡唯一的 `adapters/*/BASE_SYNC.json`（沒有或不只一個就要指定）。selftest 新增 `test_base_sync_check_300`（cld 的全部案例加預設登記檔）。selftest 新增 `test_readme_check_300`（變體、基板、缺節、空節、``` 裡的標題、少一個 repo、少網址、少凍結 SHA、`--rev`，release 的 FAIL／SKIP／逾時／沒結論行，加上 5 個 mutation）。
+- B1 `scope_check.py --candidate`（取自 agy.3）：SCOPE／FORBIDDEN／OUTSIDE 也改用 `merge-base..候選` 的差異，不再讀 checkout；以前審查的人 checkout 乾淨時，候選改了禁區檔也查不到。selftest 新增 `test_scope_candidate_300`（agy 的 worker 分支／乾淨 main 同一個 VIOLATION、orphan HEAD，加上沒 commit 的檔不算、1 個 mutation）。
+- B7 `README.md`：加「所屬系列」（五個 repo 的網址、平台、3.0.0 版號、適合什麼情況用）、「跨變體借用」「版號規則」「CHANGELOG」「致謝（Credits）與授權」；`templates/VARIANT_README.md` 加「所屬系列」「跨變體借用」，各節順序照規格 §1-9。必讀鏈仍在 24 KB 內：檔案地圖的說明縮短（事實不變）。
+- B2 `gate_check --final` 的 E2E 失敗字樣（取自 agy.6 `2df3483`）：以前紀錄寫 `RESULT: FAIL` 又有 `EXIT_CODE: 0` 會放行（ds.7 只把 `RESULT: PASS` 算成功，沒把 `RESULT: FAIL` 算失敗）。現在 `RESULT`／`STATUS`／`VERDICT` 配 `FAIL`／`FAILED`／`ERROR`／`BLOCKED`／`PARTIAL`（不分大小寫，`:` 或 `=`）開頭的行，和「N failed」（N ≥ 1，例如 pytest 的 `3 failed`）都算失敗；`0 failed` 不算。selftest `test_final_outcome_300` 加 agy.6 的 3 個案例（`RESULT: FAIL`＋`EXIT_CODE: 0`、`=` 欄位、好紀錄旁的 WIP 紀錄）和 7 個新字樣案例、2 個 mutation。
+- B3 `release.py` 只發驗過的 commit（C2 硬底線，取自 cdx_release）：state 步驟後釘住 HEAD，push `<sha>:refs/heads/<branch>`，不再推 push 當下的 HEAD（selftest 期間多出的 commit 以前會被推上去）；privacy 之後多一步 `delivery`：有 `DIRECTOR/evidence/DELIVERY.json`（`--director` 或設定 `director` 可改）就要 `delivery.py check --delivered <sha>` exit 0 加 PASS，沒有紀錄印 SKIP；push 前再 ls-remote，遠端在驗證後動了就停；`--execute` 時打 tag 前、建 Release 前各確認遠端分支還是驗過的 commit。selftest 新增 `test_release_delivery_300`（SKIP、PASS、紀錄後再 commit、壞紀錄、`--director`、`--execute`、驗證後遠端動了、檢查途中 HEAD 動了、tag 前遠端變了，加 3 個 mutation）。
+- B4 `scope_check.py` 查大小上限和保護測試（總監決定，取自 agydw／dshdw ds.4 B1、B5，規格不變）：工單寫了 `ORDER_LIMITS`、`TESTS_LOCKED`，或 `director_work.json` 有 `order_limits`（Standard / Strict 工單）、`protected_tests` 才查，三種強度都一樣；沒寫就不查（agydw／dshdw 以前沒宣告時用 3 / 200 / 400，它們的範例設定有寫這個區塊，改用基板版時照樣會查）。超過上限 `OVERSIZE`，保護的測試檔只能在檔尾加內容，否則 `PROTECTED`，都是 VIOLATION；印 `SIZE:`、`PROTECTED_CHANGED:`；設定值型別錯、讀不了是 NOT_RUN。`gate_check --match` 拿報告的 `PROTECTED_CHANGED:` 和 git 比。`--candidate`、共用 checkout 也照算。範本加 `ORDER_LIMITS`、`PROTECTED_CHANGED` 欄。selftest 新增 `test_scope_size_protected_300`（搬 dshdw 的 order_oversize、order_limits_224、protected_tests_224、protected_report_224，加工單行、Direct 工單不套設定、壞設定、候選、共用 checkout、FORBIDDEN 不重複算，4 個 mutation）。
+- B5 `release.py` 的 describe 步驟（取自 dshdw 2.4.0-ds.6）：建好 Release 後把 GitHub repo 說明裡的版號換成新版號（`v` 前綴保留），`gh repo edit --description` 後用 `gh repo view` 確認；沒有版號、已是新版號 SKIP；本機沒有 gh 也是 SKIP（總監決定，dshdw 是停）。dry run 多一行計畫，計畫的遠端步驟從 3 變 4。selftest 新增 `test_release_describe_300`（搬 dshdw release_describe_240 全部案例，加沒有 gh 的 `--execute`／dry run，3 個 mutation）。
+- B8 `gate_check.py --report-skeleton <WO.md> [--repo] [--evidence-dir] [--out]`（取自 dshdw 2.2.2-ds.3）：照工單印 TASK REPORT 骨架（ORDER_SHA256、治理模式、HEAD、WORKTREE 行、每條 AC 一列先填好）和收尾指令（evidence_record／scope_check／`--match`，Strict 加 `--candidate`、`--dispatch-log`）；`--out` 不覆蓋已有的檔案。和 dshdw 不同：不印 AGENT_NAME／SESSION_ID 行、WORKTREE 行改用基板 `worktree.py`、路徑加引號、不建暫存資料夾。selftest 新增 `test_report_skeleton_300`（印出的指令真的跑過，3 個 mutation）。
+- B9 `release.py` 的公開掃描直接呼叫 `privacy_scan.py`：拿掉 release 自己的 email／使用者路徑規則，新增行、commit 訊息、作者／提交者 email 都用 `privacy_scan.py` 的 `rules_and_allows()`（同一份規則和 `privacy_allow.txt`），以後只改一處。效果：release 現在也抓得到 `/home/<名稱>`、`\Users\<名稱>`、其他專案代號、私人詞；email 遮罩後再印；noreply／`*.invalid` 只在 commit 訊息和作者欄位放行，檔案裡的 noreply 地址會停；允許清單裡放行的 email 在 release 也放行；`tools/privacy_allow.txt` 新增的行和 `privacy_scan.py` 一樣只讀 ` | ` 後面的理由（條目本身是放行的樣式，不是外洩）；規則讀不了就停。selftest：`test_release_222` 的 email 案例改成看遮罩後的字樣、使用者路徑改成 `drive_path`，加 `/home`、`/Users`、檔案裡的 noreply、Co-Authored-By 放行四個案例和 2 個 mutation。
+- B10 `status_gen.py` 總監版加 LOOPS 段（取自 agy 2.3.0-ds.6）：設定 `"loops": {"path": ...}`，讀 `loop_guard.py scan --out FILE`（新選項：把 `--json` 的內容寫成 UTF-8 檔，exit code 不變；沒讀到呼叫時寫 `no_data`）的 JSON，印檔案更新時間、findings 數、各類次數、查不到的類別、events／streams；NO_DATA 照實印；`agy_audit.py loops --out` 的格式也讀；檔案讀不到是 MISSING、exit 1。selftest 新增 `test_status_loops_300`（找到、沒找到、NO_DATA、agy 格式、壞檔、沒有檔、設定檢查，加 2 個 mutation）。
+- B11 只有 Claude 用的工具標成選用（總監決定：不搬檔）：`install.py` 的 OPTIONAL 表（`hook_guard.py`、`transcript_audit.py`、`context_probe.py`、`browser_check.py`），清單每筆加 `optional`、`install --skip-optional`；`base_sync_check.py` 變體沒帶選用工具印 `OPTIONAL`，不算 MISSING；selftest 碰到沒裝的選用工具就略過用到它的組；`loop_guard.py --transcript` 沒有 `transcript_audit.py` 說清楚要改用 `--audit`；`dispatch_check.py` 沒給 `--table` 時讀規則 checkout 的 `adapters/*/EFFORT_TABLE*.json`。`setup_project_settings.py`、`guard_rules.json` 不能標選用：`setup_check.py` 每個平台都讀它的 CONFIG_VERSION／MODES／PROFILES。selftest 新增 `test_optional_tools_300`。
+- B16 selftest 讀變體版號的掛點（取自 clddw／dshdw 的 selftest 覆寫）：新增 `upstream_300(root)`，有 `BASE_VERSION`＋`CHANGELOG-upstream.md` 讀這兩份，否則讀 `VERSION`＋`CHANGELOG.md`；原本直接讀 VERSION／CHANGELOG.md 的 6 處改用它，待決頁用詞掃描略過 `CHANGELOG-upstream.md`。clddw 因此不用再覆寫 `tools/selftest.py`；dshdw 另外覆寫的 README 字樣不在這項。selftest 新增 `test_upstream_300`（基板、變體、只有一半，加 1 個 mutation）。
+- B17 `loop_guard.py` 補 dshdw ds.7 的兩條較細判斷（原本在 `adapters/deepseek/dsh_audit.py` 的 `ping_pong_progressed`、`retry_unanswered`）：A B A B 輪流但 A 或 B 的結果有變算進展，不報 ping_pong（這兩個呼叫也不改報 repeat／poll）；事件可帶 `text_before`（agent 在上一個呼叫之後、這個呼叫之前寫了文字），同一錯誤重試只算中間沒寫字的最長一段，不到門檻就不報（也不改報別類）。`transcript_audit.py` 讀 transcript 時記下 agent 寫文字的位置，`loop_guard --transcript` 因此用得到；動作紀錄（含 hook 提醒）沒有文字，行為不變。selftest 新增 `test_loop_ds7_300`（ds.7 的 ping_pong_neg／retry_neg 情境、transcript 正反各一，加 2 個 mutation）。dshdw 之後可以改呼叫基板版、拿掉自己那兩份。
+- B18 effort 等級加 `off`（dsh 回報 D11）：`dispatch_check.py` 的等級是 off／low／medium／high／xhigh／max，預設表加 `mechanical` 類別（off 或 low，只照清單做、不用判斷的工作），`--table` 也可以寫 off；`docs/05` 派工難度表同步加一列。DSH 用 off 開機械工作不再多一行 WARN。selftest `test_dispatch_effort_250` 加 off 的正反案例和 1 個 mutation。
+- B19 必讀量算進平台規則檔（dsh 回報）：`memory_size_check.py --chain` 加 `--rules-file FILE`（可多次），`AGENTS.md`／`CLAUDE.md`／`.agent/rules` 裡的 DW 段落（從寫著 總監制／Director mode／DIRECTOR-WORK 的標題到下一個同級標題，圍欄內的標題不算；沒有這種標題就整檔算）算進 24 KB，重複段落也一起比。基板共用必讀檔瘦身 2,652 bytes（CRLF）：`BOOTSTRAP.md` 小白快速路徑第 5 點的延後表、先問模式第 1 點的停下處理、步驟總表原文搬到 `docs/13`（「快速路徑延後的步驟」「步驟總覽」、第 0 步第 5 點），`BOOTSTRAP.md` 留一行指向；README 小修。CRLF 下基板一般鏈和小白鏈都 ≤ 22,016 bytes（留 2,560 給規則檔段落）。selftest `test_memory_chain_300` 加 7 個案例和 2 個 mutation，`test_chain_size_300` 加 CRLF 保留量與範本段落的檢查。
+- 小修（dsh 回報）：`report_vs_audit.py` 的重建紀錄提示原本一律寫 `transcript_audit.py`、「not written by the hook」，但 dshdw 的 `dsh_audit.py build` 也寫 `kind=rebuild`；現在從 `source.by` 印出是哪個工具重建的（沒寫才當 `transcript_audit.py`），說明改成「not written while the agent worked」，docstring 同步。selftest `test_report_vs_audit_221` 加 2 個案例。
+- 小修（dsh 回報）：一題一個號碼。網頁選擇題記進 `PO_PENDING.md` 時直接用網頁題號 `CH-xx`（第一題模式題 `CH-00`），不另編 `OD` 號；`setup_check.py`、`metrics_report.py`（預設 `po_item_pattern` 加 `CH`）和 `handoff.py` 都把 `CH-xx` 當成一筆待決事項。`templates/PO_PENDING.md`、`docs/13` 第 6 步第 2 點、`docs/14` 題號說明、`tools/README` 同步。selftest 新增 `test_po_item_ch_300`（setup_check／metrics／handoff 各一、範本與文件、1 個 mutation）。
+- B19 補做（併進 clddw 時發現）：變體 README 照 B7 補齊「新增／沿用上游／拿掉／安裝」後，原本的 2,560 bytes 不夠 cld 用。README 的換手提示詞、檔案地圖、系列表和授權句再精簡（不拿掉任何檔、列或規則），`templates/CLAUDE_PROJECT_SECTION.md` 也精簡，基板小白鏈 21,683 bytes（CRLF，留 2,893）。`test_chain_size_300` 在基板照舊查保留量；在變體（有 `BASE_VERSION`）改查「變體自己的一般鏈／小白鏈＋它自己的規則檔段落 ≤ 24 KB」，段落由 `adapters/<名>/VARIANT.json` 的 `rules_section` 指定（例如 dshdw 的 `AGENTS.md` 段落），沒寫就量 Claude 範本；JSON 壞掉、兩個變體設定都寫、指的檔不存在都算失敗。selftest 加 5 個掛點案例。其他變體的 README 補齊後還沒量過，各變體併入時要跑這一組。`test_readme_check_300` 也一樣：在變體裡以 `kind=variant` 查這個 checkout 的 README（clddw 全套抓到）。
+- 小修：`memory_size_check.py`（B19 的說明有中文）和 `release.py` 的 `--help` 在不是 UTF-8 的主控台（Windows cp950／cp1252）會 `UnicodeEncodeError`；改成先切 UTF-8 再 `parse_args`，和 2.3.0 其他工具一樣。由全套 `test_help_any_console_230` 抓到（逐項測試組沒跑到這一組）。
+- B12 E2E 舊紀錄開關（取自 agy 2.6.0-agy.5）：`gate_check.py --final --skip-old-e2e` 和 `delivery.py check --skip-old-e2e`，`CANDIDATE:` 寫的是別的 commit 的 E2E 紀錄當成舊紀錄不算，印 `E2E_SKIPPED` 提示；全部都是舊紀錄就 FAIL；沒寫 `CANDIDATE:` 的照算。預設關，不加開關時行為不變（舊紀錄照樣擋，要手動移走）。selftest 新增 `test_final_skip_old_300`（預設照擋、開關放行、全部舊紀錄、沒有 CANDIDATE、只配 --final／check，加 3 個 mutation）。
+- B14 `release.py` 版號檢查（SPEC §1-8，dsh 回報）：變體 `X.Y.Z-<標籤>.N` 的序號要接續遠端同一個標籤的前一版（前一版加 1），以前上游版號變大時收從 1 重來的序號（2.2.1-x.2 之後的 2.2.2-x.1），現在停，NEXT 印出該用的版號；跳號也停。這個標籤還沒有 tag（第一次發版）時序號不限；重跑不再查；基板（沒有標籤）不受影響。selftest `test_release_222`：「新上游版號序號歸 1」改成要停，加跳號、新標籤兩個案例和 1 個 mutation。
+- B15 變體預設強度的掛點（dsh 回報）：`safety_gate.py` 讀 tools/ 旁邊 `adapters/*/VARIANT.json` 的 `"default_strength"`（light／standard／strict），沒有就是 standard；dshdw 寫 light 就不必覆寫 `safety_gate.py`。這個預設和 standard 一樣不需要 PO 回覆；讀不了、值不對、兩個檔不一致都 FAIL，預設維持 standard。`--show` 印出預設從哪裡來。selftest：`test_safety_gate_300` 在有 VARIANT.json 的變體裡改在沒有 adapters/ 的 tools/ 副本上跑（取代 dshdw 的 `test_safety_gate_300_base_default`）；新增 `test_variant_default_300`（light、明寫的強度優先、light 不用 PO、沒檔、沒鍵、壞值、不是 JSON、不是物件、兩檔不一致、兩檔一致，加 1 個 mutation）。
+- B13 `bootstrap_repo.py --add`（cdx 回報 e93b51d）：開頭是 `/` 的 Hook 路徑以前原樣交給 `git check-ignore`，在 Windows 上查不到、FAIL；現在問 git 時用專案相對路徑，exclude 裡那行保留 `/` 錨定；Windows 的 `\`、專案內絕對路徑轉成專案相對路徑，專案外的路徑 exit 2。selftest 新增 `test_bootstrap_add_paths_300`（開頭 `/`、只在根目錄生效、重跑不重複、專案內／外絕對路徑，Windows 另測 `\`、Git Bash 換過的路徑、大小寫不同的磁碟路徑，加 1 個 mutation）。
+
+### 遷移
+
+- 變體的 base_sync_check（B6）：改跑基板的 `tools/base_sync_check.py`；`adapters/<平台>/base_sync_check.py` 可留成只轉呼叫基板版的薄殼（CI 和既有測試不用改）。
+- 變體 README（B6）：照 `templates/VARIANT_README.md` 補齊各節，跑 `readme_check.py` 到 PASS；用 `release.py` 發版的變體，缺節會停在 `readme` 步驟。
+- 最終驗收（C2、C4）：最終裁決前跑 `delivery.py record --candidate <CANDIDATE_HEAD> --order <WO> --env <環境> --file <交付的檔>`（在要交付的 checkout 上），每個驗收條件、每個環境用 `delivery.py judge` 記判定，再跑 `gate_check --final`。E2E 紀錄可以加一行 `CANDIDATE: <commit>`，寫了就要和交付紀錄一致。
+- 安裝（C7）：`DIRECTOR/tools/` 改用 `install.py install --to <WS>/DIRECTOR/tools --execute` 安裝和升級（BOOTSTRAP 第 3 步）。舊的手動複製照樣能用；第一次用 install.py 時，沒有安裝紀錄，原有的檔都算 `~ LOCAL`，會整個備份後保留，確認不要了再自己移走。
+- 讀法（G5）：已在跑的總監不用改檔；下次恢復照 README 新的第 1 步讀那條鏈就好。專案 `CLAUDE.md` 總監段落若寫了「讀 docs/01 到 10」，改成「讀 README 標每輪必讀的檔」。舊的 README／BOOTSTRAP 段落都還在，只是搬到 `docs/14`、`docs/13`，標題不變。
+- 換總監（R5）：在 `DIRECTOR/` 補一個 `INDEX.md`（骨架在 `templates/DIRECTOR_FILES.md`），五個檔名都要寫到。沒有 INDEX 時 `handoff.py export` 是 FAIL `NO_INDEX`，其他工具不受影響。
+- 初衷卡（R6）：在 `DIRECTOR/BRIEF.md` 補「使用者確認原話」欄、「## 未決事項」（沒有就寫「- 無」）和「## 現成方案調查」兩節，再跑一次 `spec_gate.py approve --brief DIRECTOR/BRIEF.md`，把印出的 `BRIEF_LOCKED` 行寫進 `DIRECTOR_LOG`。沒做之前 `gate_check --hash` 不印 DISPATCH 行、`dispatch_check --log` 是 FAIL。原話要照使用者當時說的抄，沒有紀錄就回頭問使用者，不要代填。
+- 總監資料夾（R3）：舊專案的 DIRECTOR 放在 repo 外，照樣能用，不必搬。想搬進專案：先停下所有 worker，把整個 `<WS>/DIRECTOR/` 移到 `<REPO>/DIRECTOR/`，跑 `bootstrap_repo.py --repo <REPO>`（要印 `DIRECTOR/: added`），再把 `CLAUDE.md` 總監段落、`director_work.json`、排程和監看裡寫的舊路徑改成新的。`git status` 看不到 `DIRECTOR` 才算搬完。
+- 腳本若把 `delete_guard` 沒給 `--repo`／`--refs` 時的 exit 0 當成「可以刪」，現在會拿到 exit 2：請補上要搜的範圍。
+- Standard／Strict 工單（D1）：每張都加 `TESTS_LOCKED:`。有驗收測試的，先寫好測試，用 `safety_gate.py --lock-tests <測試檔> --repo <repo>` 印出清單貼上；沒有測試檔的寫 `- NONE  # 原因`。2.2.3 的一行寫法 `TESTS_LOCKED: <路徑> sha256=<64 位>` 照樣讀。專案若要維持 2.x 的行為（不查），PO 在 PO_PENDING 回覆後，`director_work.json` 寫 `"strength": "light"`。
+- 若把空的 audit log、空的 DIRECTOR_LOG、空的 RESUME_STATE 當成通過，現在會失敗：先寫入第一筆記錄，或改給正確的檔案。
+- 讀 `memory_size_check` 最後一行的腳本，請注意新的 `INVALID` 狀態和 ` invalid=n` 欄位（加在結尾）。
+- `gate_check --final`：`evidence/E2E/` 每份紀錄結尾加一行 `EXIT_CODE: <結束碼>`（或 `RESULT: PASS`）；截圖等非文字檔移出 `evidence/E2E/`；修好重跑後，把舊的失敗紀錄移到別的資料夾（例如 `evidence/E2E_old/`），不然會一直擋。原本靠 `--warn` 讓 `--final` 過的流程，現在會 exit 1。
+- 用 `release.py` 發版的專案：發版多一步 `privacy`。先跑 `privacy_scan.py --repo <REPO>` 清掉 HIT（工作區路徑寫 `<WS>`）；真的要公開的例外（公開 repo 網址、測試網域）寫進 `tools/privacy_allow.txt`，每條附理由。
+- 初衷卡（審查 P1-2）：舊卡只有欄位名稱、內容空白的，現在是 `INCOMPLETE_SPEC`：回頭問使用者補上一句話、給誰、一定要有和限制，再跑一次 approve。
+- 未決事項（審查 P2-1）：處理完的項目改成以「已解決：」或「暫緩：」開頭。
+
+### 延後
+
+- 換手測試的真實跨平台路線（DW→cdx、cdx→DW、DW→dsh、DW→agy，R5／C3）：基板只放工具、範本和自動測試（`test_handoff_300` 用假的答案檔驗計分）。真的換平台要在 Codex、DeepSeek、Antigravity 上開對話，屬於各變體的工作，所以在各變體發版前跑，結果記在那一版的 CHANGELOG。同平台換帳號也一樣。
+- `base_sync_check.py`（C7 的後半）：第二階段先在 clddw 的 `adapters/claude/` 做；已在本版 B6 升到基板 `tools/`（見「跨變體補齊」），讀 `install.py manifest` 的同一份清單。
+- CI 收據（C5）：留到 3.0.x。理由：cdxdw 的做法要讀 GitHub 的 CI run、attempt 和 workflow 指紋，綁在它自己的整合狀態機上（`cdx_work.py`），抽成平台無關又預設關閉的選項，要先定好收據格式和沒有 CI 的專案怎麼辦；這次硬做只會多一份沒人用的檢查。現在的替代：`delivery.py` 記交付 SHA，`gate_check --final` 核對。
+- 整合試跑（C6）：留到 3.0.x。理由：兩張以上工單合起來試跑，要先有合併順序和衝突的規則，cdxdw 的版本同樣綁在它的狀態機上；基板目前只有單張工單的候選 commit 和證據，先不加新的必讀步驟。現在的替代：總監把要合的分支開在一個整合 worktree（`worktree.py open`）照常跑 CHECKS。
+
+### 留到 3.0.x（審查第一階段的其餘 P2）
+
+- P2-4 safety_gate 只比預設強度、PO 回覆沒有簽核欄：要先定 DECISION_REGISTER 的強度欄位格式和 PO 簽核的寫法，這是新規格，不是修錯。
+- P2-5 safety_gate 用 repo 根目錄的相對路徑讀候選 commit：`--repo` 給子資料夾時才會錯，現行流程都從 repo 根目錄跑；要和 P2-10 一樣先換 toplevel，連同它的測試一起做。
+- P2-9 worktree.py 預設位置跨專案撞名：只會 FAIL「exists」，不會刪東西；改預設位置會動到已經開好的 worktree 和文件，要附遷移。
+- P2-11 bootstrap 只寫本機的 info/exclude、`DIRECTOR/` 規則沒有 `/` 前綴：改成同時寫 `DIRECTOR/.gitignore` 和 `/DIRECTOR/`，要先確認各變體的快速路徑都一樣寫，免得兩套規則打架。
+- P2-12 handoff 的 repo_state 在 detached HEAD 時找不到候選分支：要改讀 `init.defaultBranch`／`origin/HEAD`，並加 `NOT_CHECKED candidates`；換手測試的真實路線本來就排在各變體發版前，一起做。
+- P2-14 install.py 第一次裝到已有舊檔的資料夾：舊檔目前一律 `~ LOCAL` 保留並備份，不會刪錯；`--adopt`／`--clean-stale` 是新選項，要先定清掉的規則。
+- P2-15 install manifest 只涵蓋 `tools/`：要擴到 docs、templates；base_sync_check 已在 B6 搬進基板、讀同一份清單，擴的時候兩邊一起變，清單只改一次。
+- P2-16 release.py 整組版號：變體 repo 帶著基板的 `v3.0.0` 標籤時，`3.0.0-cld.1` 會被擋；比對規則本身正確，發變體前先確認變體 repo 沒有基板的 tag 即可。
+- P2-17 memory_size_check --chain：沒有錯誤；同一檔給兩次會重複計算並印 DUP，偏保守，保留。
+
 ## 2.6.0 — 2026-11-22
 
 MINOR（工單 WO-DW-260）：把 11-15～11-21 那一週的八個教訓（收件匣 L-079～L-086）寫成規則，加兩個新工具、三個工具的新選項。舊檔案和舊設定照樣通過。
@@ -251,7 +404,7 @@ PATCH（版本號照 PO 指定；WO-DW-225：WO-DS-008 r2 試跑學到的修進�
 ### report_vs_audit：H1 誤報與時間錯（B2）
 
 - 問題：WO-DS-008 r2 三組報告重跑，claude 2 條、dsh-nosdd 4 條（6～9）是指令確實有跑的誤報；同時 nosdd 1～4、10 和 sdd 的裁決／LOG 時間是真的寫錯，卻沒有被歸類。
-- 誤報修正：`at=` 收全形 `～`／`〜` 區間；比對前兩邊都拿掉只設 TEMP／TMP／TMPDIR／PYTHONIOENCODING／PYTHONUTF8 的句子和指令前的這類指定；紀錄裡的相對路徑照那筆呼叫的資料夾（`workdir`／`cwd`、同一呼叫較早的 `cd`）解開；Git Bash 的 `/d/x` 等於 `d:/x`；shell 函式呼叫展開成函式本體；一句的主張可以少寫紀錄裡無害的選項（附註），會削弱執行的選項（`--force`、`--warn`、`--skip…` 之類）少寫照樣 FAIL。`transcript_audit.py build` 預設不再截 500 字，`--input-limit` 截過的行標 `input_cut`。
+- 誤報修正：`at=` 收全形 `～`／`〜` 區間；比對前兩邊都拿掉只設 TEMP／TMP／TMPDIR／PYTHONIOENCODING／PYTHONUTF8 的句子和指令前的這類指定；紀錄裡的相對路徑照那筆呼叫的資料夾（`workdir`／`cwd`、同一呼叫較早的 `cd`）解開；Git Bash 的 `/<碟>/x` 等於 `<碟>:/x`；shell 函式呼叫展開成函式本體；一句的主張可以少寫紀錄裡無害的選項（附註），會削弱執行的選項（`--force`、`--warn`、`--skip…` 之類）少寫照樣 FAIL。`transcript_audit.py build` 預設不再截 500 字，`--input-limit` 截過的行標 `input_cut`。
 - 時間錯照抓，而且分類：每條 FAIL 標 `類別：沒跑 / 時間不符 / 結束碼不符 / 格式`，最後一行多 `time_mismatch=n not_run=n`；`--tolerance-min` 預設 10。`--lead 檔` 查 lead 自己寫的 GATE_VERDICT、DIRECTOR_LOG：每個時間戳拿最早寫進這行的那筆呼叫比，加 `--repo` 時 COMMIT 行另外和 commit 時間比。
 - 最上層攔下所有例外，exit 2 一行，不印 Traceback。
 - H1 每一類各做一筆去識別 fixture（假路徑、假 session），寫進 selftest 並做 13 個 mutation。nosdd 5（commit 訊息和紀錄不同）判 FAIL（沒跑）：紀錄裡沒有那則訊息的 commit，報告的主張證明不了，寧可要人看。

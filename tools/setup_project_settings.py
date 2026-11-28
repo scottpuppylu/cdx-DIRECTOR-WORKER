@@ -687,8 +687,9 @@ def main():
             problems += 1
             continue
         if git(["check-ignore", "-q", REL.as_posix()], wt).returncode != 0:
-            print(f"NOT_IGNORED {wt} left untouched (add .claude/settings.local.json to .git/info/exclude; "
-                  ".gitignore changes the repo and needs the PO)")
+            print(f"NOT_IGNORED {wt} left untouched (bootstrap_repo.py --repo <this worktree> adds "  # 3.0.0 D6
+                  f".claude/settings.local.json to {load_tool('_common').exclude_file(wt)}, the exclude file every "
+                  "worktree shares; .gitignore changes the repo and needs the PO)")
             problems += 1
             continue
         is_director = bool(director_wt and wt.resolve() == director_wt)
@@ -756,10 +757,7 @@ def main():
         if perms and any(m.startswith("permissions.") for m in miss):
             install_permissions(data, perms, ours)
         path.parent.mkdir(exist_ok=True)
-        tmp = path.with_name(path.name + ".tmp")
-        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:  # Path.write_text(newline=) needs 3.10
-            fh.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
-        os.replace(tmp, path)
+        load_tool("_common").write_json_atomic(path, data)  # 3.0.0 G1: fsync, unique temp name, temp removed on failure
         again = wanted_missing(json.loads(path.read_text(encoding="utf-8")), window, plugins_off, hooks, want, perms, wt_audit,
                                runtime, ours, extra)
         if again:

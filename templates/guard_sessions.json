@@ -7,7 +7,7 @@
     "00000000-0000-0000-0000-000000000002": {"profile": "cleaner", "name": "cleaner"}
   },
   "protected": [
-    "D:/PROJECT/DIRECTOR/**",
+    "~/PROJECT/DIRECTOR/**",
     "**/RESUME_STATE*.md",
     "**/.git/**"
   ]

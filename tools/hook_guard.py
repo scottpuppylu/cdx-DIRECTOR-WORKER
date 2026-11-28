@@ -14,7 +14,7 @@ A seat belt, not a brake. The pause flag (--pause-flag) is an explicit stop set 
 so does a deny of a "secret" rule (G50-G52: reading .env, ~/.ssh, a token; with --rules), since an approval in the
 conversation does not cover reading a secret, as in 1.3.0. Auto-pause and --review act in block mode only.
 
-Flagged: git push (any form, also `git -C <dir> push` and C:\\...\\git.exe push), git reset --hard,
+Flagged: git push (any form, also `git -C <dir> push` and <drive>:\\...\\git.exe push), git reset --hard,
 git clean (except -n / --dry-run), bare git stash / stash pop / drop / clear (`git stash push -m <mark>`, list, show,
 apply stay allowed), deleting a worktree, branch or tag, and ending processes by name (taskkill /IM or /FI, pkill,
 killall, Stop-Process without -Id, which also covers `Get-Process x | Stop-Process`).
@@ -97,11 +97,11 @@ sessions (Director, workers, cleaner) that start in one folder share one setting
 works in. FILE (templates/guard_sessions.json):
   {"schema_version": 1, "default": "worker",
    "sessions": {"SESSION_ID": "director", "SESSION_ID2": {"profile": "cleaner", "name": "cleaner"}},
-   "protected": ["D:/work/DIRECTOR/**", "~/keep/**", "**/RESUME_STATE.md"]}
+   "protected": ["<WS>/DIRECTOR/**", "~/keep/**", "**/RESUME_STATE.md"]}
 A session_id the file does not name gets "default" (else --profile). cleaner is the worker profile with the rules of
 category "delete" off (it may delete files); for every profile a delete or move command (the delete rules' commands,
 mv, Move-Item, ren, Rename-Item) on a path that a protected glob matches, or on a folder above a protected glob's
-fixed part (also a wildcard word such as D:/work/* that matches such a folder), is denied (exit 2, rule "protected"
+fixed part (also a wildcard word such as <WS>/* that matches such a folder), is denied (exit 2, rule "protected"
 in the action log). A **/ glob only matches the named file, so deleting a folder that happens to hold one is not
 seen. The worktree, branch and tag checks above hold for the cleaner too. With --sessions the Director's session is
 never held by --pause-flag and never auto-pauses. A sessions file that cannot be read or is malformed gives exit 1.
@@ -122,7 +122,7 @@ GIT_OPTS_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "-
 WRAPPERS = {"sudo", "env", "command", "exec", "nohup", "time", "xargs", "call"}
 SEPARATORS = ("&&", "||", "$(", ";", "|", "&", "\n", "(", ")", "{", "}")
 # per shell: quote characters, escape character. Bash keeps a backslash unless it escapes a quote, a space or a
-# separator, so a Windows path such as C:\Git\bin\git.exe survives.
+# separator, so a Windows path such as <drive>:\Git\bin\git.exe survives.
 SHELLS = {"bash": ("'\"", "\\"), "powershell": ("'\"", "`"), "cmd": ('"', "^")}
 
 

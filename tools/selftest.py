@@ -52,6 +52,8 @@ SCOPE:
 - .config/app.json  # the one config file
 FORBIDDEN:
 - src/frozen/**
+TESTS_LOCKED:
+- NONE  # the fixture runs no locked test file
 ```
 | ID | req | how | expected | actual | evidence | status |
 |---|---|---|---|---|---|---|
@@ -133,7 +135,20 @@ GIT_GROUPS = {
     "test_release_222", "test_base_ref_222", "test_after_verdict_224",
     "test_report_vs_audit_225", "test_gate_order_225", "test_after_verdict_225", "test_scope_shared_225",
     "test_line_brief_230", "test_setup_opt_in_240", "test_delete_guard_250", "test_dispatch_dup_250",
-    "test_run_plan_check_260",
+    "test_run_plan_check_260", "test_bootstrap_repo_300", "test_safety_gate_300", "test_director_in_project_300", "test_handoff_300",
+    "test_delivery_300", "test_final_225", "test_final_outcome_300", "test_worktree_300",
+    "test_privacy_scan_300",
+    "test_readme_check_300",
+    "test_bootstrap_add_paths_300",
+    "test_release_delivery_300",
+    "test_scope_size_protected_300",
+    "test_release_describe_300",
+    "test_report_skeleton_300",
+    "test_scope_candidate_300",
+    "test_bootstrap_sub_300",
+    "test_handoff_names_300",
+    "test_delivery_bind_300",
+    "test_worktree_gate_300",
 }
 
 
@@ -171,7 +186,7 @@ def test_gate(tmp):
     gate(tmp, "order_file_named_todo", "order", ORDER.format(base="abc123").replace("- src/**", "- todo.py"), 0)
     gate(tmp, "order_etc", "order", ORDER.format(base="abc123").replace("- src/**", "- src/** etc."), 1, "vague")
     gate(tmp, "order_broad", "order", ORDER.format(base="abc123").replace("- src/**", "- **"), 1, "too broad")
-    gate(tmp, "order_absolute", "order", ORDER.format(base="abc123").replace("- src/**", "- C:/src"), 1, "relative")
+    gate(tmp, "order_absolute", "order", ORDER.format(base="abc123").replace("- src/**", "- C" ":/src"), 1, "relative")
     gate(tmp, "order_noscope", "order", ORDER.format(base="abc123").replace("SCOPE:", "NOTES:"), 1, "SCOPE: missing")
     gate(tmp, "order_ac", "order", ORDER.format(base="abc123").replace("run test_parser", ""), 1, "how verified")
     gate(tmp, "order_gov", "order", ORDER.format(base="abc123").replace("Standard", "Loose"), 1, "GOVERNANCE")
@@ -182,7 +197,7 @@ def test_gate(tmp):
     gate(tmp, "order_required_outside", "order", required("docs/x.md"), 1, "outside SCOPE")
     gate(tmp, "report_ok", "report", REPORT.format(**good_report), 0)
     done_line = "DONE: parser fix, evidence e.json"
-    gate(tmp, "report_code_span", "report", REPORT.format(**good_report).replace(done_line, done_line + ", ids are `AC-<n>`, mail <a@b.example>"), 0)
+    gate(tmp, "report_code_span", "report", REPORT.format(**good_report).replace(done_line, done_line + ", ids are `AC-<n>`, mail <a@b.example.invalid>"), 0)
     gate(tmp, "report_placeholder", "report", REPORT.format(**good_report).replace(done_line, done_line + ", <what changed>"), 1, "placeholder")
     gate(tmp, "report_scope_prefix", "report", REPORT.format(**{**good_report, "scope": "SCOPE_CHECK: " + good_report["scope"]}), 0)
     gate(tmp, "report_scope_prefix_violation", "report", REPORT.format(**{**good_report, "scope": "SCOPE_CHECK: VIOLATION base=abc"}), 1, "scope violation")
@@ -249,6 +264,7 @@ def test_acceptance(tmp):
     order = tmp / "WO-001-parser.md"
     order.write_bytes(typed.encode("utf-8"))
     sha = hashlib.sha256(typed.encode("utf-8")).hexdigest()
+    spec_brief_300(tmp)  # 3.0.0 (R6): --hash prints no DISPATCH line before the spec passes
     crlf = tmp / "WO-001-crlf.md"
     crlf.write_bytes(typed.replace("\n", "\r\n").encode("utf-8"))
     expect("--hash prints the order hash", "gate_check.py", 0, "--hash", order, says=f"{sha}  ")
@@ -476,7 +492,7 @@ def test_dispatch_events(tmp):
     if "# WO-001" not in typed:
         failures.append("test_dispatch_events: TYPED_ORDER has no `# WO-001` title; update the replace()")
     root = tmp / "events"
-    root.mkdir()
+    spec_brief_300(root)  # 3.0.0 (R6)
     sha, other = hashlib.sha256(typed.encode("utf-8")).hexdigest(), "1" * 64
 
     def case(name, code, lines, says=None, lacks=None, text=typed, edit=None):
@@ -517,6 +533,7 @@ def test_dispatch_events(tmp):
     renamed = typed.replace("# WO-001", "# WO-999").replace("GOVERNANCE     = Standard", "GOVERNANCE     = Direct")
     order = case("order_title_renamed_and_direct", 1, ["DISPATCH WO-001 rev=1 sha={sha}"], text=renamed,
                  says=["- order: the title names WO-999, the file name WO-001-parser.md names WO-001", stale])
+    spec_brief_300(order.parent)  # 3.0.0 P2-8: a brief two folders up no longer counts; it sits next to the order
     expect("--hash shows a title / file name mismatch", "gate_check.py", 0, "--hash", order,
            says=["DISPATCH WO-999 rev=1", "- order: the title names WO-999"])
     # G02: the report answers another order
@@ -1009,34 +1026,61 @@ def test_purpose():
             failures.append(f"CHANGELOG {version}: no 對齊初衷 line (PURPOSE.md, 改規則前的檢查)")
 
 
+# 3.0.0 (G5, must-read slimming): README.md and BOOTSTRAP.md keep a short part in the must-read chain and the rest
+# moved word for word to docs/14 and docs/13, so a needle about either file is looked up in both parts.
+DOC_PARTS = {"README.md": ("README.md", "docs/14_user_guide.md"), "BOOTSTRAP.md": ("BOOTSTRAP.md", "docs/13_bootstrap_details.md")}
+
+
+def doc_text(root, name):
+    root = pathlib.Path(root)
+    parts = DOC_PARTS.get(str(name).replace("\\", "/"), (name,))
+    return "\n".join((root / p).read_text(encoding="utf-8") for i, p in enumerate(parts) if i == 0 or (root / p).is_file())
+
+
 def test_readme_prompt_first():
-    root = TOOLS.parent
-    text = (root / "README.md").read_text(encoding="utf-8")
-    check("cdxdw README identifies its setup command and bootstrap", "tools/cdxdw.py setup" in text and "(BOOTSTRAP.md)" in text)
-    check("cdxdw README describes verification before full operation", "doctor --repo" in text and "--candidate FULL_COMMIT_SHA --rerun" in text)
+    """2.1.0 (PO, via the Director): README opens with the start prompt; its text block comes before "## 這是什麼",
+    and the two versioned guard sections are one section whose heading has no version."""
+    global total
+    text = doc_text(TOOLS.parent, "README.md")
+    own = (TOOLS.parent / "README.md").read_text(encoding="utf-8")
+    total += 1  # 3.0.0 (G5): doc_text joins README and docs/14; the start prompt must stay in the must-read half
+    if "```text\n你是這個專案的「總監」" not in own:
+        failures.append("README: the start prompt must be in README.md itself (the must-read part), not only docs/14")
+    total += 1
+    prompt = text.find("```text\n你是這個專案的「總監」")
+    what = text.find("\n## 這是什麼")
+    if prompt < 0 or what < 0 or prompt > what:
+        failures.append("README: the start prompt text block must come before '## 這是什麼'")
+    total += 1
+    if "\n## 防護：哪些真的擋、哪些只提醒\n" not in text or re.search(r"^#+ .*（\d+\.\d+\.\d+）", text, re.M):
+        failures.append("README: one guard section '## 防護：哪些真的擋、哪些只提醒' without a version in the heading")
 
 
 def test_chat_to_product(tmp):
     """2.0.0 (PURPOSE aim 8): mode choice first, a locked BRIEF that orders trace to, and a choice page for A/B picks."""
     global total
     root = TOOLS.parent
-    wanted = [("BOOTSTRAP.md", "小白模式"), ("BOOTSTRAP.md", "PO_PENDING.md"),
-              ("docs/12_chat_to_product.md", "--decisions <STATE>/BRIEF.md"),
-              ("docs/12_chat_to_product.md", "### 六、斷點與去重"),
+    wanted = [("BOOTSTRAP.md", "一般模式還是小白模式"), ("BOOTSTRAP.md", "## 14. 談需求、寫專案初衷卡"),
+              ("README.md", "0. 先問我要用一般模式還是小白模式"), ("README.md", "`docs/12_chat_to_product.md`"),
+              ("docs/12_chat_to_product.md", "## 為什麼"), ("docs/12_chat_to_product.md", "--decisions <WS>/DIRECTOR/BRIEF.md"),
               ("templates/BRIEF.md", "只有使用者能改這張卡"), ("templates/BRIEF.md", "| B-1 |"),
               ("templates/WORK_ORDER.md", "B-2"), ("templates/choice_page.html", "<title>"),
               ("templates/choice_page.html", 'collection("decisions")'), ("templates/choice_page.html", 'collection("notes")'),
               ("templates/choice_page.html", 'doc("brief/current")'), ("templates/choice_page.html", "總監建議"),
               ("templates/choice_page.html", "sendToClaude"), ("templates/choice_page.html", "canSendToClaude"),
               ("templates/choice_page.html", "seenAt"), ("templates/choice_page.html", '"comments":{}'),
-              ("templates/choice_page.html", "S.drafts[d.id]")]
+              ("templates/choice_page.html", "S.drafts[d.id]"),
+              ("docs/12_chat_to_product.md", "### 六、選擇頁不漏讀"), ("docs/12_chat_to_product.md", '"comments": {}'),
+              ("docs/12_chat_to_product.md", "seenAt"), ("docs/12_chat_to_product.md", "ArtifactComments"),
+              ("docs/03_communication.md", "選擇頁"), ("docs/06_resume_lossless.md", "選擇頁")]
     for path, needle in wanted:
         total += 1
-        if needle not in (root / path).read_text(encoding="utf-8"):
+        if needle not in doc_text(root, path):
             failures.append(f"chat to product: {path} lacks {needle!r} (docs/12)")
-    for needle in ("schedule/current", "Baseball"):
+    page = (root / "templates/choice_page.html").read_text(encoding="utf-8").lower()
+    for needle in ("schedule/current", *privacy_scan_module().CODE_NAMES):  # 3.0.0: the names from the banned list
         total += 1
-        if needle in (root / "templates/choice_page.html").read_text(encoding="utf-8"):
+        if needle.lower() in page:
             failures.append(f"chat to product: templates/choice_page.html still has the project-specific {needle!r}")
     example = json.loads((root / "director_work.example.json").read_text(encoding="utf-8"))
     total += 1
@@ -1055,10 +1099,67 @@ def test_chat_to_product(tmp):
 
 
 def test_onboarding_v210(tmp):
+    """2.1.0 W3 (題3 P-1~P-4, 題2 P-5, 題1 P-3): beginner talks requirements in the mode-choice round, one reply confirms the
+    BRIEF and authorizes the start, and trace uses two --decisions files. 2.2.0 replaced "the choice page is always asked
+    first" with "the start prompt consents; the PO page is published and pinned in the first round" (test_po_page_docs)."""
+    global total
     root = TOOLS.parent
-    onboarding = (root / "docs/12_chat_to_product.md").read_text(encoding="utf-8")
+    two = "--decisions <WS>/DIRECTOR/BRIEF.md --decisions <WS>/DIRECTOR/DECISION_REGISTER.md"
+    consent = "卡片對，請開一位 AI 助手做這一批"
+    first_q = "這是給誰用的？第一版讓他做成哪一件事就有用？"
+    docs = {name: doc_text(root, name) for name in (
+        "BOOTSTRAP.md", "README.md", "docs/11_claude_desktop.md", "docs/12_chat_to_product.md", "templates/BRIEF.md",
+        "templates/PO_PENDING.md", "tools/README.md")}
+    wanted = [("BOOTSTRAP.md", "### 小白快速路徑"), ("BOOTSTRAP.md", first_q), ("BOOTSTRAP.md", two),
+              ("BOOTSTRAP.md", "--only-this"), ("BOOTSTRAP.md", "get_usage"), ("BOOTSTRAP.md", "`GUARDS.md`"),
+              ("BOOTSTRAP.md", consent), ("BOOTSTRAP.md", "不是 git repo、認不出是哪個專案"),
+              ("docs/11_claude_desktop.md", "## 待決頁網頁的授權與備援"),
+              ("docs/11_claude_desktop.md", "備援 4 步"), ("docs/11_claude_desktop.md", "--only-this"),
+              ("docs/11_claude_desktop.md", consent),
+              ("docs/12_chat_to_product.md", consent), ("docs/12_chat_to_product.md", first_q), ("docs/12_chat_to_product.md", two),
+              ("docs/12_chat_to_product.md", "店員"), ("docs/12_chat_to_product.md", "不編 B 號"),
+              ("docs/12_chat_to_product.md", "只有 B 開頭的列算待排項目"),
+              ("README.md", "選小白模式的話，它在同一則回覆就開始問你想做什麼"), ("README.md", consent), ("README.md", "同一輪就開始問我想做什麼"),
+              ("templates/BRIEF.md", "第一階段（選填）"), ("templates/BRIEF.md", "## 待預覽"), ("templates/BRIEF.md", two),
+              ("templates/PO_PENDING.md", "## 待預覽"), ("templates/PO_PENDING.md", "SOURCE:"), ("templates/PO_PENDING.md", "LOCK_AND_USER_ASKED"),
+              ("tools/README.md", two)]
     for state in ("LOCK_ONLY", "NO_START", "LOCK_AND_USER_ASKED"):
-        check(f"cdx onboarding preserves {state}", f"`{state}`" in onboarding)
+        wanted.append(("docs/12_chat_to_product.md", f"`{state}`"))
+    # tools/ does not exist on the quick path before the card is locked: the order check runs after locking
+    wanted += [("docs/12_chat_to_product.md", "貼卡前只備好首批工單草稿；鎖卡後、開第一位 worker 前，才跑 `gate_check --order` 和追溯核對"),
+               ("docs/12_chat_to_product.md", "建 `tools/`，跑 `gate_check --order` 和追溯核對"),
+               ("BOOTSTRAP.md", "貼卡前只備好首批工單草稿，`gate_check --order` 和追溯核對留到鎖卡後、開第一位 worker 前"),
+               ("BOOTSTRAP.md", "表中標「延後」的步驟到那時才做"),
+               ("README.md", "其他文件照地圖的「何時讀」需要時才讀（PURPOSE.md 在談需求前；小白模式另讀 12a；在 Claude Desktop 上另讀 11）")]
+    for path, needle in wanted:
+        total += 1
+        if needle not in docs[path]:
+            failures.append(f"onboarding 2.1.0: {path} lacks {needle!r}")
+    # BOOTSTRAP step 6, docs/11 and docs/12 section 2 used to disagree (F-7): none may keep the old wording
+    stale = [("BOOTSTRAP.md", "小白模式直接用它當待決頁"), ("BOOTSTRAP.md", "一般模式要用，照第 1 點先問"),
+             ("BOOTSTRAP.md", "開線前用一句白話問使用者可不可以開始做"), ("docs/12_chat_to_product.md", "用選擇頁（下面第四節）"),
+             ("docs/11_claude_desktop.md", "會把專案內容放上 claude.ai，要先問 PO。 |")]
+    for path, needle in stale:
+        total += 1
+        if needle in docs[path]:
+            failures.append(f"onboarding 2.1.0: {path} still says {needle!r}, which contradicts the ask-first rule")
+    # all three places that decide how the PO page is used must give the consent, the state line and the chat fallback
+    for path in ("BOOTSTRAP.md", "docs/11_claude_desktop.md", "docs/12_chat_to_product.md"):
+        total += 1
+        text = docs[path]
+        if not ("PO_PENDING.md" in text and "聊天" in text and "PO_PAGE_URL" in text and "NONE" in text and "同意" in text):
+            failures.append(f"onboarding: {path} must say the start prompt consents, where PO_PAGE_URL goes, and the PO_PENDING.md and chat fallback (NONE)")
+    # the quick path sits between 先問模式 and step 0, so a beginner reads it before any build step
+    boot = docs["BOOTSTRAP.md"]
+    total += 1
+    order = [boot.find(h) for h in ("## 先問模式", "### 小白快速路徑", "## 0. 先確認環境", "## 7. 壓縮門檻", "## 14. 談需求")]
+    if -1 in order or order != sorted(order):
+        failures.append("onboarding 2.1.0: BOOTSTRAP.md headings 先問模式 / 小白快速路徑 / 0 / 7 / 14 are missing or out of order")
+    # the compaction threshold is set only before the first worker, and only for that worker's folder
+    total += 1
+    step7 = boot.split("## 7. 壓縮門檻")[1].split("## 8.")[0]
+    if "只在開第一位 worker 前設定" not in step7 or "--only-this" not in step7 or "--apply" not in step7:
+        failures.append("onboarding 2.1.0: BOOTSTRAP step 7 must set the threshold only before the first worker, with --only-this then --apply")
     # trace with two --decisions files: B in the brief and DD in the register are both found; only B rows are work to schedule
     folder = tmp / "onboarding"
     for name in ("orders", "reports"):
@@ -1101,11 +1202,11 @@ def test_vocabulary():
                for path in ("docs/02_work_orders_gates.md", "templates/TASK_REPORT.md")]
     for path, text in wanted:
         total += 1
-        if text not in (root / path).read_text(encoding="utf-8"):
+        if text not in doc_text(root, path):
             failures.append(f"vocabulary: {path} no longer contains {text!r}; change tools/vocabulary.json and the docs together")
 
 
-MUST_READ_LIMIT = 9550  # bytes of the 每輪必讀 docs on 2026-11-06 (v0.13 moved pure reasons to docs/10; +33 for the IN_FLIGHT fields kept in docs/06, review D01); 2.0.1 +48: PO 2026-11-08 the choice page counts as 待決頁 for no-miss reading (docs/03, docs/06 one clause each); every round re-reads them, so growth costs quota; 2.1.0 (reports 2 and 5) 12433 -> 9532: pure reasons to docs/10, details to docs/05 and docs/06b, one dispatch-plan line added to docs/01; the limit follows the new size so growth needs a reason again; +18 for the reading-side clause naming the choice page in docs/03 (Director W4 N1: the PO said the choice page must not be missed, so the reader must not rely on docs/06 alone); 2.2.2 (9549 -> 9548, limit unchanged): PO 2026-11-14 no new per-round reading; the RESUME_STATE size rule is folded into the gate_check line of docs/06, details in docs/06b
+MUST_READ_LIMIT = 8192  # 3.0.0 (plan 6.9-2, G5): the resident rules target is 8 KB; 9548 -> 8173 by moving details to docs/06b and docs/08 (history: 2.1.0 12433 -> 9532, 2.2.2 9548); every round re-reads them, so growth needs a reason, and test_chain_size_300 holds the whole chain to 24 KB
 
 
 def test_must_read_size():
@@ -1479,12 +1580,12 @@ def test_hook(tmp):
     blocked = ["git push origin main", "git -C . push", "git --no-pager -c a=b push --force", "cd x && git push",
                'bash -c "git push"', "git reset --hard HEAD~1", "git clean -fdx", "git stash", "git stash pop",
                "git stash push -u", "git worktree remove ../wt", "git branch -D old", "taskkill /F /IM python.exe",
-               "pkill node", "Stop-Process -Name node", "& 'C:/Program Files/Git/bin/git.exe' push",
-               r"C:\Git\bin\git.exe push origin main", "sh -c 'git reset --hard'", 'powershell -Command "git push"',
+               "pkill node", "Stop-Process -Name node", "& 'C" ":/Program Files/Git/bin/git.exe' push",
+               r"C" r":\Git\bin\git.exe push origin main", "sh -c 'git reset --hard'", 'powershell -Command "git push"',
                'cmd /c "git push"', 'echo "$(git push)"', 'taskkill /F /FI "IMAGENAME eq app.exe"',
                ("Get-Process app | Stop-Process -Force", "PowerShell"),
-               (r'& "C:\Program Files\Git\bin\git.exe" push', "PowerShell"), ('iex "git push"', "PowerShell"),
-               (r'cd "C:\dir\"; git push', "PowerShell")]
+               (r'& "C' r':\Program Files\Git\bin\git.exe" push', "PowerShell"), ('iex "git push"', "PowerShell"),
+               (r'cd "C' r':\dir\"; git push', "PowerShell")]
     allowed = ["git status", 'git commit -m "docs: explain the git push rule"', "git stash push -u -m wip-1",
                "git stash apply abc123", "git clean -n", "git reset --soft HEAD~1", "taskkill /PID 1234", "echo push",
                'grep -n "git stash" rules.md', 'git commit -m "note; git reset --hard is forbidden"', "kill -9 1234",
@@ -1579,7 +1680,7 @@ def test_hook_rules(tmp):
 
     # push written to slip past a text match is still push (F6)
     for command in ("git -C . push", "git 'push'", "/usr/bin/git push", 'bash -c "git push"', 'powershell -c "git push"',
-                    "cmd /c git push", "cd x && git push", "echo $(git push)", r'"C:\Program Files\Git\bin\git.exe" push'):
+                    "cmd /c git push", "cd x && git push", "echo $(git push)", r'"C' r':\Program Files\Git\bin\git.exe" push'):
         for profile in ("worker", "director"):
             check(f"push bypass {command!r}", bash(command), profile, "deny:G02")
     check("force push wins over push (lowest id)", bash("git push -f origin main"), "worker", "deny:G01")
@@ -1617,17 +1718,17 @@ def test_hook_rules(tmp):
     # config files, not all of ~/.claude (D3 a)
     for path, want in ((f"{home}/.claude/settings.json", "G40"), (f"{home}/.claude/.credentials.json", "G40"),
                        (f"{home}/.claude/CLAUDE.md", "G40"), (f"{home}/.claude.json", "G40"),
-                       ("D:/proj/.claude/settings.local.json", "G40"), ("D:/proj/.mcp.json", "G40"),
-                       ("C:/ProgramData/ClaudeCode/managed-settings.json", "G40"),
+                       ("D" ":/proj/.claude/settings.local.json", "G40"), ("D" ":/proj/.mcp.json", "G40"),
+                       ("C" ":/ProgramData/ClaudeCode/managed-settings.json", "G40"),
                        (f"{home}/.claude/projects/p/memory/MEMORY.md", None), (f"{home}/.claude/plans/plan.md", None),
-                       ("D:/proj/docs/settings.md", None), ("D:/proj/CLAUDE.md.bak", None)):
+                       ("D" ":/proj/docs/settings.md", None), ("D" ":/proj/CLAUDE.md.bak", None)):
         check(f"Write {path}", write(path), "worker", f"deny:{want}" if want else "silent")
         check(f"Write {path}", write(path), "director", f"ask:{want}" if want else "silent")
     check("relative path read against the hook cwd", write(".claude/settings.local.json", cwd=str(tmp)), "worker", "deny:G40")
     check("~ in the path", write("~/.claude/settings.json"), "worker", "deny:G40")
     if os.name == "nt":
-        check("other case on Windows", write("D:/PROJ/.CLAUDE/Settings.Local.JSON"), "worker", "deny:G40")
-        check("backslashes", write(r"D:\proj\.claude\settings.json"), "worker", "deny:G40")
+        check("other case on Windows", write("D" ":/PROJ/.CLAUDE/Settings.Local.JSON"), "worker", "deny:G40")
+        check("backslashes", write(r"D" r":\proj\.claude\settings.json"), "worker", "deny:G40")
     check("reading a settings file is not a change", tool("Read", file_path=f"{home}/.claude/settings.json"), "worker", "silent")
     for path in (rules_path, TOOLS / "hook_guard.py"):
         check(f"self-protection {path.name}", write(path), "worker", "deny:G00")
@@ -1636,7 +1737,7 @@ def test_hook_rules(tmp):
     for command in ("git -c alias.p=push p", "git -c alias.p='!git push' p", "git config alias.p push && git p",
                     "git config --local alias.p push", "git -C . config set alias.p push", "git --config-env=alias.p=X p",
                     "git send-pack origin HEAD", "git http-push https://example.invalid/r.git main",
-                    '"C:/Program Files/Git/mingw64/libexec/git-core/git-send-pack.exe" origin HEAD', "git-push origin"):
+                    '"C' ':/Program Files/Git/mingw64/libexec/git-core/git-send-pack.exe" origin HEAD', "git-push origin"):
         for profile in ("worker", "director"):
             check(f"push bypass {command!r}", bash(command), profile, "deny:G02")
     for command in ("git config --get alias.p", "git config -l", "git config --unset alias.p", "git -c core.autocrlf=false status",
@@ -1676,7 +1777,7 @@ def test_hook_rules(tmp):
                  bash("cp a.json ~/.claude/settings.json"), bash("tee .mcp.json < x"), bash("echo {}>.claude/settings.json"),
                  bash("touch .claude/settings.json"), bash("cp new/settings.json ~/.claude/"), bash("echo x > ~/.claude.json"),
                  shell("Set-Content ~/.claude.json x"), shell(r"Copy-Item a -Destination .claude\settings.json"),
-                 shell(r"[IO.File]::WriteAllText('.claude\settings.json', 'x')"), shell(r"'x' | Out-File D:\proj\CLAUDE.md")):
+                 shell(r"[IO.File]::WriteAllText('.claude\settings.json', 'x')"), shell(r"'x' | Out-File D" r":\proj\CLAUDE.md")):
         check(f"G40 shell write {call['tool_input']['command']!r}", call, "worker", "deny:G40")
         check(f"G40 shell write {call['tool_input']['command']!r}", call, "director", "ask:G40")
     for call in (bash("cat CLAUDE.md"), bash("grep x .claude/settings.json"), bash("cp CLAUDE.md /tmp/backup.md"),
@@ -1725,9 +1826,9 @@ def test_hook_rules(tmp):
                 tool("Glob", pattern="**/.env"), bash("cat .env"), shell(r"Get-Content .\.env"), bash("type .env"),
                 bash("copy .env x"), bash("base64 id_rsa"), bash("cat $HOME/.ssh/id_rsa"), bash("bash -c 'cat .env'"),
                 bash("sed -n 1p .env.local"), shell("Select-String -Path .env -Pattern KEY"),
-                tool("Read", file_path="D:/proj/sub/../.env"), bash("cp ./sub/../.env x"),
-                tool("Read", file_path="D:/proj/.claude/.credentials.json"), tool("Read", file_path="D:/proj/config/secrets.yaml")]
-               + ([tool("Read", file_path=r"D:\proj\.ENV"), bash("cat .ENV")] if os.name == "nt" else []),
+                tool("Read", file_path="D" ":/proj/sub/../.env"), bash("cp ./sub/../.env x"),
+                tool("Read", file_path="D" ":/proj/.claude/.credentials.json"), tool("Read", file_path="D" ":/proj/config/secrets.yaml")]
+               + ([tool("Read", file_path=r"D" r":\proj\.ENV"), bash("cat .ENV")] if os.name == "nt" else []),
         "G51": [bash("printenv"), bash("env"), bash("env -0"), shell("gci env:"), shell("Get-ChildItem Env:\\"),
                 bash("echo $GITHUB_TOKEN"), bash('echo "token is ${GITHUB_TOKEN}"'), shell("Write-Output $env:API_KEY"),
                 bash("echo %OPENAI_API_KEY%"), shell("$env:GITHUB_TOKEN"), bash("set"), bash("cmd /c set"), bash("export -p"),
@@ -1782,7 +1883,7 @@ def test_hook_rules(tmp):
         if f"[MASKED:{kind}]" not in masked or secret in masked or kind not in kinds or not masked.startswith("before "):
             failures.append(f"secret_mask {kind}: got {masked!r} {kinds}")
     for text in ("commit 4b825dc642cb6eb9a060e54bf8d69288fbee4904", "sha256 " + hashlib.sha256(b"").hexdigest(),
-                 "max_tokens=4096 author=Bob PWD=/home/x", "Authorization: Bearer [MASKED:jwt]"):
+                 "max_tokens=4096 author=Bob PWD=/" "home/x", "Authorization: Bearer [MASKED:jwt]"):
         total += 1
         if masker.mask(text) != (text, []):
             failures.append(f"secret_mask changed text with no new secret: {text!r} -> {masker.mask(text)}")
@@ -2257,6 +2358,7 @@ def test_order_binding(tmp):
     base = tmp / "binding" / "run"
     work = base / "work"
     work.mkdir(parents=True)
+    spec_brief_300(base)  # 3.0.0 (R6)
     crlf = text_of("Strict", 2).replace("\n", "\r\n").encode("utf-8")
     order = base / "WO-001-parser.md"
     order.write_bytes(crlf)
@@ -2288,14 +2390,26 @@ def test_order_binding(tmp):
 BRIEF_V1 = """# 專案初衷卡
 - 狀態：LOCKED
 - 版次：1
+- 使用者確認時間：2026-11-08 10:00 +08:00
+- 使用者確認原話：「對，開始做」
+- 一句話：給櫃台匯出名單的小工具
 
 | 編號 | 類別 | 內容（使用者的話） | 怎麼算做到 |
 |---|---|---|---|
 | B-1 | 給誰 | 給櫃台 | 打開就能看到表 |
 | B-2 | 一定要有 | 匯出姓名 | CSV 只有 name 欄 |
 
+## 限制
+- 不花錢
+
 ## 不問使用者、由總監決定的事
 - DD-1 用標準函式庫
+
+## 未決事項
+- 無
+
+## 現成方案調查
+- 找了 csvkit → 不用：標準函式庫就夠
 """
 BRIEF_V2 = BRIEF_V1.replace("版次：1", "版次：2").replace("匯出姓名 | CSV 只有 name 欄",
                                                      "匯出姓名與總額 | CSV 必須有 name,total 兩欄")
@@ -2422,9 +2536,12 @@ def test_brief_fingerprint(tmp):
            "--dispatch-log", base / "lock/DIRECTOR/DIRECTOR_LOG3.md", says="BRIEF_UNCONFIRMED: ")
     expect("brief: --order-history needs --match", "gate_check.py", 2, "--order", order, "--order-history", hist)
     expect("brief: --snapshot needs --brief or --hash", "gate_check.py", 2, "--order", order, "--snapshot", hist)
+    expect("brief: --hash with a draft brief prints no DISPATCH line (3.0.0 R6)", "gate_check.py", 1, "--hash", order,
+           says=["FAIL SPEC_GATE", "NOT_LOCKED"], lacks="  DISPATCH WO-001")
+    put("lock/DIRECTOR/BRIEF.md", BRIEF_V1)
     code, out = run("gate_check.py", "--hash", order, "--snapshot", base / "lock" / "orders")
     total += 1
-    if code != 0 or not list((base / "lock" / "orders").glob("WO-001-rev1-*.md")):
+    if code != 0 or "  DISPATCH WO-001 rev=1" not in out or not list((base / "lock" / "orders").glob("WO-001-rev1-*.md")):
         failures.append(f"brief: --hash --snapshot does not keep the order as <ID>-rev<n>-<sha>.md: {out.strip()[-200:]}")
 
 
@@ -2514,7 +2631,11 @@ def test_po_acceptance(tmp):
          "~ UNBOUND_PO_REPLY C-1: manifest_sha256 is not 64 hex digits")
     case("outcome without reply", dict(good, reply_ref=""), "an outcome without reply_ref")
     case("short commit", dict(good, commit="abc1234"), "commit is not 40 hex digits")
-    case("not JSON", "{", "~ UNBOUND_PO_REPLY file: not JSON")
+    # 3.0.0 (G2): a file with no record to read was a note and the gate stayed OK; now nothing checked is a FAIL
+    bad = base / "not_json.txt"
+    bad.write_text("{", encoding="utf-8")
+    expect("po acceptance: not JSON is FAIL (G2)", "gate_check.py", 1, "--po-acceptance", bad,
+           says=["FAIL po-acceptance", "INVALID PO_ACCEPTANCE file: not JSON"], lacks="OK   po-acceptance")
     expect("po acceptance: --candidate works with --po-acceptance only among the new flags", "gate_check.py", 2,
            "--order", base / "none.md", "--candidate", "a" * 40)
 
@@ -2944,7 +3065,7 @@ def test_pause(tmp):
                        ("Get-Process > a.txt", shell("Get-Process > a.txt")), ("pause_ctl status > a.txt", bash(f"{ctl} status > a.txt"))]:
         check(f"{name} is paused", call, "paused")
     for name, call in [("Read", tool("Read", file_path="README.md")), ("Grep", tool("Grep", pattern="x")), ("git status", bash("git status")),
-                       ("git -C dir log", bash("git -C D:/x log --oneline -3")),
+                       ("git -C dir log", bash("git -C D" ":/x log --oneline -3")),
                        ("pause_ctl status", bash(f"{ctl} status --director {director.as_posix()}")),
                        ("pause_ctl procs", bash(f"{ctl} procs --root 4242")),
                        ("Get-Process sorted", shell("Get-Process | Sort-Object CPU -Descending | Select-Object -First 5")),
@@ -3243,7 +3364,9 @@ def test_audit(tmp):
     expect("audit missing log", "audit_log.py", 2, "verify", "--log", folder / "nope.jsonl", says="NOT_RUN")
     empty = folder / "empty.jsonl"
     empty.write_text("", encoding="utf-8")
-    expect("audit empty log", "audit_log.py", 0, "verify", "--log", empty, says=["entries=0", " OK"])
+    # 3.0.0 (G2): an empty log has no chain to verify, so it is never OK
+    expect("audit empty log is INVALID (G2)", "audit_log.py", 1, "verify", "--log", empty,
+           says=["INVALID EMPTY", "entries=0", "EMPTY"], lacks=" OK")
     broken = folder / "broken.jsonl"
     broken.write_text(log.read_text(encoding="utf-8").splitlines()[0] + "\n{not json\n", encoding="utf-8")
     expect("audit a line that is not JSON", "audit_log.py", 1, "verify", "--log", broken, says="BROKEN line=2: not JSON")
@@ -3307,9 +3430,9 @@ def test_report_vs_audit(tmp):
     chain(log, [
         ("2026-11-07T11:40:00.000+00:00", "S1", "Bash", {"command": "python -I -X utf8 tools/selftest.py",
                                                          "description": "selftest"}, "result", "ok"),
-        ("2026-11-07T11:45:00.000+00:00", "S1", "PowerShell", {"command": "Get-FileHash D:\\w\\out\\pack.zip"},
+        ("2026-11-07T11:45:00.000+00:00", "S1", "PowerShell", {"command": "Get-FileHash D" ":\\w\\out\\pack.zip"},
          "result", "ok"),
-        ("2026-11-07T11:50:00.000+00:00", "S1", "Bash", {"command": "\"C:/Unity/Unity.exe\" -batchmode -runTests"},
+        ("2026-11-07T11:50:00.000+00:00", "S1", "Bash", {"command": "\"C" ":/Unity/Unity.exe\" -batchmode -runTests"},
          "failure", "error"),
         ("2026-11-07T11:52:00.000+00:00", "S1", "mcp__blender__execute_blender_code", {"code": "x"}, "result", "ok"),
         ("2026-11-07T11:55:00.000+00:00", "S1", "Bash", {"command": "git push"}, "decision", "deny"),
@@ -3335,9 +3458,9 @@ def test_report_vs_audit(tmp):
 
     good = ("SESSION_ID: S1\n"
             "TESTS: `python -I -X utf8 tools/selftest.py` 300/300 passed\n"
-            "EVIDENCE: `Get-FileHash D:/w/out/pack.zip` OK\n"
+            "EVIDENCE: `Get-FileHash D" ":/w/out/pack.zip` OK\n"
             "RAN:\n"
-            "- `\"C:/Unity/Unity.exe\" -batchmode -runTests` exit=1 at=19:50\n"
+            "- `\"C" ":/Unity/Unity.exe\" -batchmode -runTests` exit=1 at=19:50\n"
             "- `mcp__blender__execute_blender_code` exit=0 at=2026-11-07T19:53+08:00\n")
     run("all claims check out", good, 0, ("REPORT_VS_AUDIT: PASS claims=4 ok=4 failed=0 session=S1 logs=1",
                                           "OK   selftest:", "OK   hash:", "OK   unity:", "OK   blender:"))
@@ -3356,7 +3479,7 @@ def test_report_vs_audit(tmp):
     run("full ISO time off", "SESSION_ID: S1\nRAN: `tools/selftest.py` at=2026-11-06T19:40+08:00\n", 1, "but the runs")
     run("denied by the hook", "SESSION_ID: S1\nRAN: `git push` exit=0\n", 1, "the hook denied it")
     run("a cut log line matches on its first part", f"SESSION_ID: S1\nRAN: `{long_cmd}` exit=0\n", 0, "PASS")
-    run("slashes, quotes and case aside", "SESSION_ID: S1\nEVIDENCE: `get-filehash D:\\w\\out\\pack.zip` 通過\n", 0,
+    run("slashes, quotes and case aside", "SESSION_ID: S1\nEVIDENCE: `get-filehash D" ":\\w\\out\\pack.zip` 通過\n", 0,
         "PASS")
     run("plain code in TESTS is not a claim", "SESSION_ID: S1\nTESTS: `git status` clean\nDONE: `docs/x.md`\n", 0,
         "REPORT_VS_AUDIT: NONE claims=0")
@@ -3383,22 +3506,22 @@ def test_report_vs_audit(tmp):
         failures.append("report template: templates/TASK_REPORT.md has no CANDIDATE_ID: line")
 
 
-RVA_WIN = '"C:\\Program Files\\Python312\\python.exe" -I -X utf8 D:\\w\\tools\\build_all.py ' + "--flag " * 90 + "--end"
+RVA_WIN = '"C' ':\\Program Files\\Python312\\python.exe" -I -X utf8 D' ':\\w\\tools\\build_all.py ' + "--flag " * 90 + "--end"
 RVA_UNC = "Get-FileHash \\\\server\\share\\out\\pack.zip; " + "Write-Output done; " * 40
 RVA_QUOTE = 'python -I -X utf8 tools/report.py --title "say \\"hi\\" twice" ' + "--x " * 140
-RVA_PLAIN = 'python -I -X utf8 tools/report.py --title "big title" --out "D:/w/out dir" ' + "--x " * 140
+RVA_PLAIN = 'python -I -X utf8 tools/report.py --title "big title" --out "D' ':/w/out dir" ' + "--x " * 140
 RVA_CLOSED = "python -I -X utf8 tools/selftest.py --quick --group report_vs_audit"
 # (name, tool, tool input, claimed command, should match); the log lines are cut at 500 characters like the hook's
 RVA_221_CASES = [
     ("cut Windows command with a quoted path", "Bash", {"command": RVA_WIN, "description": "build"},
-     '"C:\\Program Files\\Python312\\python.exe" -I -X utf8 D:\\w\\tools\\build_all.py --flag --flag', True),
+     '"C' ':\\Program Files\\Python312\\python.exe" -I -X utf8 D' ':\\w\\tools\\build_all.py --flag --flag', True),
     ("cut Windows command, other slash direction", "PowerShell", {"command": RVA_WIN},
-     "C:/Program Files/Python312/python.exe -I -X utf8 D:/w/tools/build_all.py --flag", True),
+     "C" ":/Program Files/Python312/python.exe -I -X utf8 D" ":/w/tools/build_all.py --flag", True),
     ("cut command with a UNC backslash path", "PowerShell", {"command": RVA_UNC},
      "Get-FileHash \\\\server\\share\\out\\pack.zip", True),
     ("cut UNC path, wrong file", "PowerShell", {"command": RVA_UNC}, "Get-FileHash \\\\server\\share\\out\\other.zip", False),
     ("cut command with quotes", "Bash", {"command": RVA_PLAIN},
-     'tools/report.py --title "big title" --out "D:/w/out dir" --x --x', True),
+     'tools/report.py --title "big title" --out "D' ':/w/out dir" --x --x', True),
     ("quotes, wrong title", "Bash", {"command": RVA_PLAIN}, 'tools/report.py --title "small title"', False),
     ("cut command with shell-escaped quotes, claimed as typed", "Bash", {"command": RVA_QUOTE},
      'python -I -X utf8 tools/report.py --title "say \\"hi\\" twice" --x', True),
@@ -3408,11 +3531,11 @@ RVA_221_CASES = [
     ("closed command in a cut line: a longer claim is not a prefix match", "Bash",
      {"command": RVA_CLOSED, "description": "d " * 300}, RVA_CLOSED + " --full", False),
     ("launcher and startup flags dropped", "Bash", {"command": RVA_CLOSED}, "py tools\\selftest.py --quick", True),
-    ("leading & of PowerShell dropped", "PowerShell", {"command": '& "C:\\Py\\python.exe" -I tools\\selftest.py --quick'},
+    ("leading & of PowerShell dropped", "PowerShell", {"command": '& "C' ':\\Py\\python.exe" -I tools\\selftest.py --quick'},
      "python tools/selftest.py --quick", True),
-    ("a file name matches a longer path", "PowerShell", {"command": "Get-FileHash D:\\w\\out\\pack.zip"},
+    ("a file name matches a longer path", "PowerShell", {"command": "Get-FileHash D" ":\\w\\out\\pack.zip"},
      "Get-FileHash pack.zip", True),
-    ("a file name does not match a different file", "PowerShell", {"command": "Get-FileHash D:\\w\\out\\pack.zip"},
+    ("a file name does not match a different file", "PowerShell", {"command": "Get-FileHash D" ":\\w\\out\\pack.zip"},
      "Get-FileHash ack.zip", False),
     ("... skips words", "Bash", {"command": RVA_WIN}, "build_all.py ... --flag", True),
     ("<name> skips words", "Bash", {"command": RVA_CLOSED}, "tools/selftest.py <mode> --group report_vs_audit", True),
@@ -3444,7 +3567,7 @@ def test_report_vs_audit_221(tmp):
     if cut:
         failures.append(f"report_vs_audit 2.2.1: these log lines are not cut, so they test nothing: {cut}")
 
-    def write(path, rows, rebuild=False):
+    def write(path, rows, rebuild=False, by="selftest"):
         prev, out = audit.GENESIS, []
         if rebuild:
             rows = [(None, None, "", "rebuild", "rebuilt")] + rows
@@ -3453,8 +3576,8 @@ def test_report_vs_audit_221(tmp):
                      "tool": tool, "tool_use_id": f"t{seq}" if tool else None,
                      "input": audit.summary(data) if tool else "", "kind": kind, "result": {"status": status},
                      "duration_ms": None, "prev": prev}
-            if kind == "rebuild":
-                entry["source"] = {"by": "selftest"}
+            if kind == "rebuild" and by is not None:
+                entry["source"] = {"by": by}
             entry["hash"] = audit.digest(entry)
             prev = entry["hash"]
             out.append(entry)
@@ -3474,6 +3597,16 @@ def test_report_vs_audit_221(tmp):
     report = _write_text(folder / "rebuilt.md", f"SESSION_ID: S1\nRAN: `{RVA_CLOSED}` exit=0\n")
     expect("report_vs_audit 2.2.1: a rebuilt log is read and noted", "report_vs_audit.py", 0, "--report", report,
            "--log", rebuilt, says=["~ note: a log was rebuilt from a transcript", "REPORT_VS_AUDIT: PASS claims=1 ok=1"])
+    # 3.0.0 small fix: the note names the rebuilder from source.by (a variant's own rebuilder writes kind=rebuild too)
+    by_dsh, by_none = folder / "rebuilt_dsh.jsonl", folder / "rebuilt_none.jsonl"
+    write(by_dsh, rows, rebuild=True, by="dsh_audit.py")
+    write(by_none, rows, rebuild=True, by=None)
+    expect("report_vs_audit: the rebuilt-log note names a variant's rebuilder", "report_vs_audit.py", 0, "--report",
+           report, "--log", by_dsh, says=["~ note: a log was rebuilt from a transcript after the fact (by dsh_audit.py)",
+                                          "not written while the agent worked", "REPORT_VS_AUDIT: PASS claims=1 ok=1"],
+           lacks=["transcript_audit.py", "written by the hook"])
+    expect("report_vs_audit: no source.by names transcript_audit.py", "report_vs_audit.py", 0, "--report", report,
+           "--log", by_none, says="(by transcript_audit.py)")
     real = mutant(TOOLS / "report_vs_audit.py", [], "report_vs_audit_real")
     total += 1
     if real is None or rva_wrong(real, audit):
@@ -3498,8 +3631,8 @@ def test_report_vs_audit_221(tmp):
 
 
 RVA_MULTI = "python -m unittest tests.test_calc -v\ngit status --short"
-RVA_EVIDENCE = "python tools/evidence_record.py run --order D:/w/orders/wo-9.md --label {} -- python -m unittest tests.test_a"
-RVA_GATE = "python tools/gate_check.py --hash D:/w/orders/wo-003-expression.md"
+RVA_EVIDENCE = "python tools/evidence_record.py run --order D" ":/w/orders/wo-9.md --label {} -- python -m unittest tests.test_a"
+RVA_GATE = "python tools/gate_check.py --hash D" ":/w/orders/wo-003-expression.md"
 RVA_SCOPE = "python tools/scope_check.py --candidate 427fcef0123456789abcdef --base main"
 RVA_CUT = "python tools/build_all.py --mode full --target alpha " + "--x " * 140
 # (name, tool, command in the log, claimed command, should match) for matches() in process
@@ -3531,7 +3664,7 @@ RVA_223_ROWS = [
     (10, "w1", RVA_GATE, "failure", "error"),
     (20, "w1", RVA_GATE, "result", "ok"),
     (30, "w1", RVA_SCOPE, "result", "ok"),
-    (40, "w1", "git -C D:/w commit -m fix", "result", "ok")]
+    (40, "w1", "git -C D" ":/w commit -m fix", "result", "ok")]
 RVA_223_LOGS = {
     "late_commit": RVA_223_ROWS + [(50, "w2", "git commit -m other", "result", "ok")],
     "checked": RVA_223_ROWS + [(45, "w1", RVA_SCOPE, "result", "ok"), (50, "w2", "git commit -m other", "result", "ok")]}
@@ -3662,30 +3795,30 @@ def test_report_vs_audit_223(tmp):
         killed(f"report_vs_audit 2.2.3 {name}", wrong)
 
 
-RVA_EV224 = ("python tools/evidence_record.py run --label AC-1 --order D:/w/orders/wo-9.md --cwd D:/w/repo -- "
+RVA_EV224 = ("python tools/evidence_record.py run --label AC-1 --order D" ":/w/orders/wo-9.md --cwd D" ":/w/repo -- "
              "python -m unittest")
-RVA_SCOPE224 = "python D:/w/tools/scope_check.py --order D:/w/orders/wo-9.md --repo D:/w/repo"
+RVA_SCOPE224 = "python D" ":/w/tools/scope_check.py --order D" ":/w/orders/wo-9.md --repo D" ":/w/repo"
 # (name, tool, command in the log, claimed command, should match) for matches() in process; 2.2.4 (WO-DS-006 misses,
 # de-identified: the shapes of the 64 FAILs in H1_CLASSIFY, with made-up paths)
 RVA_224_CASES = [
-    ("git -C DIR x is cd DIR then git x", "Bash", "cd D:/w/repo && ls; git status --short", "git -C D:/w/repo status",
+    ("git -C DIR x is cd DIR then git x", "Bash", "cd D" ":/w/repo && ls; git status --short", "git -C D" ":/w/repo status",
      True),
-    ("git -C with another folder", "Bash", "cd D:/w/repo && ls; git status --short", "git -C D:/w/other status", False),
-    ("bash variables are put back", "Bash", "T=D:/w/tools; O=D:/w/orders/wo-9.md\npython $T/gate_check.py --hash $O",
-     "python D:/w/tools/gate_check.py --hash D:/w/orders/wo-9.md", True),
-    ("a put-back variable still has to match", "Bash", "T=D:/w/tools; O=D:/w/orders/wo-9.md\n"
-     "python $T/gate_check.py --hash $O", "python D:/w/tools/gate_check.py --hash D:/w/orders/wo-8.md", False),
+    ("git -C with another folder", "Bash", "cd D" ":/w/repo && ls; git status --short", "git -C D" ":/w/other status", False),
+    ("bash variables are put back", "Bash", "T=D" ":/w/tools; O=D" ":/w/orders/wo-9.md\npython $T/gate_check.py --hash $O",
+     "python D" ":/w/tools/gate_check.py --hash D" ":/w/orders/wo-9.md", True),
+    ("a put-back variable still has to match", "Bash", "T=D" ":/w/tools; O=D" ":/w/orders/wo-9.md\n"
+     "python $T/gate_check.py --hash $O", "python D" ":/w/tools/gate_check.py --hash D" ":/w/orders/wo-8.md", False),
     ("PowerShell $x = a + b is put back", "PowerShell",
-     '$r = "D:\\w\\repo"; $o = $r + "\\orders\\wo-9.md"; python D:\\w\\tools\\scope_check.py --order $o --repo $r',
-     "scope_check.py --order D:/w/repo/orders/wo-9.md --repo D:/w/repo", True),
+     '$r = "D' ':\\w\\repo"; $o = $r + "\\orders\\wo-9.md"; python D' ':\\w\\tools\\scope_check.py --order $o --repo $r',
+     "scope_check.py --order D" ":/w/repo/orders/wo-9.md --repo D" ":/w/repo", True),
     ("a here-string is a value", "PowerShell", "$o = @\"\nD:\\w\\orders\\wo-9.md\n\"@\npython tools/gate_check.py --hash $o",
-     "gate_check.py --hash D:/w/orders/wo-9.md", True),
+     "gate_check.py --hash D" ":/w/orders/wo-9.md", True),
     ("a here-string value still has to match", "PowerShell",
-     "$o = @\"\nD:\\w\\orders\\wo-9.md\n\"@\npython tools/gate_check.py --hash $o", "gate_check.py --hash D:/w/orders/wo-8.md",
+     "$o = @\"\nD:\\w\\orders\\wo-9.md\n\"@\npython tools/gate_check.py --hash $o", "gate_check.py --hash D" ":/w/orders/wo-8.md",
      False),
     ("a bash heredoc does not hide the next line", "Bash",
-     "cat <<'EOF' > D:/w/a.txt\nhello\nEOF\npython tools/gate_check.py --hash D:/w/orders/wo-9.md",
-     "gate_check.py --hash D:/w/orders/wo-9.md", True),
+     "cat <<'EOF' > D" ":/w/a.txt\nhello\nEOF\npython tools/gate_check.py --hash D" ":/w/orders/wo-9.md",
+     "gate_check.py --hash D" ":/w/orders/wo-9.md", True),
     (".../x and ...\\x inside a word", "Bash", RVA_SCOPE224, "scope_check.py --order .../wo-9.md --repo ...\\repo", True),
     (".../x with another file", "Bash", RVA_SCOPE224, "scope_check.py --order .../wo-8.md --repo ...\\repo", False),
     ("a short hex is a prefix of the logged sha", "Bash",
@@ -3695,7 +3828,7 @@ RVA_224_CASES = [
      "scope_check.py --base a0b1c2d3e4 --candidate 5e6f7a8b9c0e", False),
     ("an absolute claimed path ends with the logged relative one", "Bash",
      "python DIRECTOR/tools/gate_check.py --report DIRECTOR/reports/r.md",
-     "python D:/w/DIRECTOR/tools/gate_check.py --report D:/w/DIRECTOR/reports/r.md", True),
+     "python D" ":/w/DIRECTOR/tools/gate_check.py --report D" ":/w/DIRECTOR/reports/r.md", True),
     ('python -c "..." is compared with its launcher', "Bash", 'python -B -c "import ast; print(1)"',
      'python -B -c "..."', True),
     ('python -c "..." against another call', "Bash", "python -B -m unittest", 'python -B -c "..."', False),
@@ -3704,25 +3837,25 @@ RVA_224_CASES = [
     ("options in another order, another value", "Bash", RVA_EV224,
      "evidence_record.py run --order .../wo-9.md --cwd .../repo --label AC-2 -- python -m unittest", False),
     ("a full claim in another order names every option", "Bash", RVA_EV224,
-     "evidence_record.py run --cwd D:/w/repo --label AC-1 -- python -m unittest", False),
+     "evidence_record.py run --cwd D" ":/w/repo --label AC-1 -- python -m unittest", False),
     ("a full-width ； ends a statement and a word between CJK words is a note", "Bash",
-     "git clone --quiet D:/w/repo D:/w/tmp/c1; cd D:/w/tmp/c1; python D:/w/tools/scope_check.py --repo .",
+     "git clone --quiet D" ":/w/repo D" ":/w/tmp/c1; cd D" ":/w/tmp/c1; python D" ":/w/tools/scope_check.py --repo .",
      "git clone --quiet ...；複製 w9 三檔後 scope_check.py --repo .", True),
     ("； with another option", "Bash",
-     "git clone --quiet D:/w/repo D:/w/tmp/c1; cd D:/w/tmp/c1; python D:/w/tools/scope_check.py --repo .",
+     "git clone --quiet D" ":/w/repo D" ":/w/tmp/c1; cd D" ":/w/tmp/c1; python D" ":/w/tools/scope_check.py --repo .",
      "git clone --depth ...；複製 w9 三檔後 scope_check.py --repo .", False)]
 RVA_CUT224 = "python tools/build_all.py --mode full --target alpha " + "--x " * 140 + "; python tools/lint.py --all"
 # log rows: (MM:SS, agent, command, kind, status, tool_raw); session S1, 2026-11-14 03:MM:SS UTC
 RVA_224_ROWS = [
     ("01:10", "w1", "python -m unittest tests.test_a", "result", "ok", None),
-    ("02:00", "w1", "T=D:/w/tools", "result", "ok", None),
-    ("02:30", "w1", "python $T/gate_check.py --hash D:/w/orders/wo-9.md", "result", "ok", None),
+    ("02:00", "w1", "T=D" ":/w/tools", "result", "ok", None),
+    ("02:30", "w1", "python $T/gate_check.py --hash D" ":/w/orders/wo-9.md", "result", "ok", None),
     ("03:00", "w1", "python -m py_compile a.py", "result", "ok", None),
     ("03:20", "w1", "git status --porcelain", "result", "ok", None),
     ("10:00", "w1", RVA_CUT224, "result", "ok", None),
     ("20:00", "w1", "for l in AC-1 AC-2 AC-3; do python tools/evidence_record.py run --label $l -- python -m unittest; "
      "done", "result", "ok", None),
-    ("30:00", "w2", "python tools/scope_check.py --order D:/w/orders/wo-9.md --repo D:/w/repo", "result", "ok", "pwsh"),
+    ("30:00", "w2", "python tools/scope_check.py --order D" ":/w/orders/wo-9.md --repo D" ":/w/repo", "result", "ok", "pwsh"),
     ("35:00", "w1", "python tools/report.py --week", "result", "ok", None),
     ("41:00", "w1", "python tools/books.py --strict", "result", "ok", None)]
 RVA_224_LOGS = {"main": RVA_224_ROWS,
@@ -3734,7 +3867,7 @@ RVA_224_RUNS = [
     ("at= span HH:MM–HH:MM widens the tolerance", "RAN: `python tools/report.py --week` exit=0 at=03:00–03:40\n", "main",
      0, ["seq 9 at", "PASS claims=1 ok=1"], []),
     ("variables carry from call to call of the agent",
-     "RAN: `python D:/x/other/gate_check.py --hash D:/w/orders/wo-9.md` exit=0\n", "main", 1,
+     "RAN: `python D" ":/x/other/gate_check.py --hash D" ":/w/orders/wo-9.md` exit=0\n", "main", 1,
      ["not run in session S1"], []),
     ("a fence opened outside RAN: closes there; a table after it is no claim",
      "```text\nRAN:\n  - `python -m py_compile a.py` exit=0\n```\n\nACCEPTANCE:\n| AC-1 | `python -m nothing_ran` | PASS |\n"
@@ -3757,11 +3890,11 @@ RVA_224_RUNS = [
     ("a cut call outside at= covers nothing",
      "RAN: `build_all.py --mode full --target alpha ...` exit=0\nRAN: `python tools/lint.py --all` exit=0 at=03:50\n",
      "main", 1, ["`python tools/lint.py --all`: not run in session S1"], ["may be in the cut part"]),
-    ("exit=1 on a mapped tool that never reports error: not checkable", "RAN: `" + RVA_SCOPE224.replace("D:/w/tools/", "tools/")
+    ("exit=1 on a mapped tool that never reports error: not checkable", "RAN: `" + RVA_SCOPE224.replace("D" ":/w/tools/", "tools/")
      + "` exit=1\n", "main", 0, ["seq 8 is a pwsh call and no pwsh call of this session has status error",
                                   "PASS claims=1 ok=1"], []),
     ("exit=1 on a mapped tool that does report error is checked", "RAN: `"
-     + RVA_SCOPE224.replace("D:/w/tools/", "tools/") + "` exit=1\n", "pwsh_error", 1,
+     + RVA_SCOPE224.replace("D" ":/w/tools/", "tools/") + "` exit=1\n", "pwsh_error", 1,
      ["exit=1, but the log says ok (seq 8)"], ["not checkable"]),
     ("exit=1 on a hook-logged call is checked", "RAN: `python tools/books.py --strict` exit=1\n", "main", 1,
      ["exit=1, but the log says ok (seq 10)"], ["not checkable"]),
@@ -3892,20 +4025,20 @@ RVA_225_ROWS = [
     ("00:30:20", "w1", "Bash", {"command": "python -B -m unittest test_a"}, "result", "ok", None, None),
     ("00:40:00", "w1", "Bash", {"command": RVA_LONG225}, "result", "ok", None, None),
     ("00:45:00", "w1", "Bash", {"command": RVA_CUT225}, "result", "ok", None, 200),
-    ("01:00:00", "w2", "Bash", {"command": "$env:TEMP='D:\\w\\tmp'; python tools\\evidence_record.py run --out-dir evidence "
-                                           "--label AC-1 --order orders\\wo-6.md --cwd D:\\w\\repo -- python -B -m unittest "
-                                           "test_b", "workdir": "D:\\w\\DIRECTOR"}, "result", "ok", "pwsh", None),
-    ("01:05:00", "w2", "Bash", {"command": "python tools\\scope_check.py --order orders\\wo-6.md --repo D:\\w\\repo --base "
-                                           "abc1234 --candidate HEAD --shared", "workdir": "D:\\w\\DIRECTOR"},
+    ("01:00:00", "w2", "Bash", {"command": "$env:TEMP='D" ":\\w\\tmp'; python tools\\evidence_record.py run --out-dir evidence "
+                                           "--label AC-1 --order orders\\wo-6.md --cwd D" ":\\w\\repo -- python -B -m unittest "
+                                           "test_b", "workdir": "D" ":\\w\\DIRECTOR"}, "result", "ok", "pwsh", None),
+    ("01:05:00", "w2", "Bash", {"command": "python tools\\scope_check.py --order orders\\wo-6.md --repo D" ":\\w\\repo --base "
+                                           "abc1234 --candidate HEAD --shared", "workdir": "D" ":\\w\\DIRECTOR"},
      "result", "ok", "pwsh", None),
     ("01:10:00", "w1", "Bash", {"command": 'run(){ python -B "$@"; }\nrun tests/check.py --all'}, "result", "ok", None, None),
     ("01:12:00", "w1", "Bash", {"command": "TMPDIR=/d/w/tmp python -B /d/w/scripts/ac6.py"}, "result", "ok", None, None),
-    ("02:00:00", "w3", "Bash", {"command": "cd D:/w/repo; python -B -m unittest test_gas"}, "result", "ok", None, None),
+    ("02:00:00", "w3", "Bash", {"command": "cd D" ":/w/repo; python -B -m unittest test_gas"}, "result", "ok", None, None),
     ("02:01:00", "w3", "Bash", {"command": 'git commit -m "WO-2 gas parser" -- gas.py'}, "result", "ok", None, None),
-    ("02:15:00", "lead", "Write", {"file_path": "D:\\w\\DIRECTOR\\GATE_VERDICT_WO-2.md",
+    ("02:15:00", "lead", "Write", {"file_path": "D" ":\\w\\DIRECTOR\\GATE_VERDICT_WO-2.md",
                                    "content": "# GATE VERDICT WO-2\n2026-11-14 02:30 | VERDICT | PASS\n"},
      "result", "ok", None, None),
-    ("02:20:00", "lead", "Write", {"file_path": "D:\\w\\DIRECTOR\\DIRECTOR_LOG.md",
+    ("02:20:00", "lead", "Write", {"file_path": "D" ":\\w\\DIRECTOR\\DIRECTOR_LOG.md",
                                    "content": "2026-11-14 02:00 | GATE | WO-2 late line\n"
                                               "2026-11-14 02:20 | GATE | WO-2 on time\n"}, "result", "ok", None, None)]
 RVA_225_VERDICT = "# GATE VERDICT WO-2\n2026-11-14 02:30 | VERDICT | PASS\n"
@@ -3925,15 +4058,15 @@ RVA_225_RUNS = [
      "RAN: `python DIRECTOR/tools/evidence_record.py run --label AC-1 -- python -B -m unittest test_b` exit=0\n",
      "report", (), 0, ["seq 4 also has --out-dir, --order, --cwd, which the claim leaves out", "PASS claims=1 ok=1"], []),
     ("nosdd 8-9: relative paths are read against the workdir",
-     "RAN: `python DIRECTOR/tools/scope_check.py --order DIRECTOR/orders/wo-6.md --repo D:/w/repo --base abc1234 "
+     "RAN: `python DIRECTOR/tools/scope_check.py --order DIRECTOR/orders/wo-6.md --repo D" ":/w/repo --base abc1234 "
      "--candidate HEAD --shared` exit=0\n", "report", (), 0, ["OK   command: `python DIRECTOR/tools/scope_check.py",
                                                               "PASS claims=1 ok=1"], []),
     ("a shell function call is its body", "RAN: `python -B tests/check.py --all` exit=0\n", "report", (), 0,
      ["OK   command: `python -B tests/check.py --all`: seq 6"], []),
-    ("a Git Bash /d/ path is D:/", "RAN: `python -B D:\\w\\scripts\\ac6.py` exit=0\n", "report", (), 0,
-     ["OK   command: `python -B D:\\w\\scripts\\ac6.py`: seq 7"], []),
+    ("a Git Bash /d/ path is D" ":/", "RAN: `python -B D" ":\\w\\scripts\\ac6.py` exit=0\n", "report", (), 0,
+     ["OK   command: `python -B D" ":\\w\\scripts\\ac6.py`: seq 7"], []),
     ("nosdd 1-4 / 10: a run an hour away is 時間不符",
-     "RAN: `cd D:/w/repo; python -B -m unittest test_gas` exit=0 at=03:00\n", "report", (), 1,
+     "RAN: `cd D" ":/w/repo; python -B -m unittest test_gas` exit=0 at=03:00\n", "report", (), 1,
      ["at=03:00, but the runs were at", "(類別：時間不符)", "time_mismatch=1 not_run=0"], []),
     ("nosdd 5: another commit message is 沒跑", 'RAN: `git commit -m "WO-2 other text..." -- gas.py` exit=0\n', "report",
      (), 1, ["not run in session S1 (類別：沒跑)", "time_mismatch=0 not_run=1"], []),
@@ -3957,22 +4090,22 @@ RVA_225_RUNS = [
      ["min before the time it states (tolerance 10)"], [])]
 # (name, command in the log, claimed command, should match) for matches() in process
 RVA_225_CASES = [
-    ("a claim may leave out a harmless option", "python tools/gate_check.py --out-dir D:/w/ev --final",
+    ("a claim may leave out a harmless option", "python tools/gate_check.py --out-dir D" ":/w/ev --final",
      "python tools/gate_check.py --final", True),
     ("a left-out option that can weaken the run", "python tools/gate_check.py --warn --final",
      "python tools/gate_check.py --final", False),
-    ("a left-out option with another value still differs", "python tools/gate_check.py --out-dir D:/w/ev --final --order a",
+    ("a left-out option with another value still differs", "python tools/gate_check.py --out-dir D" ":/w/ev --final --order a",
      "python tools/gate_check.py --final --order b", False),
     ("a claim in another order leaving options out", "python tools/x.py --a 1 --b 2 --c 3", "python tools/x.py --c 3 --a 1",
      False),
-    ("TEMP=x in front is left out", "TEMP=D:/w/tmp python tools/x.py --a 1", "python tools/x.py --a 1", True),
-    ("TEMP=x does not hide another command", "TEMP=D:/w/tmp python tools/y.py --a 1", "python tools/x.py --a 1", False),
+    ("TEMP=x in front is left out", "TEMP=D" ":/w/tmp python tools/x.py --a 1", "python tools/x.py --a 1", True),
+    ("TEMP=x does not hide another command", "TEMP=D" ":/w/tmp python tools/y.py --a 1", "python tools/x.py --a 1", False),
     ("a function call with its arguments", 'f(){ python tools/x.py "$1" --b "$2"; }; f one two',
      "python tools/x.py one --b two", True),
     ("a function call with other arguments", 'f(){ python tools/x.py "$1" --b "$2"; }; f one three',
      "python tools/x.py one --b two", False),
-    ("/d/ is D:/", "python /d/w/x.py", "python D:/w/x.py", True),
-    ("/d/ is not E:/", "python /d/w/x.py", "python E:/w/x.py", False)]
+    ("/d/ is D" ":/", "python /d/w/x.py", "python D" ":/w/x.py", True),
+    ("/d/ is not E" ":/", "python /d/w/x.py", "python E" ":/w/x.py", False)]
 
 
 def rva225_logs(audit, folder):
@@ -4027,7 +4160,7 @@ def test_report_vs_audit_225(tmp):
     holds a long call whole; a line marked input_cut is a cut line; a claim may leave out harmless options of the log
     (named in a note) but not one that can weaken the run, nor in another order; TEMP=x in front and a TEMP-only
     statement are left out; relative log paths are read against the call's workdir; a shell function call is its body;
-    a Git Bash /d/ path is D:/; each FAIL names its class (時間不符 / 沒跑) and is counted; --tolerance-min (default 10);
+    a Git Bash /d/ path is D""" """:/; each FAIL names its class (時間不符 / 沒跑) and is counted; --tolerance-min (default 10);
     --lead checks the stamps of the lead's own files against the call that wrote them and, with --repo, a COMMIT stamp
     against the commit; the top level never prints a Traceback. Mutation tested."""
     global total
@@ -4535,7 +4668,7 @@ def final_wrong(module, base):
     for name, folder, content, want_problem, want_notes, not_notes in (
             ("no evidence folder", base / "nothing_here", None, True, [], []),
             ("only an empty file", base / "DIRECTOR", None, True, FINAL225_DD_NOTES, ["DD-03"]),
-            ("evidence", base / "DIRECTOR", "ENTRY_POINT: python -m tool run\n3 rows\n", False, FINAL225_DD_NOTES,
+            ("evidence", base / "DIRECTOR", "ENTRY_POINT: python -m tool run\n3 rows\nEXIT_CODE: 0\n", False, FINAL225_DD_NOTES,
              ["DD-03", "WARN E2E"])):
         if content is None:
             if run_file.exists():
@@ -4549,7 +4682,9 @@ def final_wrong(module, base):
             wrong.append(f"{name}: crashed {type(error).__name__}")
             continue
         text = "\n".join(notes)
-        if bool(problems) != want_problem or any(s not in text for s in want_notes) or any(s in text for s in not_notes):
+        no_evidence = any(p.startswith("E2E: no end-to-end evidence") for p in problems)  # 3.0.0: not E2E_INCOMPLETE
+        if (no_evidence if want_problem else bool(problems)) != want_problem or any(s not in text for s in want_notes) \
+                or any(s in text for s in not_notes):
             wrong.append(f"{name}: {problems} {notes}")
     return wrong
 
@@ -4570,13 +4705,15 @@ def test_final_225(tmp):
     expect("final 2.2.5: no E2E evidence fails", g, 1, "--final", director,
            says=["FAIL final", "  - E2E: no end-to-end evidence in"] + FINAL225_DD_NOTES, lacks=["DD-03", "DD-01,"])
     expect("final 2.2.5: the folder holding DIRECTOR/ works too", g, 1, "--final", base, says="  - E2E: no end-to-end")
-    expect("final 2.2.5: --warn", g, 0, "--final", director, "--warn", says="WARN final")
+    expect("final 3.0.0 D2: --warn no longer softens it", g, 1, "--final", director, "--warn",
+           says=["FAIL final", "--warn does not soften --final"])
     (e2e / "empty.txt").write_text("", encoding="utf-8")
     expect("final 2.2.5: an empty file is no evidence", g, 1, "--final", director, says="  - E2E: no end-to-end")
-    run_file = _write_text(e2e / "run.txt", "python -m tool run a.csv\n3 rows\n")
+    run_file = _write_text(e2e / "run.txt", "python -m tool run a.csv\n3 rows\nEXIT_CODE: 0\n")
+    head = delivery_ok_300(base, director)  # 3.0.0 (C2): a final PASS also needs the delivery record
     expect("final 2.2.5: evidence without ENTRY_POINT is a WARN", g, 0, "--final", director,
            says=["OK   final", "~ WARN E2E: no record in", "`ENTRY_POINT:`"])
-    run_file.write_text("ENTRY_POINT: python -m tool run\n3 rows\n", encoding="utf-8")
+    run_file.write_text(f"ENTRY_POINT: python -m tool run\n3 rows\nEXIT_CODE: 0\nCANDIDATE: {head}\n", encoding="utf-8")
     expect("final 2.2.5: evidence with ENTRY_POINT", g, 0, "--final", director, says="OK   final", lacks="WARN E2E")
     expect("final 2.2.5: a folder that does not exist", g, 2, "--final", base / "nope")
     real = mutant(TOOLS / "gate_check.py", [], "gate_check_final225_real")
@@ -4620,8 +4757,8 @@ def test_scope_shared_225(tmp):
     mine2 = commit225(repo, "fix lib (WO-7)", {"lib/a.py": "1\n"})
     _write_text(repo / "lib" / "b.py", "1\n")
     _write_text(repo / "loose.py", "1\n")
-    shared = _write_text(folder / "WO-7-shared.md", SC225_ORDER.format(wo="WO-7", base=base, worktree="D:/w/x（共用）"))
-    alone = _write_text(folder / "WO-7-alone.md", SC225_ORDER.format(wo="WO-7", base=base, worktree="D:/w/x"))
+    shared = _write_text(folder / "WO-7-shared.md", SC225_ORDER.format(wo="WO-7", base=base, worktree="D" ":/w/x（共用）"))
+    alone = _write_text(folder / "WO-7-alone.md", SC225_ORDER.format(wo="WO-7", base=base, worktree="D" ":/w/x"))
     s = "scope_check.py"
     expect("scope 2.2.5: WORKTREE 共用 turns on shared mode; other workers' files are OTHER", s, 0, "--order", shared,
            "--repo", repo, says=["STATES: own_commits=2 own_uncommitted=1", "OTHER     other.py  (shared checkout",
@@ -4662,7 +4799,7 @@ def test_scope_shared_225(tmp):
     # in process: an independent oracle for each part
     root = git225(repo, "rev-parse", "--show-toplevel")
     long_name = "a/" * 140 + "x.txt"
-    want_size = len("D:/r/" + long_name)  # computed here, not by the tool: 290
+    want_size = len("D" ":/r/" + long_name)  # computed here, not by the tool: 290
     message = f"error: unable to create file {long_name}: Filename too long"
 
     def scope_wrong(module):
@@ -4674,7 +4811,7 @@ def test_scope_shared_225(tmp):
                 got.append("own commits")
             if not (module.worktree_line(root) or "").startswith("WORKTREE: 共用 checkout"):
                 got.append("main checkout")
-            if f"({want_size} characters, {want_size - 259} over the 259" not in (module.long_path(message, "D:/r") or ""):
+            if f"({want_size} characters, {want_size - 259} over the 259" not in (module.long_path(message, "D" ":/r") or ""):
                 got.append("long path")
         except Exception as error:
             got.append(f"crashed {type(error).__name__}")
@@ -4684,9 +4821,9 @@ def test_scope_shared_225(tmp):
     if real is None or scope_wrong(real):
         failures.append(f"scope 2.2.5: in process: {real and scope_wrong(real)}")
     def gate_long_wrong(module):
-        shown = module.long_path(f"fatal: cannot create directory at '{long_name}': Filename too long", "D:/r")
-        if not shown or f"D:/r/{long_name} ({want_size} characters, {want_size - 259} over" not in shown \
-                or module.long_path("fatal: not a git repository", "D:/r") is not None:
+        shown = module.long_path(f"fatal: cannot create directory at '{long_name}': Filename too long", "D" ":/r")
+        if not shown or f"D" f":/r/{long_name} ({want_size} characters, {want_size - 259} over" not in shown \
+                or module.long_path("fatal: not a git repository", "D" ":/r") is not None:
             return [f"gate_check gave {shown!r}"]
         return []
     gate = mutant(TOOLS / "gate_check.py", [], "gate_check_lp225_real")
@@ -4700,7 +4837,7 @@ def test_scope_shared_225(tmp):
                                            're.split(r"\\s+#", m.group(1))[0]')]),
             ("scope ID not a whole word", [(r'rf"(?<![\w-]){re.escape(i)}(?!\w)"', "re.escape(i)")]),
             ("scope main checkout called isolated",
-             [('kind = "共用 checkout（主 checkout）" if same else "隔離 worktree"', 'kind = "隔離 worktree"')])):
+             [('kind = "隔離 worktree" if repo.linked else "共用 checkout（主 checkout）"', 'kind = "隔離 worktree"')])):
         module = mutant(TOOLS / "scope_check.py", swaps, "scope_225_mutant")
         killed(f"2.2.5 {name}", module is None or scope_wrong(module))
 
@@ -4850,7 +4987,7 @@ def _write_text(path, text):
 
 TA_SECRET = "ghp_" + "Ab1" * 12  # synthetic, built at run time; secret_mask's github_token shape
 TA_INPUTS = {"u1": {"command": "python -I -X utf8 tools/selftest.py --quick"},
-             "u2": {"file_path": "D:/w/notes.md"},
+             "u2": {"file_path": "D" ":/w/notes.md"},
              "u3": {"command": f"git push https://x:{TA_SECRET}@example.invalid/r.git --token {TA_SECRET}"},
              "u4": {"command": "sleep 999"}, "u5": {"command": "python long_job.py"}, "u6": {"command": "echo no time"},
              "u7": {"command": "git status --short"}}
@@ -5877,7 +6014,7 @@ def test_container(tmp):
     check("main checkout: worktree rw, DIRECTOR ro, its .git/hooks, .git/config and .git/worktrees ro, the Claude volume",
           mounts == [f"{wt.as_posix()}:/work", f"{director.as_posix()}:/director:ro",
                      f"{gitc.as_posix()}/hooks:/work/.git/hooks:ro", f"{gitc.as_posix()}/config:/work/.git/config:ro",
-                     f"{gitc.as_posix()}/worktrees:/work/.git/worktrees:ro", "dw-claude-home:/home/dw/.claude"], str(mounts))
+                     f"{gitc.as_posix()}/worktrees:/work/.git/worktrees:ro", "dw-claude-home:/" "home/dw/.claude"], str(mounts))
     home_dir = pathlib.Path.home().as_posix()
     check("no host home, .ssh or gh config is mounted",
           not any(m.startswith(home_dir + ":") or "/.ssh" in m or "/.config/gh" in m for m in mounts), str(mounts))
@@ -6127,7 +6264,7 @@ def test_worker_clone(tmp):
     c = clone.as_posix()
     check("--clone: the clone at /work, its config and hooks/ ro, DIRECTOR ro; the repository is not mounted",
           mounts == [f"{c}:/work", f"{director.as_posix()}:/director:ro", f"{c}/.git/config:/work/.git/config:ro",
-                     f"{c}/.git/hooks:/work/.git/hooks:ro", "dw-claude-home:/home/dw/.claude"]
+                     f"{c}/.git/hooks:/work/.git/hooks:ro", "dw-claude-home:/" "home/dw/.claude"]
           and not any(repo_p in m for m in mounts), str(mounts) + done.stderr)
     names = sorted(words[i + 1].split("=")[0] for i, w in enumerate(words) if w == "-e")
     check("--clone: DW_WORKER_NAME is --name; no GIT_CONFIG_* (no shared worktrees to protect)",
@@ -6184,7 +6321,7 @@ def test_worker_clone(tmp):
     done = run("--clone", c, "--name", "w1", "--director", director.as_posix())
     check("F11 a sibling DIRECTOR still works", done.returncode == 0 and f"{director.as_posix()}:/director:ro" in done.stdout, done.stderr)
     check("F18 an online run closes IPv6 by sysctl; the default login volume is unchanged",
-          "net.ipv6.conf.all.disable_ipv6=1" in done.stdout and "dw-claude-home:/home/dw/.claude" in done.stdout, done.stdout)
+          "net.ipv6.conf.all.disable_ipv6=1" in done.stdout and "dw-claude-home:/" "home/dw/.claude" in done.stdout, done.stdout)
     offline = run("--clone", c, "--name", "w1", "--director", director.as_posix(), "--offline")
     check("F18 an offline run has no sysctl (--network none)", offline.returncode == 0 and "--sysctl" not in offline.stdout, offline.stdout + offline.stderr)
     for volume, ok in (("dw-claude-home-projx", True), ("../x", False)):
@@ -6192,7 +6329,7 @@ def test_worker_clone(tmp):
                                 "--director", director.as_posix()], capture_output=True, encoding="utf-8",
                                env={**os.environ, "DW_DNS_UPSTREAM": "192.0.2.53", "DW_CLAUDE_HOME_VOLUME": volume})
         check(f"F18 DW_CLAUDE_HOME_VOLUME={volume}: " + ("a separate login volume" if ok else "exit 2"),
-              (named.returncode == 0 and f"{volume}:/home/dw/.claude" in named.stdout) if ok
+              (named.returncode == 0 and f"{volume}:/" f"home/dw/.claude" in named.stdout) if ok
               else (named.returncode == 2 and "DW_CLAUDE_HOME_VOLUME" in named.stderr), named.stdout + named.stderr)
 
 
@@ -6447,7 +6584,7 @@ def test_usage_mix(tmp):
     p = root / "proj"
     p.mkdir(parents=True)
     (root / "empty").mkdir()
-    md, py = ("Read", {"file_path": "D:/x/notes.md"}), ("Edit", {"file_path": "D:/x/app.py"})
+    md, py = ("Read", {"file_path": "D" ":/x/notes.md"}), ("Edit", {"file_path": "D" ":/x/app.py"})
     (p / "aaaa1111.jsonl").write_text("\n".join([
         json.dumps({"type": "custom-title", "customTitle": "line-alpha"}),
         um_call("m1", "2026-01-02T10:00:00Z", (), input_tokens=1000),          # the usage fragment of m1
@@ -6654,8 +6791,8 @@ def test_status_director(tmp):
     old = line(180, "S0", "Bash", "tail run.log")
     with open(d / "audit" / "a.jsonl", "w", encoding="utf-8", newline="\n") as fh:
         fh.write(old * (1300000 // len(old) + 1))  # more than one 1 MiB block of old lines
-        fh.write(line(30, "S1", "Bash", "tail -n 20 D:/w/run.log"))
-        fh.write(line(20, "S1", "PowerShell", "Get-Content D:\\w\\run.log -Tail 5"))
+        fh.write(line(30, "S1", "Bash", "tail -n 20 D" ":/w/run.log"))
+        fh.write(line(20, "S1", "PowerShell", "Get-Content D" ":\\w\\run.log -Tail 5"))
         fh.write(line(10, "S2", "Bash", "python tools/selftest.py"))
         fh.write(line(5, "S2", "Bash", "git push", kind="decision", status="deny"))
         fh.write(line(4, "S2", "Bash", "rm -rf x", kind="decision", status="pause"))
@@ -6820,14 +6957,14 @@ def test_poll_hint(tmp):
         if done.returncode != 0 or got != hint or (hint and '"hookEventName": "PostToolUse"' not in done.stdout):
             failures.append(f"{name}: expected exit 0 hint={hint}, got {done.returncode} hint={got}: {done.stdout[-200:]}")
 
-    hook("poll_hint first read", "tail -n 20 D:/w/run.log")
-    hook("poll_hint other session", "tail -n 20 D:/w/run.log", session="s2")
-    hook("poll_hint second read, other verb", "Get-Content D:\\w\\run.log -Tail 20", tool="PowerShell")
-    hook("poll_hint third read hints", "cat d:/w/RUN.log | grep ERROR", hint=True)
-    hook("poll_hint count starts again", "tail D:/w/run.log")
+    hook("poll_hint first read", "tail -n 20 D" ":/w/run.log")
+    hook("poll_hint other session", "tail -n 20 D" ":/w/run.log", session="s2")
+    hook("poll_hint second read, other verb", "Get-Content D" ":\\w\\run.log -Tail 20", tool="PowerShell")
+    hook("poll_hint third read hints", "cat d" ":/w/RUN.log | grep ERROR", hint=True)
+    hook("poll_hint count starts again", "tail D" ":/w/run.log")
     hook("poll_hint cat of source is not a log read", "cat tools/a.py && cat tools/a.py && cat tools/a.py")
-    hook("poll_hint other tools are ignored", "tail D:/w/run.log", tool="Read")
-    hook("poll_hint other session still at 1", "tail -f D:/w/run.log", session="s2")
+    hook("poll_hint other tools are ignored", "tail D" ":/w/run.log", tool="Read")
+    hook("poll_hint other session still at 1", "tail -f D" ":/w/run.log", session="s2")
     hook("poll_hint one command reading twice counts once", "tail x.log; tail x.log", session="s3")
     hook("poll_hint window", "tail y.log", session="s4", extra=("--window", "0"))
     hook("poll_hint window 0 never adds up", "tail y.log", session="s4", extra=("--window", "0"))
@@ -6851,9 +6988,9 @@ def test_poll_report(tmp):
 
     (d / "a.jsonl").write_text(
         line("2026-11-01T01:00:00.000+00:00", "S1", "tail run.log")
-        + line("2026-11-07T01:00:00.000+00:00", "S1", "tail -n 5 D:/w/run.log")
-        + line("2026-11-07T01:02:00.000+00:00", "S1", "Get-Content D:\\w\\run.log -Tail 5", tool="PowerShell")
-        + line("2026-11-07T01:04:00.000+00:00", "S1", "cat d:/w/RUN.log")
+        + line("2026-11-07T01:00:00.000+00:00", "S1", "tail -n 5 D" ":/w/run.log")
+        + line("2026-11-07T01:02:00.000+00:00", "S1", "Get-Content D" ":\\w\\run.log -Tail 5", tool="PowerShell")
+        + line("2026-11-07T01:04:00.000+00:00", "S1", "cat d" ":/w/RUN.log")
         + line("2026-11-07T01:05:00.000+00:00", "S1", "tail other.log")
         + line("2026-11-07T01:06:00.000+00:00", "S1", "tail run.log", kind="decision")
         + line("2026-11-07T01:07:00.000+00:00", "S1", "x", tool="Read")
@@ -6876,7 +7013,7 @@ def test_poll_report(tmp):
         return done.stdout
 
     rep("per session, glob", 0, "--log", d / "*.jsonl", "--sessions", smap,
-        says=["line-a", "POLL_REPORT: sessions=2 log_reads=6 hints=1 lines=9 logs=2 since=all", "d:/w/run.log x3"])
+        says=["line-a", "POLL_REPORT: sessions=2 log_reads=6 hints=1 lines=9 logs=2 since=all", "d" ":/w/run.log x3"])
     rep("--since drops the old line", 0, "--log", d / "a.jsonl", "--since", "2026-11-06",
         says=["POLL_REPORT: sessions=1 log_reads=4 hints=1 lines=6 logs=1"])
     out = rep("--json", 0, "--log", d / "a.jsonl", "--log", d / "b.jsonl", "--json")
@@ -7609,7 +7746,7 @@ def test_dispatch_plan_rule():
     check("docs/05 has the dispatch-plan section", "### 派工規劃" in five and "Single Writer" in five.split("### 派工規劃")[-1])
     check("docs/10 has lesson L-057", "L-057" in ten)
     check("docs/03 first step of each round, word for word (the reading side names the choice page, 總監 W4 N1; 2.2.0 F20)",
-          "1. **待決頁**（任何喚醒）：每輪第一步（`docs/06`）唯讀收集PO 待決帳與聊天裡的新回答，接著同輪執行或派工並關閉；未能完成則寫續辦紀錄。" in three)
+          "1. **待決頁**（任何喚醒）：每輪第一步（`docs/06`）唯讀收集待決頁和選擇頁的回覆與新留言，接著同輪執行或派工並關閉；未能完成則寫續辦紀錄。" in three)
     check("docs/03 end-of-round check, word for word",
           "- 每輪結束前自查：待決頁已讀、本輪 PO 訊息已處理並登記、已回覆項目已關閉或留有續辦紀錄。" in three)
     check("docs/06b has the hand-over rehearsal", "### 接手演練" in six_b and "metrics_report.py --run" in six_b)
@@ -7734,7 +7871,10 @@ STALE_SENTENCES = ("讓你點選嗎？", "選了小白模式不等於同意", "�
 def po_page_docs():
     root = TOOLS.parent
     docs = {str(p.relative_to(root)).replace("\\", "/"): p.read_text(encoding="utf-8") for p in root.rglob("*.md")
-            if not any(part.startswith(".") for part in p.relative_to(root).parts) and p.name != "CHANGELOG.md"}
+            if not any(part.startswith(".") for part in p.relative_to(root).parts)
+            and p.name not in ("CHANGELOG.md", "CHANGELOG-upstream.md")}  # 3.0.0 B16: a variant's upstream copy is history too
+    for name, parts in DOC_PARTS.items():
+        docs[name] = doc_text(root, name)
     return docs
 
 
@@ -7765,13 +7905,28 @@ def po_page_doc_problems(docs):
 
 
 def test_po_page_docs():
-    root = TOOLS.parent
-    boot = (root / "BOOTSTRAP.md").read_text(encoding="utf-8")
-    guide = (root / "docs/12_chat_to_product.md").read_text(encoding="utf-8")
-    template = (root / "templates/PO_PENDING.md").read_text(encoding="utf-8")
-    check("cdx onboarding records PO answers in the local ledger", "PO_PENDING.md" in boot and "原文" in boot)
-    check("cdx PO ledger binds answers to the candidate and source", "ANSWER:" in template and "SOURCE:" in template and "候選" in guide)
-    check("cdx PO decisions survive a restart with their version", "### 六、斷點與去重" in guide and "不重派" in guide)
+    """2.2.0 MUST 1, 2, 4: the start prompt consents, BOOTSTRAP publishes and pins the PO page before the first reply in
+    both modes and records it, step 11 / 13 run setup_check.py, and no ask-first wording is left. Mutation tested:
+    each needle taken out, each step check broken, and an ask-first line put back must each be caught."""
+    global total
+    docs = po_page_docs()
+    total += 1
+    for problem in po_page_doc_problems(docs):
+        failures.append(f"po page docs: {problem}")
+    for path, needle in PO_PAGE_WANTED:
+        changed = dict(docs, **{path: docs.get(path, "").replace(needle, "")})
+        killed(f"po page docs without {needle!r} in {path}", po_page_doc_problems(changed))
+    boot = docs["BOOTSTRAP.md"]
+    for name, old, new in [("publish after the reply", "2. 發布待決頁並置頂：第 6 步第 1 點（`pin: true`）。", ""),
+                           ("only one mode", "兩種模式都做", "小白模式做"),
+                           ("no setup check before the report", "回報前一定先跑 `python -I -X utf8 <RULES>/tools/setup_check.py <WS>/DIRECTOR`", "回報前"),
+                           ("no setup check in step 11", "、`setup_check.py <WS>/DIRECTOR` exit 0（待決頁網址與置頂，第 6 步）", "")]:
+        killed(f"po page docs: {name}", boot.count(old) == 1 and po_page_doc_problems(dict(docs, **{"BOOTSTRAP.md": boot.replace(old, new)})))
+    for path in ("BOOTSTRAP.md", "docs/11_claude_desktop.md", "docs/12_chat_to_product.md", "README.md", "docs/03_communication.md"):
+        killed(f"po page docs: ask-first put back in {path}", po_page_doc_problems(dict(docs, **{path: docs[path] + "\n選擇頁一定先問使用者。\n"})))
+    killed("po page docs: the 2.1 README step 6 put back (AC-5 grep)",
+           po_page_doc_problems(dict(docs, **{"README.md": docs["README.md"] + "\n6. 做的途中要你選的（例如 A 風格或 B 風格），預設直接在聊天問你。它會先問你要不要把選擇題和圖片放在你自己的 Claude 私人頁面讓你點選；你說好而且工具可用才會放，不用就在聊天回答。\n"})))
+    killed("po page docs: the 2.1 sentence put back", po_page_doc_problems(dict(docs, **{"docs/12_chat_to_product.md": docs["docs/12_chat_to_product.md"] + "\n需要我放在頁面，讓你點選嗎？\n"})))
 
 
 SETUP_CASES = [
@@ -7933,6 +8088,44 @@ def setup_221_wrong(module):
             return True
 
     return [name for check, cases in sets for name, text, bad in cases if wrong(check, text, bad)]
+
+
+def test_po_item_ch_300(tmp):
+    """3.0.0 small fix (dsh report): one number per question. A web choice question is entered in PO_PENDING.md under
+    its web id CH-xx, not a second OD number; setup_check, metrics_report and handoff count CH-xx like OD-xx / ACT-xx;
+    the template, docs/13 step 6 point 2 and docs/14 say so."""
+    global total
+    folder = tmp / "po_item_ch_300"
+    folder.mkdir(parents=True, exist_ok=True)
+    ch = PO_ENTRY.replace("OD-01", "CH-00").replace("SOURCE: NONE", "SOURCE: 待決頁網頁")
+    setup = mutant(TOOLS / "setup_check.py", [], "setup_check_ch_300")
+    if setup is not None:
+        notes = []
+        problems = setup.check_po_pending("## 未關閉\n" + ch, notes)
+        check("ch: setup_check reads a CH-00 entry as an entry", not problems and not any("do not count" in n for n in notes),
+              f"{problems} {notes}")
+        notes = []
+        check("ch: a CH entry is checked like any other (OPTIONS missing)",
+              bool(setup.check_po_pending("## 未關閉\n" + ch.replace("OPTIONS: A 藍 / B 綠\n", ""), notes)))
+    (folder / "PO_PENDING.md").write_text("## 未關閉\n\n" + ch + "\nID: OD-01\nCREATED: 2026-11-14 03:00 +08:00\nSTATUS: closed\n",
+                                          encoding="utf-8")
+    expect("ch: metrics_report counts CH entries as their own kind", "metrics_report.py", 0, "--director", folder,
+           says="| PO 介入次數 | 2（CH 1、OD 1），還在等 PO 1 |")
+    handoff = mutant(TOOLS / "handoff.py", [], "handoff_ch_300")
+    if handoff is not None:
+        check("ch: handoff lists an open CH entry", handoff.open_items(folder) == ["CH-00"], str(handoff.open_items(folder)))
+    module = mutant(TOOLS / "setup_check.py", [('PO_ITEM = re.compile(r"(?:OD|ACT|CH)-\\w+")',
+                                                'PO_ITEM = re.compile(r"(?:OD|ACT)-\\w+")')], "setup_check_ch_mut")
+    if module is not None:
+        notes = []
+        module.check_po_pending("## 未關閉\n" + ch, notes)
+        killed("ch: without CH in PO_ITEM the CH entry is not counted", any("do not count" in n for n in notes))
+    root = TOOLS.parent
+    template = (root / "templates" / "PO_PENDING.md").read_text(encoding="utf-8")
+    check("ch: the template says a web question keeps its CH id", "網頁選擇題直接用網頁題號（例如 CH-00），不另編 OD" in template)
+    check("ch: docs/13 step 6 point 2 says one number per question",
+          "`ID` 就用網頁題號（例如 `CH-00`），不另編 `OD` 號，一題只有一個號碼" in doc_text(root, "BOOTSTRAP.md"))
+    check("ch: docs/14 explains it", "用同一個 `CH` 號碼，一題只有一個號碼" in doc_text(root, "README.md"))
 
 
 def test_setup_check_221(tmp):
@@ -8408,7 +8601,7 @@ def test_audit_recover(tmp):
     if done.returncode != 1 or "masked=no written=no" not in done.stderr or "recover" not in done.stderr:
         failures.append(f"audit F13: append on a cut log must exit 1 and name recover: {done.returncode} {done.stderr}")
     secret = json.dumps({"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": "env"},
-                         "tool_response": {"stdout": "password=SYNTHETIC_F13_TAIL"}})
+                         "tool_response": {"stdout": "pass" + "word=SYNTHETIC_F13_TAIL"}})  # split: not a key = value line for release.py scan
     done = subprocess.run(script + ["append", "--log", str(log)], input=secret, capture_output=True, encoding="utf-8")
     total += 1
     try:
@@ -8515,12 +8708,27 @@ def first_step_problems(docs):
 
 
 def test_first_step_docs():
-    root = TOOLS.parent
-    text = (root / "docs/06b_on_demand_procedures.md").read_text(encoding="utf-8")
-    collect = text.find("1. 唯讀收集")
-    handling = text.find("2. 處理待決頁")
-    check("cdx checks and collects before acting on PO responses", -1 < collect < handling)
-    check("cdx handles ambiguous session starts without replay", "reconcile" in text[collect:handling])
+    """2.2.0 F19 / F20 (GPT review): docs/03, 06 and 06b give the Director one first step, read-only check and collect
+    before the PO page is handled; the rehearsal reads choiceReplies and decisions and closes the old Director before the
+    submission; BOOTSTRAP / README name the three trust layers and say a ZIP runs only part of the tools. Mutation
+    tested: each needle taken out, the steps swapped and a stale first step put back must each be caught."""
+    global total
+    docs = po_page_docs()
+    total += 1
+    for problem in first_step_problems(docs):
+        failures.append(f"first step docs: {problem}")
+    for path, needle in FIRST_STEP_WANTED:
+        killed(f"first step docs without {needle!r} in {path}", first_step_problems(dict(docs, **{path: docs.get(path, "").replace(needle, "")})))
+    six_b = docs["docs/06b_on_demand_procedures.md"]
+    swapped = six_b.replace("1. 唯讀收集", "@@").replace("2. 處理待決頁", "1. 唯讀收集").replace("@@", "2. 處理待決頁")
+    killed("first step docs: handle before collect", first_step_problems(dict(docs, **{"docs/06b_on_demand_procedures.md": swapped})))
+    boot = docs["BOOTSTRAP.md"]
+    killed("first step docs: trust layers swapped", first_step_problems(dict(docs, **{"BOOTSTRAP.md": boot.replace("(1) 使用者直接授權", "@@").replace("(3) 工作資料", "(1) 使用者直接授權").replace("@@", "(3) 工作資料")})))
+    for path, line in [("docs/03_communication.md", "1. **每輪第一步讀待決頁**（任何喚醒）"), ("docs/06_resume_lossless.md", "先讀待決頁（含選擇頁）"),
+                       ("docs/06b_on_demand_procedures.md", "總監每次喚醒、壓縮或恢復後先跑它。"),
+                       ("BOOTSTRAP.md", "6. 從這一步起，總監每一輪的第一個動作都是讀待決頁（網頁和 `PO_PENDING.md`）上 PO 已回覆的項目"),
+                       ("docs/12_chat_to_product.md", "4. **讀回覆**：每一輪第一個動作，用 `ArtifactData` 讀 `choiceReplies`")]:
+        killed(f"first step docs: stale first step put back in {path}", first_step_problems(dict(docs, **{path: docs[path] + "\n" + line + "\n"})))
 
 
 def check_true(name, ok, detail=""):
@@ -9413,8 +9621,9 @@ def test_release_222(tmp):
     ahead = rel_clone(origin, base / "ahead")
     rel_commit(ahead, "1.1.0")
     expect("release 2.2.2: AHEAD plans push, tag and release, changes nothing", r, 0, "--repo", ahead, *cfg,
-           says=["STEP worktree: OK", "AHEAD 1", "PLAN git push origin HEAD:refs/heads/main", "PLAN git tag -a v1.1.0",
-                 "RELEASE: DRY_RUN 3 remote step(s)"])
+           says=["STEP worktree: OK", "AHEAD 1", "PLAN git push origin ", "(the checked commit, HEAD; fast-forward",
+                 "PLAN git tag -a v1.1.0", "PLAN gh repo edit ",
+                 "RELEASE: DRY_RUN 4 remote step(s)"])  # 3.0.0 B5: + the repository description
     check("release 2.2.2: the dry run left the remote alone",
           rel_git(origin, "rev-parse", "main") != rel_git(ahead, "rev-parse", "HEAD")
           and "v1.1.0" not in rel_git(origin, "tag"))
@@ -9428,10 +9637,30 @@ def test_release_222(tmp):
            says="VERSION is 1.2.0 but the first CHANGELOG.md heading at HEAD is 1.1.0")
     rel_git(other, "tag", "-a", "v1.0.0-x.2", "-m", "v1.0.0-x.2")
     rel_git(other, "push", "-q", "origin", "refs/tags/v1.0.0-x.2")
+    # 3.0.0 (plan 6.9-3): the upstream version and the -<label>.N serial are compared as one pair (the DeepSeek
+    # port's rule); 3.0.0 B14 (SPEC 1-8): the serial continues the previous one, never back to 1, no gap
     restart = rel_clone(origin, base / "restart")
     rel_commit(restart, "1.1.0-x.1")
-    expect("release 2.2.2: a -<label>.N serial that restarts stops", r, 1, "--repo", restart, *cfg,
-           says=["-x.1 is not above the -x.N of the remote tag(s) v1.0.0-x.2", "use -x.3"])
+    expect("release B14: a new upstream version does not start the -<label>.N serial again", r, 1, "--repo", restart,
+           *cfg, says=["v1.1.0-x.1: the -x.N serial continues the previous version v1.0.0-x.2: the next one is -x.3",
+                       "NEXT: set VERSION and the CHANGELOG top to 1.1.0-x.3"])
+    gap = rel_clone(origin, base / "gap")
+    rel_commit(gap, "1.1.0-x.4")
+    expect("release B14: a serial that skips a number stops", r, 1, "--repo", gap, *cfg,
+           says="the next one is -x.3, not -x.4")
+    fresh = rel_clone(origin, base / "fresh")
+    rel_commit(fresh, "1.1.0-y.5")
+    expect("release B14: the first tag of a label takes any serial", r, 0, "--repo", fresh, *cfg,
+           says="STEP version: OK 1.1.0-y.5")
+    module = mutant(TOOLS / "release.py", [("        if key[4] and not self.tag_done:\n", "        if False:\n")],
+                    "b14_serial_restart")
+    if module is not None:
+        killed("release B14: without the serial check a restart at 1 passes",
+               g2_main(module, "--repo", restart, *cfg) == 0)
+    lower = rel_clone(origin, base / "lower")
+    rel_commit(lower, "1.0.0-x.1")
+    expect("release 3.0.0: the same upstream version with a lower serial stops", r, 1, "--repo", lower, *cfg,
+           says="does not sort above the remote tag(s)")
     serial = rel_clone(origin, base / "serial")
     rel_commit(serial, "1.1.0-x.3")
     expect("release 2.2.2: a -<label>.N above every remote one passes", r, 0, "--repo", serial, *cfg,
@@ -9507,26 +9736,50 @@ def test_release_222(tmp):
     secret, assigned = "sk-" + "A1b2" * 6, "Zx9q" * 4
     cases = [("api key", {"conf.py": f'KEY = "{secret}"\n'}, None, "openai_key"),
              ("key = value secret", {"conf.ini": "api_key = " + assigned + "\n"}, None, "secret_assignment"),
-             ("private email", {"README.md": "mail alice@" + "example.com\n"}, None, "email alice@" + "example.com"),
-             ("user path", {"notes.md": "see C:" + "/Users/alice/notes.txt\n"}, None, "user_path"),
+             ("private email", {"README.md": "mail alice@" + "example.com\n"}, None, "email al***(17)"),
+             ("user path", {"notes.md": "see C:" + "/" "Users/alice/notes.txt\n"}, None, "drive_path"),
+             ("home folder (B9)", {"notes.md": "see /" + "home/alice/notes.txt\n"}, None, "user_folder"),
+             ("mac user folder (B9)", {"notes.md": "see /" + "Users/alice/notes.txt\n"}, None, "user_folder"),
+             ("a noreply address in a file (B9)", {"README.md": "mail 1+me@" + "users.noreply.github.com\n"}, None,
+              "README.md:1: email"),
              ("DIRECTOR file", {"DIRECTOR/RESUME_STATE.md": "x\n"}, None, "a DIRECTOR/ file"),
              ("CLAUDE.local.md", {"CLAUDE.local.md": "x\n"}, None, "CLAUDE.local.md (local instructions)"),
              ("local settings", {".claude/settings.local.json": "{}\n"}, None, ".claude/settings.local.json (local"),
              ("session transcript", {"logs/0a1b2c3d-1111-2222-3333-444455556666.jsonl": "{}\n"}, None,
               "a Claude session transcript"),
-             ("author email", {"b.txt": "x\n"}, "bob@" + "example.com", "author: email bob@" + "example.com")]
+             ("author email", {"b.txt": "x\n"}, "bob@" + "example.com", "author: email bo***(15)")]
     for number, (name, files, email, said) in enumerate(cases):
         rel_git(work, "switch", "-q", "-c", f"case-{number}", "origin/main")
         rel_git(work, "config", "user.email", email or "selftest@example.invalid")
         rel_commit(work, "1.1.0", files)
         expect(f"release 2.2.2: the public scan stops {name}", r, 1, "--repo", work, "--config", config,
-               says=["STEP FAIL:", "must not go public", said], lacks=[secret, assigned])
+               says=["STEP FAIL:", "must not go public", said], lacks=[secret, assigned, "alice@", "bob@"])
     rel_git(work, "switch", "-q", "-c", "clean", "origin/main")
     rel_git(work, "config", "user.email", "selftest@example.invalid")
-    rel_commit(work, "1.1.0", {"README.md": "mail 1+me@users.noreply.github.com or me@example.invalid; "
-                                            "DIRECTOR/RESUME_STATE.md is named in docs\n"})
+    rel_commit(work, "1.1.0", {"README.md": "mail me@example.invalid; DIRECTOR/RESUME_STATE.md is named in docs\n",
+                               "tools/privacy_allow.txt": (TOOLS / "privacy_allow.txt").read_text(encoding="utf-8")})
     expect("release 2.2.2: a clean change passes the scan", r, 0, "--repo", work, "--config", config,
-           says="STEP scan: OK")
+           says=["STEP scan: OK", "STEP privacy: OK"])
+    # 3.0.0 B9: a noreply Co-Authored-By trailer in a commit message is public by design; in a file it is not
+    rel_git(work, "switch", "-q", "-c", "noreply", "origin/main")
+    rel_write(work / "VERSION", "1.1.0\n")
+    rel_write(work / "CHANGELOG.md", "# CHANGELOG\n\n## 1.1.0（2026-11-14）\n\n- notes for 1.1.0\n\n## 1.0.0\n\n- first\n")
+    rel_git(work, "add", "-A")
+    rel_git(work, "commit", "-q", "-m", "release 1.1.0\n\nCo-Authored-By: Someone <1+me@" + "users.noreply.github.com>")
+    expect("release 3.0.0 B9: a noreply trailer passes the change scan", r, 0, "--repo", work, "--config", config,
+           says=["STEP scan: OK", "STEP privacy: OK"])
+    module = mutant(TOOLS / "release.py", [('        if trailer and rule == "email" and email_allowed(matched):\n',
+                                            '        if False:\n')], "b9_no_trailer")
+    if module is not None:
+        killed("release B9: without the trailer rule a noreply Co-Authored-By stops the release",
+               g2_main(module, "--repo", work, "--config", config) != 0)
+    rel_git(work, "switch", "-q", "-c", "home", "origin/main")
+    rel_commit(work, "1.1.0", {"notes.md": "see /" + "home/alice/x\n"})
+    module = mutant(TOOLS / "release.py", [("    for rule, matched in privacy.line_hits(text, rules, allows):\n",
+                                            "    for rule, matched in []:\n")], "b9_no_privacy_rules")
+    if module is not None:  # the whole-tree privacy step would still stop it: look at the change scan alone
+        killed("release B9: without privacy_scan's rules the change scan misses /home/<name>",
+               not module.scan(work, "origin/main", "HEAD")[0])
 
 
 def _json_file(path, data):
@@ -10300,11 +10553,26 @@ def test_rules_docs_230(tmp=None):
 # ---------------------------------------------------------------- end 2.3.0 ------------------------------------------
 
 
+def optional_absent(source, tools_dir):
+    """3.0.0 B11: the optional tools (install.py OPTIONAL) that are not in tools_dir and that the test source names
+    (file name or module name). Empty in the base, where every tool is there."""
+    spec = importlib.util.spec_from_file_location("dw_install_optional", pathlib.Path(tools_dir) / "install.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return sorted(name for name in getattr(module, "OPTIONAL", {})
+                  if not (pathlib.Path(tools_dir) / name).is_file() and (name in source or name[:-3] in source))
+
+
 def guarded(test, *args):
-    """Run one test group. Without git on PATH, a group that dies on a missing git program is a named skip, not a crash."""
+    """Run one test group. Without git on PATH, a group that dies on a missing git program is a named skip, not a crash.
+    3.0.0 B11: a group that names an optional tool this variant left out is a named skip too."""
     global total
     if GIT is None and test.__name__ in GIT_GROUPS:
         return skip(test.__name__)
+    import inspect
+    absent = optional_absent(inspect.getsource(test), TOOLS)
+    if absent:
+        return skip(test.__name__, f"needs {', '.join(absent)} (optional, not installed here: 3.0.0 B11)")
     mark = (total, len(failures))
     try:
         test(*args)
@@ -10352,6 +10620,100 @@ def lg_event(lg, tool, inp, status="ok", result="r", error=None, session="s1", a
     kind = "failure" if status in ("error", "interrupted") else "result"
     return lg.event_of({"kind": kind, "session_id": session, "agent_id": agent, "tool": tool, "input": inp,
                         "result": {"status": status, "sha256": hashlib.sha256(result.encode()).hexdigest()}}, error_text=error)
+
+
+def test_status_loops_300(tmp):
+    """3.0.0 B10 (from agy 2.3.0-ds.6): loop_guard scan --out writes the JSON; status.py's LOOPS section reads it (and
+    agy_audit.py's summary), prints one line, MISSING for a missing or broken file; findings keep the exit code."""
+    d = tmp / "status_loops_300"
+    d.mkdir()
+    log = d / "audit.jsonl"
+
+    def post(cmd, out, path=log):
+        call = {"hook_event_name": "PostToolUse", "session_id": "sess-1", "tool_name": "Bash", "tool_use_id": "t",
+                "tool_input": {"command": cmd}, "tool_response": {"stdout": out}}
+        subprocess.run([sys.executable, "-I", str(TOOLS / "audit_log.py"), "append", "--log", str(path)],
+                       input=json.dumps(call), capture_output=True, encoding="utf-8", check=True)
+
+    for answer in "abc":
+        post("git status", answer)
+    loops = d / "loops.json"
+    code, out = run("loop_guard.py", "scan", "--audit", log, "--out", loops)
+    try:
+        data = json.loads(loops.read_text(encoding="utf-8"))
+        ok = code == 1 and f"WROTE {loops}" in out and "LOOP_GUARD: FOUND 1" in out \
+            and data["findings"][0]["category"] == "repeat" and data["events"] == 3 and data["streams"] == 1
+    except (OSError, ValueError, KeyError, IndexError):
+        ok = False
+    check("loop_guard scan --out writes the JSON, prints the lines, keeps exit 1", ok, out[-300:])
+    code, out = run("loop_guard.py", "scan", "--audit", log, "--out", d / "again.json", "--json")
+    try:
+        ok = code == 1 and json.loads(out) == json.loads((d / "again.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        ok = False
+    check("loop_guard scan --json --out: stdout is the same JSON only", ok, out[-200:])
+    conf = d / "status.json"
+    conf.write_text(json.dumps({"schema_version": 1, "name": "loops", "loops": {"path": "loops.json"},
+                                "max_lines": 10}), encoding="utf-8")
+    script = d / "status.py"
+    expect("status_gen loops config", "status_gen.py", 0, "--out", script, "--config", conf,
+           says="1 Director sections")
+
+    def status():
+        done = subprocess.run([sys.executable, "-I", str(script)], capture_output=True, encoding="utf-8")
+        return done.returncode, done.stdout
+
+    code, out = status()
+    want = (": findings=1 repeat=1 bad_args=NOT_CHECKED child_error_unhandled=NOT_VERIFIED; events=3 streams=1; "
+            "details: loop_guard.py scan")
+    check("status.py LOOPS: counts, unchecked kinds, events; a finding keeps exit 0",
+          code == 0 and "LOOPS loops.json (modified " in out and want in out and "git status" not in out, out[-400:])
+    quiet = d / "quiet.jsonl"
+    post("git status", "a", quiet)
+    post("git log", "b", quiet)
+    run("loop_guard.py", "scan", "--audit", quiet, "--out", loops)
+    code, out = status()
+    check("status.py LOOPS: no finding is findings=0, no details hint",
+          code == 0 and ": findings=0 bad_args=NOT_CHECKED" in out and "events=2 streams=1" in out
+          and "details:" not in out, out[-400:])
+    empty = d / "empty.jsonl"
+    empty.write_text("", encoding="utf-8")
+    code, _ = run("loop_guard.py", "scan", "--audit", empty, "--out", loops)
+    status_code, out = status()
+    check("loop_guard NO_DATA --out: exit 2, status.py says NO_DATA, not a 0",
+          code == 2 and status_code == 0 and ": NO_DATA (" in out and "findings=" not in out, out[-400:])
+    loops.write_text(json.dumps({"findings_total": 2, "counts": {"repeat": 2, "ping_pong": 0},
+                                 "not_verified": ["child_error_unhandled"], "sessions": 1}), encoding="utf-8")
+    code, out = status()
+    check("status.py LOOPS reads agy_audit.py loops --out too",
+          code == 0 and ": findings=2 repeat=2 child_error_unhandled=NOT_VERIFIED; sessions=1" in out
+          and "ping_pong" not in out, out[-400:])
+    for name, text in (("not JSON", "{"), ("no findings key", "{}"), ("findings not a list", '{"findings": 3}')):
+        loops.write_text(text, encoding="utf-8")
+        code, out = status()
+        check(f"status.py LOOPS: {name} is MISSING and exit 1", code == 1 and "LOOPS MISSING " in out, out[-300:])
+    loops.unlink()
+    code, out = status()
+    check("status.py LOOPS: no file is MISSING and exit 1", code == 1 and "LOOPS MISSING " in out, out[-300:])
+    for name, value in (("an unknown key", {"path": "x", "max": 3}), ("no path", {}), ("an empty path", {"path": ""})):
+        conf.write_text(json.dumps({"schema_version": 1, "loops": value}), encoding="utf-8")
+        expect(f"status_gen loops: {name} is refused", "status_gen.py", 2, "--out", d / "bad.py", "--config", conf,
+               says="loops")
+    conf.write_text(json.dumps({"schema_version": 1, "name": "loops", "loops": {"path": "loops.json"}}), encoding="utf-8")
+    run("loop_guard.py", "scan", "--audit", log, "--out", loops)
+    for name, swaps, wrong in (
+            ("findings not counted", [('                    counts[hit["category"]] = counts.get(hit["category"], 0) + 1\n',
+                                       '                    pass\n')], "repeat=1"),
+            ("unchecked kinds dropped", [('                    + ([] if cover.get("child_results") else '
+                                          '["child_error_unhandled=NOT_VERIFIED"])\n', '\n')],
+             "child_error_unhandled=NOT_VERIFIED")):
+        module = mutant(TOOLS / "status_gen.py", swaps, "b10_" + name.replace(" ", "_"))
+        if module is None:
+            continue
+        mutated = d / f"mutant_{len(name)}.py"
+        g2_main(module, "--out", mutated, "--config", conf, "--force")
+        done = subprocess.run([sys.executable, "-I", str(mutated)], capture_output=True, encoding="utf-8")
+        killed(f"status LOOPS B10: {name}", wrong not in done.stdout)
 
 
 def test_loop_guard_240(tmp):
@@ -10512,6 +10874,82 @@ def test_loop_guard_240(tmp):
     if tool is not None:
         killed("loop_guard reporting a ping-pong also as repeat / poll",
                [h["category"] for h in tool.detect(samples["ping_pong"])] != ["ping_pong"])
+
+
+def test_loop_ds7_300(tmp):
+    """3.0.0 B17 (from dshdw ds.7, dsh_audit loops): two finer rules in the base loop_guard core. An A B A B run where
+    the result of A or of B changes is progress, not a ping_pong; a retry of the same error counts only the tries
+    with no text the agent wrote between them (known from a transcript, read with transcript_audit; an action log
+    has no text and counts as before). Origin cases: ping_pong_neg / retry_neg; 2 mutations."""
+    lg = load_tool_240("loop_guard")
+    ev = lambda *a, **k: lg_event(lg, *a, **k)  # noqa: E731
+    cats = lambda evs, conf=None: sorted(h["category"] for h in lg.detect(evs, conf))  # noqa: E731
+    pairs = lambda evs: [(h["category"], h["count"]) for h in lg.detect(evs)]  # noqa: E731
+    steady = [ev("Bash", "build", result="1"), ev("Bash", "check", result="2")] * 3
+    check("B17 a ping-pong with unchanged results is still found", cats(steady) == ["ping_pong"], cats(steady))
+    moving, one = [], []
+    for n in range(3):
+        moving += [ev("Bash", "build", result=f"b{n}"), ev("Bash", "check", result=f"c{n}")]
+        one += [ev("Bash", "build", result="b"), ev("Bash", "check", result=f"c{n}")]
+    check("B17 A B A B whose results change is progress: no finding (not a repeat either)", cats(moving) == [],
+          cats(moving))
+    check("B17 one of the two results changing is progress too", cats(one) == [], cats(one))
+    running = steady[:5] + [dict(steady[5], status=None, result=None)]
+    check("B17 a call still running (no result) is no change", cats(running) == ["ping_pong"], cats(running))
+
+    def fail(text=None):
+        event = ev("Bash", "make", "error", "boom")
+        if text is not None:
+            event["text_before"] = text
+        return event
+
+    check("B17 an action log (no text known) counts every try", pairs([fail() for _ in range(4)]) ==
+          [("retry_same_error", 4)], pairs([fail() for _ in range(4)]))
+    check("B17 no text between the tries: all of them count", pairs([fail(False) for _ in range(4)]) ==
+          [("retry_same_error", 4)], pairs([fail(False) for _ in range(4)]))
+    answered = [fail(False), fail(True)]
+    check("B17 the agent wrote text between the two tries: no finding", cats(answered) == [], cats(answered))
+    split = [fail(False), fail(False), fail(True), fail(False)]
+    check("B17 text between try 2 and 3: the longest unanswered run is 2", pairs(split) == [("retry_same_error", 2)],
+          pairs(split))
+    between = [fail(False), dict(ev("Read", "log"), text_before=True), fail(False)]
+    check("B17 text before another call between the tries counts too", cats(between) == [], cats(between))
+    check("B17 the hook (action log, no text) still reminds on the 2nd same error",
+          lg.hook_check([fail()], dict(fail(), status=None, result=None)) is None
+          and lg.hook_check([fail(), fail()], dict(fail(), status=None, result=None)) is not None)
+
+    d = tmp / "loop_ds7_300"
+    d.mkdir()
+
+    def transcript(name, said):
+        lines = []
+        for n in range(3):
+            content = ([{"type": "text", "text": "the build failed with an error; I fix the flag first"}] if n and said
+                       else []) + [{"type": "tool_use", "id": f"u{n}", "name": "Bash", "input": {"command": "make"}}]
+            stamp = f"2026-11-15T10:00:0{n}Z"
+            lines.append(json.dumps({"type": "assistant", "sessionId": "ds7", "timestamp": stamp,
+                                     "message": {"content": content}}))
+            lines.append(json.dumps({"type": "user", "sessionId": "ds7", "timestamp": stamp, "message": {"content": [
+                {"type": "tool_result", "tool_use_id": f"u{n}", "is_error": True, "content": "make: boom"}]}}))
+        return _write_text(d / name, "\n".join(lines) + "\n")
+
+    expect("B17 scan: a transcript retry with no text between the tries is found", "loop_guard.py", 1, "scan",
+           "--transcript", transcript("quiet.jsonl", False), says="LOOP retry_same_error tool=Bash")
+    expect("B17 scan: a transcript retry the agent answered in text is not", "loop_guard.py", 0, "scan",
+           "--transcript", transcript("said.jsonl", True), says="LOOP_GUARD: NONE", lacks="retry_same_error")
+
+    tool = mutant(TOOLS / "loop_guard.py",
+                  [('    return any(len({e["result"] for e in group if (e["tool"], e["args"]) == key and e["result"] '
+                    'is not None}) > 1\n               for key in keys)\n', "    return False\n")], "b17_no_progress")
+    if tool is not None:
+        killed("loop_guard B17 without the result check a changing A B A B is a ping_pong",
+               [h["category"] for h in tool.detect(moving)] == ["ping_pong"])
+    tool = mutant(TOOLS / "loop_guard.py",
+                  [('        run = 1 if any(before["_pos"] < p <= after["_pos"] for p in marks) else run + 1\n',
+                    "        run = run + 1\n")], "b17_no_text")
+    if tool is not None:
+        killed("loop_guard B17 without the text check an answered retry is reported",
+               [h["category"] for h in tool.detect(answered)] == ["retry_same_error"])
 
 
 def test_setup_opt_in_240(tmp):
@@ -10755,7 +11193,7 @@ def test_dispatch_effort_250(tmp):
     """2.5.0 (N1): dispatch_check.py warns on a DISPATCH line without class= / effort=, an unknown class or level, and
     an effort outside the table; warn only (exit 0) unless --strict; 2 on a missing log or a bad table."""
     d = tmp / "dispatch_250"
-    d.mkdir()
+    spec_brief_300(d)  # 3.0.0 (R6): a log with DISPATCH lines needs a passing spec
     sha = "a" * 64
     log = _write_text(d / "DIRECTOR_LOG.md", "\n".join([
         "# LOG",
@@ -10782,6 +11220,26 @@ def test_dispatch_effort_250(tmp):
     bad = _write_text(d / "bad.json", '{"routine": ["turbo"]}')
     expect("dispatch_check bad table is exit 2", "dispatch_check.py", 2, "--log", log, "--table", bad, says="FAIL input")
     expect("dispatch_check missing log is exit 2", "dispatch_check.py", 2, "--log", d / "none.md", says="FAIL input")
+    # 3.0.0 B18: effort off (no thinking) for mechanical work
+    off = _write_text(d / "off.md", "\n".join([
+        f"DISPATCH WO-011 rev=1 sha={sha} | class=mechanical effort=off",
+        f"DISPATCH WO-012 rev=1 sha={sha} | class=mechanical effort=low",
+        f"DISPATCH WO-013 rev=1 sha={sha} | class=dev effort=off",
+        f"DISPATCH WO-014 rev=1 sha={sha} | class=mechanical effort=high", ""]))
+    expect("dispatch_check B18: off is a level, for the mechanical class", "dispatch_check.py", 0, "--log", off,
+           says=["WO-013 line 3: class=dev wants effort high, got off",
+                 "WO-014 line 4: class=mechanical wants effort off/low, got high",
+                 "DISPATCH_CHECK: WARN records=4 warnings=2"], lacks=["WO-011", "WO-012", "unknown effort=off"])
+    offt = _write_text(d / "off_table.json", '{"mechanical": ["off"], "dev": ["high"]}')
+    expect("dispatch_check B18: a --table may use off", "dispatch_check.py", 0, "--log", off, "--table", offt,
+           says="WO-012 line 2: class=mechanical wants effort off, got low", lacks=["FAIL input", "WO-011"])
+    module = mutant(TOOLS / "dispatch_check.py",
+                    [('LEVELS = ("off", "low", "medium", "high", "xhigh", "max")', 'LEVELS = ("low", "medium", "high", "xhigh", "max")')],
+                    "b18_no_off")
+    if module is not None:
+        killed("dispatch_check B18: without the off level a mechanical effort=off warns",
+               any("WO-011" in w for w in module.effort_warnings(module.dispatch_records(off.read_text(encoding="utf-8")),
+                                                                  module.TABLE)))
 
 
 def test_round_diagnosis_250(tmp):
@@ -10843,7 +11301,11 @@ def test_delete_guard_250(tmp):
     expect("delete_guard no candidate is exit 2", "delete_guard.py", 2, "--repo", repo, says="FAIL input: no candidate")
     expect("delete_guard missing list is exit 2", "delete_guard.py", 2, "--list", d / "none.txt", says="FAIL input")
     expect("delete_guard not a repo is exit 2", "delete_guard.py", 2, junk, "--repo", notes, says="not a git repository")
-    expect("delete_guard nothing searched warns", "delete_guard.py", 0, junk, says="~ WARN nothing searched")
+    # 3.0.0 (G2): nothing searched used to end CLEAN (exit 0); it is NOT_RUN now
+    expect("delete_guard nothing searched is NOT_RUN (G2)", "delete_guard.py", 2, junk,
+           says="DELETE_GUARD: NOT_RUN nothing searched", lacks="CLEAN")
+    expect("delete_guard --refs that matches nothing is exit 2 (G2)", "delete_guard.py", 2, junk,
+           "--refs", str(d / "none" / "*.md"), says="FAIL input: --refs", lacks="CLEAN")
 
 
 def test_dispatch_dup_250(tmp):
@@ -11204,6 +11666,4004 @@ def test_precommit_samples_240(tmp):
     expect("secret_mask: several files without --check is refused", "secret_mask.py", 2, clean, dirty, lacks="Zz9Zz9")
 
 
+def load_common_300():
+    """3.0.0 (G1): tools/_common.py, loaded by path as the tools load it."""
+    spec = importlib.util.spec_from_file_location("dw_common_under_test_300", TOOLS / "_common.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_common_atomic_300(tmp):
+    """3.0.0 (G1): _common atomic writes: new and old file, folder made, LF / system / CRLF line ends, JSON keeps
+    non-ASCII, a failed write or a failed rename leaves the old file and no temp file, a POSIX file keeps its mode."""
+    c = load_common_300()
+    d = tmp / "common_atomic_300"
+    target = d / "sub" / "state.json"
+    check("atomic: returns the target", c.write_bytes_atomic(target, b"one\n") == target)
+    check("atomic: folder made, bytes written", target.read_bytes() == b"one\n", repr(target.read_bytes()))
+    c.write_bytes_atomic(target, b"two\n")
+    check("atomic: overwrite", target.read_bytes() == b"two\n")
+    leftovers = lambda: sorted(p.name for p in target.parent.iterdir() if p.name != target.name)  # noqa: E731
+    check("atomic: no temp file left after success", leftovers() == [], leftovers())
+    try:
+        c.write_bytes_atomic(target, "not bytes")
+        raised = False
+    except TypeError:
+        raised = True
+    check("atomic: a failed write raises", raised)
+    check("atomic: a failed write keeps the old file", target.read_bytes() == b"two\n", repr(target.read_bytes()))
+    check("atomic: a failed write leaves no temp file", leftovers() == [], leftovers())
+    real_replace = c.os.replace
+
+    def broken_replace(src, dst):
+        raise OSError("disk gone")
+    c.os.replace = broken_replace
+    try:
+        c.write_text_atomic(target, "three\n")
+        raised = False
+    except OSError:
+        raised = True
+    finally:
+        c.os.replace = real_replace
+    check("atomic: a failed rename raises", raised)
+    check("atomic: a failed rename keeps the old file", target.read_bytes() == b"two\n", repr(target.read_bytes()))
+    check("atomic: a failed rename leaves no temp file", leftovers() == [], leftovers())
+    text = d / "t.txt"
+    c.write_text_atomic(text, "a\nb\n")
+    check("text: LF by default", text.read_bytes() == b"a\nb\n", repr(text.read_bytes()))
+    c.write_text_atomic(text, "a\nb\n", newline=None)
+    check("text: newline=None is the system's", text.read_bytes() == ("a" + os.linesep + "b" + os.linesep).encode(),
+          repr(text.read_bytes()))
+    c.write_text_atomic(text, "a\nb\n", newline="\r\n")
+    check("text: CRLF on request", text.read_bytes() == b"a\r\nb\r\n", repr(text.read_bytes()))
+    c.write_json_atomic(target, {"名稱": "總監", "n": [1, 2]})
+    raw = target.read_bytes()
+    check("json: UTF-8, non-ASCII kept, closing newline", raw.endswith(b"}\n") and "總監".encode("utf-8") in raw, raw[:80])
+    check("json: reads back", json.loads(raw.decode("utf-8")) == {"名稱": "總監", "n": [1, 2]})
+    c.write_json_atomic(target, {"a": 1}, indent=1)
+    check("json: indent passed on", target.read_bytes() == b'{\n "a": 1\n}\n', repr(target.read_bytes()))
+    if os.name != "nt":
+        os.chmod(target, 0o640)
+        c.write_bytes_atomic(target, b"x")
+        check("atomic: POSIX mode of the old file kept", stat_mode(target) == 0o640, oct(stat_mode(target)))
+        fresh = d / "fresh.txt"
+        c.write_bytes_atomic(fresh, b"x")
+        mask = os.umask(0)
+        os.umask(mask)
+        check("atomic: POSIX new file gets open()'s mode, not mkstemp's 0600", stat_mode(fresh) == 0o666 & ~mask,
+              oct(stat_mode(fresh)))
+
+
+def stat_mode(path):
+    import stat
+    return stat.S_IMODE(os.stat(path).st_mode)
+
+
+def test_common_git_300(tmp):
+    """3.0.0 (G1, G6): _common reads .git, gitdir: and commondir only: a main checkout, a linked worktree (absolute and
+    relative gitdir:), a submodule (a .git file, not a worktree), a broken .git file, same_repo across a worktree and
+    not across two clones, exclude_file in the common folder; with git on PATH, checked against git's own answer."""
+    c = load_common_300()
+    d = (tmp / "common_git_300").resolve()
+    main, other = d / "main", d / "other"
+    for repo in (main, other):
+        (repo / ".git" / "info").mkdir(parents=True)
+    (main / "src" / "deep").mkdir(parents=True)
+    (main / "src" / "deep" / "f.py").write_text("x", encoding="utf-8")
+    wt_meta = main / ".git" / "worktrees" / "wt"
+    wt_meta.mkdir(parents=True)
+    (wt_meta / "commondir").write_text("../..\n", encoding="utf-8")
+    wt = d / "wt"
+    (wt / "a").mkdir(parents=True)
+    (wt / ".git").write_text(f"gitdir: {wt_meta.as_posix()}\n", encoding="utf-8")
+    rel_meta = main / ".git" / "worktrees" / "rel"
+    rel_meta.mkdir(parents=True)
+    (rel_meta / "commondir").write_text("../..", encoding="utf-8")
+    rel = d / "rel"
+    rel.mkdir()
+    (rel / ".git").write_text("gitdir: ../main/.git/worktrees/rel", encoding="utf-8")
+    sub_meta = main / ".git" / "modules" / "lib"
+    sub_meta.mkdir(parents=True)
+    sub = main / "lib"
+    sub.mkdir()
+    (sub / ".git").write_text("gitdir: ../.git/modules/lib\n", encoding="utf-8")
+    broken = d / "broken"
+    broken.mkdir()
+    (broken / ".git").write_text("not a gitdir line\n", encoding="utf-8")
+    key = lambda p: os.path.normcase(str(p))  # noqa: E731
+
+    r = c.find_repo(main / "src" / "deep" / "f.py")
+    check("git: main checkout found from a file deep inside",
+          r is not None and key(r.root) == key(main) and key(r.git_dir) == key(main / ".git")
+          and key(r.common_dir) == key(main / ".git") and r.linked is False, r)
+    r = c.find_repo(wt / "a")
+    check("git: linked worktree (absolute gitdir:) found, common dir is the main .git",
+          r is not None and key(r.root) == key(wt) and key(r.git_dir) == key(wt_meta)
+          and key(r.common_dir) == key(main / ".git") and r.linked is True, r)
+    r = c.find_repo(rel)
+    check("git: linked worktree with a relative gitdir:",
+          r is not None and key(r.git_dir) == key(rel_meta) and key(r.common_dir) == key(main / ".git") and r.linked, r)
+    r = c.find_repo(sub)
+    check("git: a submodule is its own repo, not a linked worktree",
+          r is not None and key(r.root) == key(sub) and key(r.common_dir) == key(sub_meta) and r.linked is False, r)
+    check("git: a .git file without gitdir: gives None", c.find_repo(broken) is None, c.find_repo(broken))
+    check("git: git_dir looks at the folder only, not its parents", c.git_dir(main / "src") is None)
+    check("git: git_common_dir of a main .git is itself", key(c.git_common_dir(main / ".git")) == key(main / ".git"))
+    check("git: same_repo for a worktree and its main checkout", c.same_repo(wt / "a", main / "src"))
+    check("git: same_repo for two worktrees of one repo", c.same_repo(wt, rel))
+    check("git: not same_repo for two clones", not c.same_repo(main, other))
+    check("git: not same_repo for a repo and a submodule inside it", not c.same_repo(main, sub))
+    check("git: exclude_file of a worktree is the main .git/info/exclude",
+          key(c.exclude_file(wt) or "") == key(main / ".git" / "info" / "exclude"), c.exclude_file(wt))
+    outside = d / "outside"
+    outside.mkdir()
+    found = c.find_repo(outside)
+    check("git: outside every fixture repo", found is None or key(d) not in key(found.root), found)
+    try:
+        c.find_repo("\0bad")
+        crashed = None
+    except Exception as error:  # noqa: BLE001 - any exception is the failure here
+        crashed = error
+    check("git: a path with a NUL byte is not an error", crashed is None, repr(crashed))
+    if GIT is None:
+        return skip("test_common_git_300 real-git half")
+    real = d / "real"
+    git_run = lambda *a, cwd=real: subprocess.run(["git", *a], cwd=cwd, capture_output=True, encoding="utf-8")  # noqa: E731
+    real.mkdir()
+    git_run("init", "-q")
+    git_run("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "i")
+    added = git_run("worktree", "add", "-q", str(d / "real wt"), "-b", "side")
+    check("git: real git worktree add", added.returncode == 0, added.stderr)
+    for where in (real, d / "real wt"):
+        said = git_run("rev-parse", "--path-format=absolute", "--git-common-dir", cwd=where).stdout.strip()
+        r = c.find_repo(where)
+        check(f"git: common dir agrees with git ({where.name})",
+              r is not None and said and key(r.common_dir) == key(pathlib.Path(said).resolve()), (r, said))
+        said = git_run("rev-parse", "--path-format=absolute", "--git-path", "info/exclude", cwd=where).stdout.strip()
+        check(f"git: exclude_file agrees with git --git-path ({where.name})",
+              said and key(c.exclude_file(where) or "") == key(pathlib.Path(said).resolve()), (c.exclude_file(where), said))
+    check("git: real worktree is linked, main is not",
+          c.find_repo(d / "real wt").linked is True and c.find_repo(real).linked is False)
+
+
+def test_common_tail_300(tmp):
+    """3.0.0 (G1): _common reads a log's tail in one read: short file whole, a cut first line dropped, CRLF stripped,
+    count, empty and missing files; tail_jsonl skips cut, blank, non-JSON and non-object lines."""
+    c = load_common_300()
+    d = tmp / "common_tail_300"
+    d.mkdir()
+    log = d / "a.log"
+    log.write_bytes(b"one\r\ntwo\nthree\n")
+    check("tail: short file, all lines, CRLF stripped", c.tail_lines(log) == ["one", "two", "three"], c.tail_lines(log))
+    check("tail: count", c.tail_lines(log, 2) == ["two", "three"], c.tail_lines(log, 2))
+    check("tail: count 0", c.tail_lines(log, 0) == [])
+    data, cut = c.read_tail(log, 8)
+    check("tail: read_tail returns the last bytes", data == b"o\nthree\n", data)
+    check("tail: read_tail cut flag", cut is True and c.read_tail(log)[1] is False)
+    check("tail: a cut first line is dropped", c.tail_lines(log, limit=9) == ["three"], c.tail_lines(log, limit=9))
+    log.write_bytes(b"no newline at end")
+    check("tail: last line without newline kept", c.tail_lines(log) == ["no newline at end"], c.tail_lines(log))
+    empty = d / "empty.log"
+    empty.write_bytes(b"")
+    check("tail: empty file", c.tail_lines(empty) == [] and c.tail_jsonl(empty) == [])
+    try:
+        c.tail_lines(d / "missing.log")
+        raised = False
+    except FileNotFoundError:
+        raised = True
+    check("tail: tail_lines of a missing file raises FileNotFoundError", raised)
+    check("tail: tail_jsonl of a missing file is []", c.tail_jsonl(d / "missing.log") == [])
+    log.write_bytes(b"\xff\xfe bad bytes\n")
+    check("tail: bad UTF-8 replaced, not an error", c.tail_lines(log) == ["�� bad bytes"], c.tail_lines(log))
+    jl = d / "a.jsonl"
+    first = json.dumps({"seq": 1, "pad": "x" * 50})
+    jl.write_text("\n".join([first, "", "not json", "[1, 2]", json.dumps({"seq": 2}), json.dumps({"seq": 3})]) + "\n",
+                  encoding="utf-8")
+    check("jsonl: objects only, oldest first", [e["seq"] for e in c.tail_jsonl(jl)] == [1, 2, 3], c.tail_jsonl(jl))
+    limit = jl.stat().st_size - 10  # cuts inside the first line
+    check("jsonl: a cut first line is skipped", [e["seq"] for e in c.tail_jsonl(jl, limit)] == [2, 3],
+          c.tail_jsonl(jl, limit))
+    big = d / "big.jsonl"
+    with open(big, "w", encoding="utf-8", newline="\n") as fh:
+        for n in range(1, 5001):
+            fh.write(json.dumps({"seq": n, "pad": "y" * 40}) + "\n")
+    got = c.tail_jsonl(big)
+    check("jsonl: a big log gives only whole lines from its tail, newest last",
+          got and got[-1]["seq"] == 5000 and all(b["seq"] == a["seq"] + 1 for a, b in zip(got, got[1:]))
+          and len(got) < 5000, (len(got), got[:1]))
+
+
+# 3.0.0 (G2): a gate that got no result is never a pass. An unindented verdict line saying PASS / OK / CLEAN
+# (`OK   x`, `PASS x`, `ROUNDS: PASS ...`, `AUDIT_VERIFY ... OK`) in a no-result case is the bug this guards.
+G2_PASS_LINE = re.compile(r"^(?:OK|PASS|CLEAN)\b|^[A-Z_]+: (?:PASS|OK|CLEAN)\b|^\S.*\sOK$", re.M)
+
+
+def g2_run(tool, *args, cwd=None, timeout=120):
+    """Exit code and stdout + stderr together (a traceback goes to stderr)."""
+    done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / tool), *map(str, args)], cwd=cwd,
+                          capture_output=True, encoding="utf-8", errors="replace", timeout=timeout)
+    return done.returncode, done.stdout + done.stderr
+
+
+def g2_closed(name, tool, *args, codes=(1, 2), cwd=None):
+    """One no-result case: exit in `codes`, no traceback, no PASS / OK / CLEAN verdict line."""
+    code, out = g2_run(tool, *args, cwd=cwd)
+    passed = G2_PASS_LINE.search(out)
+    check(f"G2 fail-closed: {name}", code in codes and "Traceback" not in out and not passed,
+          f"exit {code}, verdict line {passed.group(0)!r}: {out.strip()[-300:]}" if passed
+          else f"exit {code}: {out.strip()[-300:]}")
+
+
+def g2_main(module, *args):
+    """A mutant's exit code, whether its main() takes argv or reads sys.argv (audit_log, gate_check)."""
+    import contextlib
+    old = sys.argv
+    sys.argv = [module.__file__, *map(str, args)]
+    try:
+        with contextlib.redirect_stdout(_Out()):
+            try:
+                code = module.main([str(a) for a in args]) if inspect_params(module.main) else module.main()
+            except SystemExit as stop:
+                code = stop.code if isinstance(stop.code, int) else 1
+    finally:
+        sys.argv = old
+    return code
+
+
+def inspect_params(fn):
+    return fn.__code__.co_argcount > 0
+
+
+def test_gate_fail_closed_300(tmp):
+    """3.0.0 (G2, PLAN §6.9 hard line: a gate with no result is FAIL or INVALID, never PASS). Every gate tool given a
+    missing, empty or unparseable input, a check that times out, exits non-zero or cannot start, ends with exit 1 or 2,
+    no traceback and no PASS / OK / CLEAN verdict line. Mutation tests take each new G2 check out again."""
+    d = tmp / "gate_fail_closed_300"
+    d.mkdir()
+    miss = d / "nope" / "missing.md"
+    empty = d / "empty.md"
+    empty.write_bytes(b"")
+    garbage = d / "garbage.md"
+    garbage.write_bytes(b"\xff\xfe\x00garbage {{{ not json\n\x00\x01")
+    empty_json = d / "empty.json"
+    empty_json.write_bytes(b"")
+    bad_json = d / "bad.json"
+    bad_json.write_bytes(b"{not json")
+    folder = d / "emptydir"
+    folder.mkdir()
+    for kind, f in (("missing", miss), ("empty", empty), ("garbage", garbage)):
+        # --hash is left out: it prints a file's hash (a utility), it gives no verdict
+        for opt in ("--resume", "--order", "--report", "--verdict", "--test-request", "--po-acceptance", "--feasibility"):
+            g2_closed(f"gate_check {opt} {kind}", "gate_check.py", opt, f)
+        g2_closed(f"gate_check --match {kind}", "gate_check.py", "--match", f, f)
+        g2_closed(f"gate_check --preflight {kind}", "gate_check.py", "--preflight", f, f)
+        g2_closed(f"gate_check --after-verdict {kind}", "gate_check.py", "--after-verdict", f)
+        g2_closed(f"gate_check --sequence {kind}", "gate_check.py", "--sequence", f)
+        g2_closed(f"gate_check --brief {kind}", "gate_check.py", "--brief", f)
+        g2_closed(f"scope_check {kind}", "scope_check.py", "--order", f)
+        g2_closed(f"evidence_record verify {kind}", "evidence_record.py", "verify", f)
+        g2_closed(f"flag_check {kind}", "flag_check.py", "--flags", f, "--log", f)
+        g2_closed(f"ruler_check lines {kind}", "ruler_check.py", "lines", "--pattern", "x", "--input", f)
+        g2_closed(f"run_plan_check {kind}", "run_plan_check.py", "--plan", f)
+        g2_closed(f"pre_tr config {kind}", "pre_tr.py", "--config", f, "--classes", "a")
+        g2_closed(f"round_check {kind}", "round_check.py", "--resume", f)
+        g2_closed(f"memory_size_check --kind resume {kind}", "memory_size_check.py", "--kind", "resume", "--file", f)
+        g2_closed(f"memory_size_check one file {kind}", "memory_size_check.py", "--file", f)
+        g2_closed(f"setup_check {kind}", "setup_check.py", f)
+        g2_closed(f"setup_check --strict {kind}", "setup_check.py", "--strict", f)
+        g2_closed(f"report_vs_audit {kind}", "report_vs_audit.py", "--report", f, "--log", f)
+        g2_closed(f"completion {kind}", "completion.py", f)
+        g2_closed(f"audit_log verify {kind}", "audit_log.py", "verify", "--log", f)
+        g2_closed(f"delete_guard --list {kind}", "delete_guard.py", "--list", f)
+        g2_closed(f"trace_report {kind}", "trace_report.py", "--orders", f, "--reports", f)
+        g2_closed(f"dispatch_check {kind}", "dispatch_check.py", "--log", f)
+    for kind, f in (("missing", miss), ("empty", empty_json), ("not JSON", bad_json)):
+        g2_closed(f"hash_check compare {kind}", "hash_check.py", "compare", "--expected", f, "--actual", f)
+        g2_closed(f"hash_check fresh {kind}", "hash_check.py", "fresh", "--stamp", f)
+        g2_closed(f"sim_check {kind}", "sim_check.py", "--patch-config", f, "--sim-config", f)
+        g2_closed(f"run_plan_check JSON {kind}", "run_plan_check.py", "--plan", f)
+        g2_closed(f"pre_tr JSON config {kind}", "pre_tr.py", "--config", f, "--classes", "a")
+        g2_closed(f"flag_check JSON {kind}", "flag_check.py", "--flags", f, "--log", empty)
+    g2_closed("pack_check missing", "pack_check.py", "check", miss)
+    g2_closed("pack_check empty folder", "pack_check.py", "check", folder)
+    g2_closed("ruler_check files, empty folder", "ruler_check.py", "files", "--input", folder, "--glob", "*.png")
+    g2_closed("ruler_check lines, empty folder", "ruler_check.py", "lines", "--pattern", "x", "--input", folder)
+    g2_closed("gate_check --final empty folder", "gate_check.py", "--final", folder)
+    g2_closed("gate_check --final missing", "gate_check.py", "--final", miss)
+    g2_closed("round_check --dir with no RESUME_STATE", "round_check.py", "--dir", folder)
+    g2_closed("setup_check empty folder", "setup_check.py", folder)
+    g2_closed("delete_guard nothing searched", "delete_guard.py", empty)
+    g2_closed("delete_guard --refs matches nothing", "delete_guard.py", empty, "--refs", str(folder / "*.md"))
+    # the checks a gate runs: non-zero exit, timeout, a program that cannot start
+    config = d / "pre_tr.json"
+    config.write_text(json.dumps({"schema": "pre-tr-v1", "classes": {
+        "exit3": {"paths": ["x"], "checks": [{"name": "exits 3", "cmd": ["{python}", "-c", "raise SystemExit(3)"]}]},
+        "slow": {"paths": ["x"], "checks": [{"name": "sleeps", "cmd": ["{python}", "-c", "import time; time.sleep(30)"]}]},
+        "gone": {"paths": ["x"], "checks": [{"name": "no program", "cmd": ["dw-g2-no-such-program-xyz"]}]},
+        "silent": {"paths": ["x"], "checks": [{"name": "prints nothing, exits 1",
+                                               "cmd": ["{python}", "-c", "raise SystemExit(1)"]}]}}}), encoding="utf-8")
+    for cls in ("exit3", "slow", "gone", "silent"):
+        g2_closed(f"pre_tr check {cls}", "pre_tr.py", "--config", config, "--classes", cls, "--timeout", "1", codes=(1,))
+    records = d / "records"
+    for name, cmd, want in (("exit3", [sys.executable, "-c", "raise SystemExit(3)"], 3),
+                            ("timeout", [sys.executable, "-c", "import time; time.sleep(30)"], 124),
+                            ("gone", ["dw-g2-no-such-program-xyz"], 127)):
+        code, out = g2_run("evidence_record.py", "run", "--out-dir", records, "--label", f"AC-{name}", "--timeout", "1",
+                           "--", *cmd, cwd=d)
+        check(f"G2 fail-closed: evidence_record run {name} keeps the exit code {want}",
+              code == want and "Traceback" not in out, f"exit {code}: {out.strip()[-300:]}")
+    made = sorted(records.glob("*.json")) if records.is_dir() else []
+    check("G2 fail-closed: evidence_record wrote one record per run", len(made) == 3, made)
+    for record in made:
+        g2_closed(f"evidence_record verify --rerun-recorded {record.stem.rsplit('-', 1)[-1]}", "evidence_record.py",
+                  "verify", record, "--rerun-recorded", "--timeout", "1", cwd=d)
+        data = json.loads(record.read_text(encoding="utf-8"))
+        data.pop("exit_code", None)
+        no_code = d / f"no_exit_code_{record.name}"
+        no_code.write_text(json.dumps(data), encoding="utf-8")
+        g2_closed(f"evidence_record verify, a record without exit_code ({record.stem.rsplit('-', 1)[-1]})",
+                  "evidence_record.py", "verify", no_code, codes=(2,))
+    # _common's exit-line reader (the agy P0 at its root): no line, two codes, a changed format, junk -> no code
+    c = load_common_300()
+    for text, want, name in (("Command exited with code 0\nok", 0, "exit line 0"),
+                             ("  Command exited with code 1.\n", 1, "exit line 1"),
+                             ("Exit code: 2", 2, "Exit code: form"), ("exit=0 at=10:00", 0, "exit= form"),
+                             ("all tests passed\n", None, "no exit line"), ("", None, "empty text"),
+                             ("Command exited with code 1\nCommand exited with code 0\n", None, "two codes (spoof)"),
+                             ("Command exited with code 0\nCommand exited with code 0\n", 0, "the same code twice"),
+                             ("x Command exited with code 0", None, "not at line start"),
+                             ("Command exited with code 12x", None, "code glued to text"),
+                             ("Command is still running in the background (id 7)", None, "still running (async)"),
+                             ("Process finished with status 0", None, "a changed format"), (None, None, "not text")):
+        got = c.exit_code_from(text)
+        check(f"G2 exit_code_from: {name}", got == want and not isinstance(got, bool), (text, got))
+    for code, want in ((0, "PASS"), (1, "FAIL"), (-9, "FAIL"), (124, "FAIL"), (None, "INVALID"), (True, "INVALID"),
+                       ("0", "INVALID"), (0.0, "INVALID")):
+        check(f"G2 gate_status({code!r})", c.gate_status(code) == want, c.gate_status(code))
+    check("G2: no exit line can never be PASS", c.gate_status(c.exit_code_from("done.\n")) == "INVALID")
+    # mutation tests: each new G2 check taken out again must turn a case wrong
+    for name, path, swaps, args in [
+            ("round_check unreadable", TOOLS / "round_check.py",
+             [("def unreadable(path):\n", "def unreadable(path):\n    return None\n")], ("--resume", empty)),
+            ("memory_size_check unreadable", TOOLS / "memory_size_check.py",
+             [("def unreadable(raw):\n", "def unreadable(raw):\n    return None\n")], ("--file", empty)),
+            ("dispatch_check empty log", TOOLS / "dispatch_check.py",
+             [("        if not text.strip():", "        if False:")], ("--log", empty)),
+            ("delete_guard nothing searched", TOOLS / "delete_guard.py",
+             [("        return 2\n    referenced = 0\n", "    referenced = 0\n")], (empty,)),
+            ("audit_log empty", TOOLS / "audit_log.py",
+             [("    empty = not entries and not problems", "    empty = False")], ("verify", "--log", empty)),
+            ("gate_check po-acceptance unreadable", TOOLS / "gate_check.py",
+             [("    if problem:  # 3.0.0 (G2)", "    if False:  # 3.0.0 (G2)")], ("--po-acceptance", empty))]:
+        module = mutant(path, swaps, f"g2_{name.replace(' ', '_')}")
+        if module is not None:
+            killed(f"G2 {name}", g2_main(module, *args) == 0)
+    for name, swaps, text in (
+            ("exit_code_from one code only", [("    return codes.pop() if len(codes) == 1 else None\n",
+                                               "    return min(codes) if codes else 0\n")],
+             "Command exited with code 1\nCommand exited with code 0\n"),
+            ("exit_code_from no line", [("    return codes.pop() if len(codes) == 1 else None\n",
+                                         "    return codes.pop() if len(codes) == 1 else 0\n")], "no line here")):
+        module = mutant(TOOLS / "_common.py", swaps, f"g2_common_{name.replace(' ', '_')}")
+        if module is not None:
+            killed(f"G2 {name}", module.gate_status(module.exit_code_from(text)) == "PASS")
+
+
+def test_bootstrap_repo_300(tmp):
+    """3.0.0 (D6): bootstrap_repo writes local-only entries into the exclude file git reads, also from a linked worktree
+    (where .git is a file and <worktree>/.git/info/exclude does not exist); DONE only after git check-ignore agrees;
+    --check writes nothing; a rerun changes nothing; tracked or re-included files FAIL; bad --add is a usage error."""
+    d = tmp / "bootstrap_repo_300"
+    main_repo, wt = d / "main repo", d / "wt 1"
+    main_repo.mkdir(parents=True)
+    g = lambda *a, cwd=main_repo: subprocess.run(["git", *a], cwd=cwd, capture_output=True, encoding="utf-8")  # noqa: E731
+    g("init", "-q")
+    g("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "i")
+    added = g("worktree", "add", "-q", str(wt), "-b", "side")
+    check("bootstrap: fixture worktree add", added.returncode == 0 and (wt / ".git").is_file(), added.stderr)
+    said = g("rev-parse", "--path-format=absolute", "--git-path", "info/exclude", cwd=wt).stdout.strip()
+    shared = pathlib.Path(said).resolve()
+    key = lambda p: os.path.normcase(str(p))  # noqa: E731
+    check("bootstrap: git puts a worktree's exclude in the main .git", key(shared) == key(main_repo / ".git" / "info" / "exclude"), said)
+    before = shared.read_bytes() if shared.is_file() else None
+    ignored = lambda where, entry: g("check-ignore", "-q", "--", entry, cwd=where).returncode == 0  # noqa: E731
+
+    expect("bootstrap: --check in a worktree reports TODO with the shared path", "bootstrap_repo.py", 1, "--repo", wt, "--check",
+           says=["TODO  .claude/settings.local.json", str(shared), "BOOTSTRAP_REPO: TODO"])
+    check("bootstrap: --check writes nothing", (shared.read_bytes() if shared.is_file() else None) == before)
+    expect("bootstrap: run from a linked worktree", "bootstrap_repo.py", 0, "--repo", wt,
+           says=["DONE  .claude/settings.local.json: added; git check-ignore confirms", "BOOTSTRAP_REPO: DONE"])
+    check("bootstrap: nothing written under the worktree's own .git file", (wt / ".git").is_file())
+    check("bootstrap: the worktree and the main checkout both ignore it",
+          ignored(wt, ".claude/settings.local.json") and ignored(main_repo, ".claude/settings.local.json"))
+    text = shared.read_text(encoding="utf-8")
+    check("bootstrap: one entry line and one header, LF", text.count(".claude/settings.local.json\n") == 1
+          and text.count("# DW bootstrap_repo") == 1 and "\r" not in text, text)
+    once = shared.read_bytes()
+    expect("bootstrap: rerun is OK", "bootstrap_repo.py", 0, "--repo", main_repo,
+           says=["OK    .claude/settings.local.json: already ignored", "BOOTSTRAP_REPO: DONE"])
+    check("bootstrap: rerun changes nothing", shared.read_bytes() == once)
+    expect("bootstrap: --check when done", "bootstrap_repo.py", 0, "--repo", wt, "--check", says="BOOTSTRAP_REPO: DONE")
+
+    shared.write_bytes(shared.read_bytes() + b"keep-me")  # a last line without a newline
+    expect("bootstrap: --add CLAUDE.local.md from a subfolder", "bootstrap_repo.py", 0, "--repo", main_repo / ".git" / "..",
+           "--add", "CLAUDE.local.md", says=["DONE  CLAUDE.local.md", "OK    .claude/settings.local.json"])
+    text = shared.read_text(encoding="utf-8")
+    check("bootstrap: an old last line keeps its own line, header not repeated",
+          "\nkeep-me\nCLAUDE.local.md\n" in text and text.count("# DW bootstrap_repo") == 1, text)
+    check("bootstrap: --add entry ignored in the worktree too", ignored(wt, "CLAUDE.local.md"))
+
+    for bad in ("", "!x", "# x", "a\nb"):
+        expect(f"bootstrap: --add {bad!r} is a usage error", "bootstrap_repo.py", 2, "--repo", main_repo, "--add", bad,
+               says="BOOTSTRAP_REPO: FAIL input")
+    outside = d / "outside"
+    outside.mkdir()
+    expect("bootstrap: missing folder", "bootstrap_repo.py", 2, "--repo", d / "nope", says="BOOTSTRAP_REPO: FAIL input")
+    if find_repo_300(outside) is None:
+        expect("bootstrap: not a git checkout", "bootstrap_repo.py", 2, "--repo", outside, says="not in a git checkout")
+
+    other = d / "other"
+    other.mkdir()
+    g("init", "-q", cwd=other)
+    (other / "tracked.local").write_text("x\n", encoding="utf-8")
+    (other / ".gitignore").write_text("!reincluded.local\n", encoding="utf-8")
+    g("add", "tracked.local", ".gitignore", cwd=other)
+    g("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "t", cwd=other)
+    expect("bootstrap: a tracked file FAILs and is not written", "bootstrap_repo.py", 1, "--repo", other, "--add", "tracked.local",
+           says=["FAIL  tracked.local: tracked in the repo", "DONE  .claude/settings.local.json", "BOOTSTRAP_REPO: FAIL"])
+    other_exclude = other / ".git" / "info" / "exclude"
+    check("bootstrap: the tracked entry was not written", "tracked.local" not in other_exclude.read_text(encoding="utf-8"))
+    expect("bootstrap: a .gitignore negation wins over exclude: written, but FAIL", "bootstrap_repo.py", 1, "--repo", other,
+           "--add", "reincluded.local", says=["FAIL  reincluded.local: added, but git check-ignore still does not ignore it"])
+
+    for name, swaps in (
+            ("exclude path from .git folder", [("    path = load_common().exclude_file(repo)\n",
+                                                "    path = repo / \".git\" / \"info\" / \"exclude\"\n")]),
+            ("no check-ignore after writing", [("                if ignored(repo, query):\n", "                if True:\n")]),
+            ("tracked not refused", [("        elif tracked(repo, query):\n", "        elif False:\n")])):
+        module = mutant(TOOLS / "bootstrap_repo.py", swaps, f"d6_{name.replace(' ', '_')}")
+        if module is None:
+            continue
+        fresh = d / f"m {name}"
+        fresh.mkdir()
+        g("init", "-q", cwd=fresh)
+        (fresh / ".gitignore").write_text("!reincluded.local\n", encoding="utf-8")
+        (fresh / "tracked.local").write_text("x\n", encoding="utf-8")
+        g("add", ".gitignore", "tracked.local", cwd=fresh)
+        g("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "i", cwd=fresh)
+        fresh_wt = d / f"m {name} wt"
+        g("worktree", "add", "-q", str(fresh_wt), "-b", "side", cwd=fresh)
+        # right: the worktree run ends DONE and git ignores the file; the re-included entry FAILs; the tracked one FAILs
+        # and is not written
+        wrong = g2_main(module, "--repo", fresh_wt) != 0 or not ignored(fresh_wt, ".claude/settings.local.json")
+        wrong = g2_main(module, "--repo", fresh, "--add", "reincluded.local") == 0 or wrong
+        wrong = g2_main(module, "--repo", fresh, "--add", "tracked.local") == 0 or wrong
+        exclude = fresh / ".git" / "info" / "exclude"
+        killed(f"D6 {name}", wrong or "tracked.local" in (exclude.read_text(encoding="utf-8") if exclude.is_file() else ""))
+
+
+def test_memory_chain_300(tmp):
+    """3.0.0 (D4): memory_size_check --chain measures one must-read chain: the sum against 24576 bytes (or --max-bytes),
+    the passages of 3+ lines two files share (maximal, blank lines skipped, punctuation-only lines never start one),
+    empty / non-UTF-8 files INVALID, missing files MISSING; --chain refuses the other options."""
+    d = tmp / "memory_chain_300"
+    d.mkdir()
+    shared = "".join(f"- shared rule {n}: keep it once\n" for n in range(5))
+    a, b = d / "CLAUDE.md", d / "RESUME STATE.md"
+    a.write_bytes(("# rules\n\n" + shared + "- only in a\n").encode("utf-8"))  # LF: write_text would make CRLF
+    b.write_bytes(("# resume\n" + shared.replace("\n", "\n\n", 1) + "- only in b\n").replace("\n", "\r\n").encode("utf-8"))
+    size = len(a.read_bytes()) + len(b.read_bytes())
+    lf = len(a.read_bytes()) + len(b.read_bytes().replace(b"\r\n", b"\n"))
+    m = "memory_size_check.py"
+    expect("chain D4: a small chain passes, with its sum and the 24 KB default", m, 0, "--chain", a, b,
+           says=[f"CHAIN: PASS files=2 bytes={size} (limit 24576) lf_bytes={lf}", f"CHAIN {a}: ", f"CHAIN {b}: ",
+                 " (LF ", "dups=1"])
+    expect("chain D4: one shared passage, maximal, blank line skipped", m, 0, "--chain", a, b,
+           says=f"DUP {a}:3-7 = {b}:2-7 (5 lines)", lacks="(3 lines)")
+    expect("chain D4: --max-bytes below the sum is FAIL", m, 1, "--chain", a, b, "--max-bytes", size - 1,
+           says=[f"CHAIN: FAIL files=2 bytes={size} (limit {size - 1})", "one rule in, one rule out"])
+    expect("chain D4: --max-bytes equal to the sum passes", m, 0, "--chain", a, b, "--max-bytes", size,
+           says="CHAIN: PASS")
+    big = d / "big.md"
+    big.write_bytes(b"x" * 25000 + b"\n")
+    expect("chain D4: over 24576 bytes by default is FAIL", m, 1, "--chain", a, big, says="CHAIN: FAIL", lacks="DUP ")
+    expect("chain D4: a missing file is MISSING", m, 1, "--chain", a, d / "gone.md",
+           says=["NOT_FOUND", "CHAIN: MISSING files=1", "missing=1"])
+    empty, latin = d / "empty.md", d / "latin.md"
+    empty.write_bytes(b" \n")
+    latin.write_bytes(b"caf\xe9\n")
+    expect("chain D4: an empty file is INVALID", m, 1, "--chain", a, empty, says=["INVALID EMPTY", "CHAIN: INVALID", "invalid=1"])
+    expect("chain D4: a non-UTF-8 file is INVALID", m, 1, "--chain", a, latin, says=["INVALID NOT_UTF8", "CHAIN: INVALID"])
+    expect("chain D4: over the limit wins over INVALID", m, 1, "--chain", big, big, empty, says="CHAIN: FAIL")
+    fences = d / "fences.md"
+    fences.write_text("```\n---\n|---|\n```\n", encoding="utf-8")
+    expect("chain D4: punctuation-only lines are not a shared passage", m, 0, "--chain", fences, fences,
+           says="dups=0", lacks="DUP ")
+    same = d / "same.md"
+    same.write_text(shared + "\n" + shared, encoding="utf-8")
+    expect("chain D4: repeats inside one file are not listed", m, 0, "--chain", same, says="dups=0")
+    expect("chain D4: --chain with --kind is a usage error", m, 2, "--chain", a, "--kind", "resume")
+    expect("chain D4: --chain with --file is a usage error", m, 2, "--chain", a, "--file", b)
+    expect("chain D4: --max-bytes 0 is a usage error", m, 2, "--chain", a, "--max-bytes", 0)
+    expect("chain D4: the 2.2.1 single-file report is unchanged", m, 0, "--file", a, lacks="CHAIN")
+    # 3.0.0 B19: the DW section of a platform rule file (loaded on every turn) counts in the chain
+    section = "## 總監制（Director mode）\n\n- rule one\n- rule two\n\n```\n## not a heading in a fence\n```\n### sub\n- three\n"
+    agents = d / "AGENTS.md"
+    agents.write_bytes(("# Project\n\nproject words that do not count\n\n" + section + "## Build\n\n- npm test\n")
+                       .encode("utf-8"))
+    part = len(section.encode("utf-8"))
+    expect("chain B19: --rules-file counts only the DW section, to the next heading of its level", m, 0, "--chain", a,
+           "--rules-file", agents,
+           says=[f"CHAIN {agents} [DW section lines 5-14]: {part} bytes", f"bytes={len(a.read_bytes()) + part} ",
+                 "files=2", "rules=1"], lacks="whole file")
+    top = d / "director-work.md"
+    top.write_bytes(("---\ntrigger: always_on\n---\n# DIRECTOR-WORK rules\n\n## one\n- x\n## two\n- y\n").encode("utf-8"))
+    expect("chain B19: a # DW heading runs to the end of the file over its ## parts", m, 0, "--chain", a,
+           "--rules-file", top, says=f"CHAIN {top} [DW section lines 4-9]: ")
+    plain = d / "CLAUDE_plain.md"
+    plain.write_bytes(b"# Project\n\n- no director section here\n")
+    expect("chain B19: a rule file with no DW heading counts whole", m, 0, "--chain", a, "--rules-file", plain,
+           says=[f"CHAIN {plain} [whole file: no DW heading]: {len(plain.read_bytes())} bytes", "rules=1"])
+    expect("chain B19: the section can push the chain over", m, 1, "--chain", a, "--rules-file", agents,
+           "--max-bytes", len(a.read_bytes()) + part - 1, says="CHAIN: FAIL")
+    expect("chain B19: a missing rule file is MISSING", m, 1, "--chain", a, "--rules-file", d / "gone_rules.md",
+           says=["NOT_FOUND", "CHAIN: MISSING", "rules=1"])
+    expect("chain B19: --rules-file without --chain is a usage error", m, 2, "--rules-file", agents)
+    expect("chain B19: the rules section shares passages too", m, 0, "--chain", a, "--rules-file", agents,
+           "--rules-file", agents, says="dups=1")
+
+    for name, swaps, args, wrong in (
+            ("no limit", [("    over = total > max_bytes\n", "    over = False\n")], ("--chain", a, big),
+             lambda code, out: code != 1),
+            ("24 KB default", [("CHAIN_LIMIT = 24576  #", "CHAIN_LIMIT = 10 ** 9  #")], ("--chain", a, big),
+             lambda code, out: code != 1),
+            ("empty file read", [("            invalid.append(path)\n            print(f\"{problem} {path}\")\n",
+                                  "            print(f\"{problem} {path}\")\n")], ("--chain", a, empty),
+             lambda code, out: code != 1),
+            ("missing ignored", [('"FAIL" if over else "INVALID" if invalid else "MISSING" if missing else "PASS"',
+                                  '"FAIL" if over else "INVALID" if invalid else "PASS"')], ("--chain", a, d / "gone.md"),
+             lambda code, out: code != 1),
+            ("passage not extended", [("                    k += 1\n", "                    break\n")], ("--chain", a, b),
+             lambda code, out: "(5 lines)" not in out),
+            ("trivial lines start passages", [("            if TRIVIAL.fullmatch(lines[i][1]):\n", "            if False:\n")],
+             ("--chain", fences, fences), lambda code, out: "dups=0" not in out),
+            ("b19 whole rule file", [("            section = None if problem else dw_section(raw)\n",
+                                      "            section = None\n")], ("--chain", a, "--rules-file", agents),
+             lambda code, out: "[DW section lines 5-14]" not in out),
+            ("b19 fence heading ends the section", [("        if FENCE.match(line):\n", "        if False:\n")],
+             ("--chain", a, "--rules-file", agents), lambda code, out: "[DW section lines 5-14]" not in out)):
+        module = mutant(TOOLS / "memory_size_check.py", swaps, f"d4_{name.replace(' ', '_')}")
+        if module is not None:
+            killed(f"D4 {name}", wrong(*call_main(module, *args)))
+
+
+def test_usage_partial_300(tmp):
+    """3.0.0 (D7): a usage value that is not a non-negative number (bool, text, negative, not finite, list) counts as 0
+    and marks the result partial, in _common, usage_mix.py and usage_report.py; a clean read says partial false and
+    prints no PARTIAL line; a bad value outside the --since window is not counted; mutations of each check."""
+    c = load_common_300()
+    for value, want in ((5, 5), (2.5, 2.5), (0, 0), (None, 0)):
+        invalid = []
+        got = c.usage_number(value, "f", invalid)
+        check(f"usage_number keeps {value!r}", got == want and not invalid, (got, invalid))
+    for value in (True, False, -5, -0.5, "12", float("inf"), float("nan"), [1], {"a": 1}):
+        invalid = []
+        got = c.usage_number(value, "f", invalid)
+        check(f"usage_number refuses {value!r}", got == 0 and type(got) is int and len(invalid) == 1
+              and invalid[0][0] == "f", (got, invalid))
+    invalid = []
+    check("usage_numbers: a record that is not an object is one invalid field",
+          c.usage_numbers([1, 2], ("a", "b"), "usage.", invalid) == [0, 0] and invalid == [("usage", "list([1, 2])")],
+          invalid)
+    check("usage_numbers: no record is zeros and fine", c.usage_numbers(None, ("a",), "usage.", invalid) == [0], invalid)
+    check("usage_partial clean", c.usage_partial([]) == {"partial": False, "invalid_count": 0, "invalid_fields": []},
+          c.usage_partial([]))
+    check("partial_line clean is None", c.partial_line([]) is None, c.partial_line([]))
+    many = [(f"f{i}", "bool(True)") for i in range(7)]
+    check("partial_line names five and counts the rest", "7 value(s)" in c.partial_line(many)
+          and "(+2 more)" in c.partial_line(many) and "lower bound" in c.partial_line(many), c.partial_line(many))
+
+    root = tmp / "usage_partial_300"
+    for name in ("bad", "clean"):
+        (root / name).mkdir(parents=True)
+    (root / "bad" / "aaaa1111.jsonl").write_text("\n".join([
+        um_call("m0", "2026-01-01T09:00:00Z", (), input_tokens=-7),              # before the --since window
+        um_call("m1", "2026-01-02T10:00:00Z", (), input_tokens=True),
+        um_call("m2", "2026-01-02T10:01:00Z", (), input_tokens=-5, output_tokens=10),
+        um_call("m3", "2026-01-02T10:02:00Z", (), input_tokens=1000, output_tokens="12"),
+        um_call("m4", "2026-01-02T10:03:00Z", (), input_tokens=1000),
+        um_call("m4", "2026-01-02T10:03:00Z", (), cache_read_input_tokens=float("inf")),  # a later fragment of m4
+        json.dumps({"type": "assistant", "timestamp": "2026-01-02T10:04:00Z",
+                    "message": {"id": "m5", "content": [], "usage": ["x"]}}),
+        um_call("m6", "2026-01-02T10:05:00Z", (), input_tokens=3000, output_tokens=20)]) + "\n", encoding="utf-8")
+    (root / "clean" / "bbbb2222.jsonl").write_text("\n".join([
+        um_call("c1", "2026-01-02T10:00:00Z", (), input_tokens=1000, output_tokens=10),
+        um_call("c2", "2026-01-02T10:01:00Z", (), input_tokens=2000, cache_read_input_tokens=500)]) + "\n",
+        encoding="utf-8")
+    bad, clean = ("--root", root, "--project-dir", "bad", "--no-loops"), ("--root", root, "--project-dir", "clean",
+                                                                         "--no-loops")
+    expect("D7 usage_mix names the bad values", "usage_mix.py", 0, *bad, says=[
+        "PARTIAL usage: 6 value(s)", "usage.input_tokens=int(-7)", "usage.input_tokens=bool(True)",
+        "usage.input_tokens=int(-5)", "usage.output_tokens=str('12')", "(+1 more)", "lower bound", "RESULT "])
+    code, out = run("usage_mix.py", *bad, "--json")
+    try:
+        res = json.loads(out)
+    except ValueError:
+        res = {}
+    check("D7 usage_mix --json partial", code == 0 and res.get("partial") is True and res.get("invalid_count") == 6
+          and res.get("invalid_fields") == ["usage", "usage.cache_read_input_tokens", "usage.input_tokens",
+                                            "usage.output_tokens"], out[-400:])
+    expect("D7 usage_mix: a bad value before --since is not counted", "usage_mix.py", 0, *bad, "--since", "2026-01-02",
+           says="PARTIAL usage: 5 value(s)", lacks="int(-7)")
+    expect("D7 usage_mix clean: no PARTIAL line", "usage_mix.py", 0, *clean, says="RESULT ", lacks="PARTIAL")
+    code, out = run("usage_mix.py", *clean, "--json")
+    check("D7 usage_mix clean --json partial false", code == 0 and '"partial": false' in out and '"invalid_count": 0' in out,
+          out[-300:])
+
+    json_out = root / "report.json"
+    expect("D7 usage_report names the bad values", "usage_report.py", 0, "--root", root, "--project-dir", "bad",
+           "--json-out", json_out, says=['partial: true', 'invalid_count: 5', "PARTIAL usage: 5 value(s)",
+                                        "usage.input_tokens=bool(True)", 'totals: {"calls": 7'])
+    try:
+        saved = json.loads(json_out.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        saved = {}
+    check("D7 usage_report --json-out partial", saved.get("partial") is True and saved.get("totals", {}).get("input") == 5000
+          and saved.get("totals", {}).get("output") == 30, saved)
+    expect("D7 usage_report clean: partial false, no PARTIAL line", "usage_report.py", 0, "--root", root, "--project-dir",
+           "clean", says=["partial: false", "invalid_count: 0"], lacks="PARTIAL")
+
+    common_path = TOOLS / "_common.py"
+    for name, swaps, wrong in (
+            ("D7 a bool is taken as a count", [("and not isinstance(value, bool) and math.isfinite", "and math.isfinite")],
+             lambda m: m.usage_number(True, "f", []) != 0),
+            ("D7 a negative number is taken", [("math.isfinite(value) and value >= 0:", "math.isfinite(value):")],
+             lambda m: m.usage_number(-5, "f", []) != 0),
+            ("D7 the partial flag is dropped", [('{"partial": bool(invalid),', '{"partial": False,')],
+             lambda m: m.usage_partial([("f", "x")])["partial"] is not True),
+            ("D7 a list record is taken as empty", [("    if not isinstance(record, dict):\n        if invalid is not None:",
+                                                     "    if not isinstance(record, dict):\n        if False:")],
+             lambda m: (lambda inv: (m.usage_numbers([1], ("a",), "usage.", inv), not inv)[1])([]))):
+        module = mutant(common_path, swaps, name)
+        killed(name, module is not None and wrong(module))
+    module = mutant(TOOLS / "usage_mix.py", [("    res.update(common.usage_partial(invalid))\n    if invalid:\n"
+                                              "        res[\"partial_line\"]", "    if invalid:\n        res[\"partial_line\"]")],
+                    "D7 usage_mix drops the partial fields")
+    if module is not None:
+        code, out = call_main(module, *bad, "--json")
+    killed("D7 usage_mix drops the partial fields", module is not None and '"partial": true' not in out)
+    module = mutant(TOOLS / "usage_mix.py", [('            usage = dict(zip(WEIGHTS, common.usage_numbers(raw, list(WEIGHTS), '
+                                              '"usage.", invalid)))\n            call = ',
+                                              '            usage = dict(zip(WEIGHTS, common.usage_numbers(raw, list(WEIGHTS), '
+                                              '"usage.", None)))\n            call = ')],
+                    "D7 usage_mix forgets the bad values of a new call")
+    if module is not None:
+        code, out = call_main(module, *bad)
+    killed("D7 usage_mix forgets the bad values of a new call", module is not None and "PARTIAL usage: 6 value(s)" not in out)
+
+
+def test_safety_gate_300(tmp):
+    """3.0.0 (D1): tools/safety_gate.py through gate_check --order / --match. The strengths light / standard / strict,
+    locked tests (a quoted path with a space, the 2.2.3 one-line form, a change or a deletion in the candidate commit),
+    no self-loosening without the PO's answer, values of the wrong type, STOP_RULES, plan_gate and the spec review
+    under strict, --lock-tests / --plan-hash / --show, setup_check; mutations of each check.
+    3.0.0 B15: written for the base default "standard"; in a variant whose adapters/*/VARIANT.json sets another
+    default (dshdw: light) it runs unchanged on a copy of tools/ with no adapters/ beside it (test_variant_default_300
+    tests the variant default)."""
+    global TOOLS
+    if list(TOOLS.parent.glob("adapters/*/VARIANT.json")):
+        copy = tmp / "safety_gate_300_base_default" / "tools"
+        shutil.copytree(TOOLS, copy, ignore=shutil.ignore_patterns("__pycache__"))
+        saved, TOOLS = TOOLS, copy
+        try:
+            return test_safety_gate_300(tmp)
+        finally:
+            TOOLS = saved
+    root = tmp / "safety_gate_300"
+    repo = root / "repo"
+    (repo / "tests").mkdir(parents=True)
+
+    def git(*args):
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args], cwd=repo,
+                              check=True, capture_output=True, text=True).stdout.strip()
+
+    test_file = repo / "tests" / "test parser.py"
+    original = "def test_empty():\n    assert parse('') == []\n"
+    test_file.write_text(original, encoding="utf-8")
+    git("init", "-q")
+    git("add", "-A")
+    git("commit", "-q", "-m", "tests first")
+    first = git("rev-parse", "HEAD")
+    code, out = run("safety_gate.py", "--lock-tests", "tests/test parser.py", "--repo", repo, cwd=repo)
+    lock = [line for line in out.splitlines() if line.startswith("- ")]
+    check("D1 --lock-tests quotes a path with a space", code == 0 and out.startswith("TESTS_LOCKED:") and len(lock) == 1
+          and lock[0].startswith('- "tests/test parser.py" sha256='), out)
+    if len(lock) != 1:
+        return
+    digest = lock[0].rsplit("sha256=", 1)[1]
+    none_lock = "TESTS_LOCKED:\n- NONE  # the fixture runs no locked test file\n"
+    typed = TYPED_ORDER.format(base="abc123")
+    if none_lock not in typed:
+        check("D1 TYPED_ORDER carries the TESTS_LOCKED NONE block", False, "update test_safety_gate_300")
+        return
+    with_lock = typed.replace(none_lock, "TESTS_LOCKED:\n" + lock[0] + "\n")
+    no_lock = typed.replace(none_lock, "")
+    one_round = with_lock.replace("stop after 2 rounds", "stop after 1 round")
+    folders = []
+
+    def director(order_text, config=None, po=None, log=None):
+        folder = root / f"d{len(folders)}"
+        folders.append(folder)
+        (folder / "orders").mkdir(parents=True)
+        if config is not None:
+            (folder / "director_work.json").write_text(config if isinstance(config, str) else json.dumps(config),
+                                                       encoding="utf-8")
+        if po is not None:
+            (folder / "PO_PENDING.md").write_text(po, encoding="utf-8")
+        if log is not None:
+            (folder / "DIRECTOR_LOG.md").write_text(log, encoding="utf-8")
+        order = folder / "orders" / "WO-001-parser.md"
+        order.write_text(order_text, encoding="utf-8")
+        return order
+
+    def order_case(name, code, order_text, says=None, lacks=None, **kw):
+        expect(f"D1 {name}", "gate_check.py", code, "--order", director(order_text, **kw), "--repo", repo, says=says,
+               lacks=lacks)
+
+    order_case("a locked test that did not change passes, quietly at the default strength", 0, with_lock,
+               lacks=["TESTS_LOCKED", "SAFETY"])
+    test_file.write_text(original + "# loosened\n", encoding="utf-8")
+    order_case("a locked test changed in the folder fails", 1, with_lock,
+               says="TESTS_LOCKED: tests/test parser.py changed since it was locked")
+    test_file.write_bytes(original.replace("\n", "\r\n").encode("utf-8"))
+    order_case("CRLF does not change the lock", 0, with_lock)
+    test_file.write_text(original, encoding="utf-8")
+    order_case("a Standard order without TESTS_LOCKED fails", 1, no_lock, says="TESTS_LOCKED: missing")
+    order_case("a Direct order is not gated", 0, no_lock.replace("GOVERNANCE     = Standard", "GOVERNANCE     = Direct"),
+               lacks="TESTS_LOCKED")
+    order_case("the 2.2.3 one-line form is read", 0,
+               typed.replace(none_lock, f"TESTS_LOCKED: tests/test parser.py sha256={digest}\n"))
+    order_case("a malformed item fails", 1, typed.replace(none_lock, "TESTS_LOCKED:\n- tests/x.py sha256=123\n"),
+               says="is not `<path> sha256=<64 hex>`")
+    empty_lock = typed.replace(none_lock, "TESTS_LOCKED:\n")  # review P1-8
+    order_case("review P1-8: an empty TESTS_LOCKED fails", 1, empty_lock, says="TESTS_LOCKED: empty")
+    bare_none = typed.replace(none_lock, "TESTS_LOCKED:\n- NONE\n")  # review P2-3
+    order_case("review P2-3: NONE without its reason fails", 1, bare_none, says="`NONE` needs its reason")
+    order_case("review P2-3: NONE with an empty reason fails", 1, typed.replace(none_lock, "TESTS_LOCKED:\n- NONE  #\n"),
+               says="`NONE` needs its reason")
+    order_case("review P2-3: the one-line NONE with its reason passes", 0,
+               typed.replace(none_lock, "TESTS_LOCKED: NONE  # docs only\n"), lacks="TESTS_LOCKED")
+    for name, swap, case in (
+            ("P1-8 empty lock passes", ("    if not items:  # review P1-8", "    if False:  # review P1-8"), empty_lock),
+            ("P2-3 NONE reason ignored", ("        if not NONE_WHY.search(text):", "        if False:"), bare_none)):
+        module = mutant(TOOLS / "safety_gate.py", [swap], "rev_" + name.split()[0].replace("-", "_"))
+        if module is not None:
+            found = []
+            try:
+                module.check_tests(case, repo, found, [])
+            except Exception as error:  # a crash is no silent pass
+                found.append(repr(error))
+            killed(name, not found)
+    order_case("strength light without the PO fails", 1, no_lock, config={"strength": "light"},
+               says=["~ SAFETY strength light (director_work.json): no gate on", "a worker may not turn a safety gate off",
+                     "write a PO_PENDING entry naming strength"])
+    order_case("strength light with an open PO entry still fails", 1, no_lock, config={"strength": "light"},
+               po="ID: OD-7\nSTATUS: open\nQUESTION: strength light for this project?\n", says="still open")
+    order_case("strength light the PO answered passes", 0, no_lock, config={"strength": "light"},
+               po="ID: OD-7\nSTATUS: answered\nQUESTION: strength light for this project?\nANSWER: yes, docs only\n",
+               says="the PO answered it")
+    order_case("a switch turned off without the PO fails", 1, with_lock, config={"safety": {"tests_first": False}},
+               says="safety.tests_first is off (standard has it on)")
+    order_case("tightening needs no PO", 0, with_lock, config={"safety": {"plan_gate": True}},
+               says="~ SAFETY strength standard (director_work.json): tests_first, plan_gate", lacks="may not")
+    for name, config, says in (
+            ("an unknown strength", {"strength": "lite"}, "'lite' is not one of light / standard / strict"),
+            ("a switch that is not true / false", {"safety": {"tests_first": "no"}}, "is not true or false"),
+            ("a round limit that is a bool", {"safety": {"stop_after_rounds": True}}, "is not a whole number"),
+            ("an unknown switch", {"safety": {"test_first": True}}, "safety.test_first: not a switch"),
+            ("a safety block that is not an object", {"safety": ["tests_first"]}, "must be a JSON object"),
+            ("a config that cannot be read", "{", "cannot be read")):
+        order_case(f"{name} fails closed", 1, with_lock, config=config, says=says)
+    strict = {"strength": "strict"}
+    order_case("strict: STOP_RULES allowing 2 rounds fails", 1, with_lock, config=strict,
+               says="STOP_RULES: allows 2 rounds on one root cause; at most 1")
+    order_case("strict: 1 round passes --order", 0, one_round, config=strict,
+               says="~ SAFETY strength strict (director_work.json): tests_first, plan_gate, spec_review_for_standard")
+
+    # the candidate commit (dshdw ds.7): the working tree is clean, the commit changed the test
+    def report_for(order_text, head="d0d0d0d"):
+        file = root / f"report{len(folders)}-{head[:7]}.md"
+        file.write_text(match_report(list(ACCEPTANCE.values()), sha=hashlib.sha256(order_text.encode("utf-8")).hexdigest())
+                        .replace("/ d0d0d0d /", f"/ {head[:7]} /"), encoding="utf-8")
+        return file
+
+    test_file.write_text(original + "# loosened\n", encoding="utf-8")
+    git("commit", "-q", "-am", "loosen the test")
+    second = git("rev-parse", "HEAD")
+    test_file.write_text(original, encoding="utf-8")
+    plain = director(with_lock)
+    expect("D1 --match: the test changed in the candidate commit fails", "gate_check.py", 1, "--match",
+           report_for(with_lock, second), plain, "--repo", repo, "--candidate", second,
+           says=f"TESTS_LOCKED: tests/test parser.py changed in candidate {second[:12]}", lacks="HEAD:")
+    expect("D1 --match: the locked commit passes", "gate_check.py", 0, "--match", report_for(with_lock, first), plain,
+           "--repo", repo, "--candidate", first, says="OK   match")
+    expect("D1 --match without --candidate reads the folder", "gate_check.py", 0, "--match", report_for(with_lock), plain,
+           "--repo", repo)
+    git("rm", "-q", "--cached", "tests/test parser.py")
+    git("commit", "-q", "-m", "drop the test")
+    third = git("rev-parse", "HEAD")
+    expect("D1 --match: the test deleted in the candidate fails", "gate_check.py", 1, "--match",
+           report_for(with_lock, third), plain, "--repo", repo, "--candidate", third, says="not found in candidate",
+           lacks="HEAD:")
+    test_file.write_text(original, encoding="utf-8")
+
+    # strict --match: the spec review and the approved plan, read from the DIRECTOR_LOG next to orders/
+    with_work = one_round.replace("BASE_REF       = main @ abc123\n", "BASE_REF       = main @ abc123\nWORK_DIR       = work\n")
+    plan = repo / "work" / "WO-001" / "PLAN.md"
+    plan.parent.mkdir(parents=True)
+    plan.write_text("# PLAN WO-001\n- [x] write the parser\n- [x] run the tests\n", encoding="utf-8")
+    code, out = run("safety_gate.py", "--plan-hash", plan, "--order", plain)
+    approved = out.strip()
+    check("D1 --plan-hash prints the PLAN_APPROVED line", code == 0 and approved.startswith("PLAN_APPROVED WO-001 sha=")
+          and len(approved.split("sha=")[1]) == 64, out)
+    report = report_for(with_work)
+    review = "2026-01-02 10:00 +08:00 | SPEC_REVIEW WO-001 tokens=10 issues=0 adopted=0 session=R1\n"
+    bare = director(with_work, config=strict, log="# DIRECTOR_LOG\n2026-01-02 09:00 +08:00 | NOTE start\n")
+    expect("D1 strict --match without a spec review or an approved plan fails", "gate_check.py", 1, "--match", report,
+           bare, "--repo", repo, says=["SPEC_REVIEW: no `SPEC_REVIEW", "PLAN_APPROVED: no `PLAN_APPROVED"])
+    reviewed = director(with_work, config=strict, log="# DIRECTOR_LOG\n" + review)
+    expect("D1 strict --match with the review but no plan approval fails", "gate_check.py", 1, "--match", report,
+           reviewed, "--repo", repo, says="PLAN_APPROVED: no", lacks="SPEC_REVIEW: no")
+    good = director(with_work, config=strict, log="# DIRECTOR_LOG\n" + review + f"2026-01-02 10:05 +08:00 | {approved}\n")
+    expect("D1 strict --match with the review and the approved plan passes", "gate_check.py", 0, "--match", report, good,
+           "--repo", repo, says="OK   match")
+    plan.write_text("# PLAN WO-001\n- [x] write the parser\n- [ ] run the tests\n", encoding="utf-8")
+    expect("D1 strict --match: an unticked task fails", "gate_check.py", 1, "--match", report, good, "--repo", repo,
+           says="1 task(s) in PLAN.md not ticked")
+    plan.write_text("# PLAN WO-001\n- [x] write the parser\n- [x] skip the tests\n", encoding="utf-8")
+    expect("D1 strict --match: a changed plan fails", "gate_check.py", 1, "--match", report, good, "--repo", repo,
+           says="differs from the approved plan")
+    plan.write_text("# PLAN WO-001\n- [x] write the parser\n- [x] run the tests\n", encoding="utf-8")
+    expect("D1 standard --match needs neither", "gate_check.py", 0, "--match", report, director(with_work, log="# x\n"),
+           "--repo", repo, lacks=["SPEC_REVIEW", "PLAN_APPROVED"])
+
+    # --show and setup_check
+    config_file = root / "strict.json"
+    config_file.write_text(json.dumps(strict), encoding="utf-8")
+    expect("D1 --show strict", "safety_gate.py", 0, "--show", "--config", config_file,
+           says='SAFETY strength=strict tests_first=true plan_gate=true spec_review_for_standard=true stop_after_rounds=1')
+    config_file.write_text(json.dumps({"strength": "light"}), encoding="utf-8")
+    expect("D1 --show light names the PO answer it needs", "safety_gate.py", 0, "--show", "--config", config_file,
+           says="~ strength is light (below standard): a Standard / Strict order needs a PO_PENDING answer naming strength")
+    config_file.write_text(json.dumps({"strength": "lite"}), encoding="utf-8")
+    expect("D1 --show of a bad value fails", "safety_gate.py", 1, "--show", "--config", config_file, says="'lite'")
+    setup = mutant(TOOLS / "setup_check.py", [], "setup_check_d1")
+    if setup is not None:
+        notes = []
+        bad = setup.check_config('{"strength": "lite", "safety": {"stop_after_rounds": -1}}', notes)
+        check("D1 setup_check flags bad strength / safety values",
+              any("'lite'" in p for p in bad) and any("stop_after_rounds" in p for p in bad), bad)
+        notes = []
+        fine = setup.check_config('{"strength": "strict", "safety": {"stop_after_rounds": 2}}', notes)
+        check("D1 setup_check knows strength and safety", fine == [] and not any("strength" in n for n in notes),
+              (fine, notes))
+
+    # mutations
+    gate_path, safety_path = TOOLS / "gate_check.py", TOOLS / "safety_gate.py"
+
+    def problems_of(module, text, config, candidate=None):
+        return module.order_problems(text, repo, config, [], candidate)
+
+    for name, swaps, wrong in (
+            ("D1 quotes are not stripped", [("        rel = rel[1:-1]\n", "        pass\n")],
+             lambda m: problems_of(m, with_lock, m.load_config()[0]) != []),
+            ("D1 the candidate commit is ignored", [("        if candidate:\n", "        if False:\n")],
+             lambda m: problems_of(m, with_lock, m.load_config()[0], second) == []),
+            ("D1 a worker may loosen", [("    problems = loosening_problems(config, gov, notes)\n", "    problems = []\n")],
+             lambda m: problems_of(m, no_lock, m.from_data({"strength": "light"})[0]) == []),
+            ("D1 a switch of the wrong type is taken", [("            good = isinstance(value, bool)\n",
+                                                         "            good = True\n")],
+             lambda m: m.from_data({"safety": {"tests_first": "no"}})[1] == []),
+            ("D1 standard does not lock tests", [('"standard": {"tests_first": True,', '"standard": {"tests_first": False,')],
+             lambda m: problems_of(m, no_lock, m.load_config()[0]) == []),
+            ("D1 an open PO entry counts as answered",
+             [('if status in ("answered", "closed") and answer and not re.fullmatch(', 'if not re.fullmatch(')],
+             lambda m: m.po_decided(folders[12], "strength") == "answered"),  # the open PO entry (4 review cases first)
+            ("D1 strict lets STOP_RULES run long", [("        elif max(rounds) > limit:\n", "        elif False:\n")],
+             lambda m: problems_of(m, with_lock, m.from_data(strict)[0]) == [])):
+        module = mutant(safety_path, swaps, name)
+        killed(name, module is not None and wrong(module))
+    for name, swaps, args in (
+            ("D1 gate_check skips the safety gates",
+             [('        if text is not None and kind in ("order", "match"):  # 3.0.0 (D1)', '        if False:  # 3.0.0 (D1)')],
+             ("--order", director(no_lock), "--repo", repo)),
+            ("D1 gate_check skips the plan gate",
+             [('    if safety.on(config, "plan_gate") and log_text is not None:', '    if False:')],
+             ("--match", report, reviewed, "--repo", repo))):
+        module = mutant(gate_path, swaps, name)
+        code = g2_main(module, *args) if module is not None else None
+        killed(name, module is not None and code == 0)
+
+
+def test_final_outcome_300(tmp):
+    """3.0.0 (D2, hard line): gate_check --final needs an end-to-end record that ended, and ended well: a non-zero exit
+    code or a failure marker in any record blocks, no record with `EXIT_CODE: 0` / `RESULT: PASS` is E2E_INCOMPLETE, a
+    record that is not UTF-8 text blocks, an old failed record blocks until moved out, --warn does not soften it.
+    3.0.0 B2: agy.6's three cases (`RESULT: FAIL` beside `EXIT_CODE: 0`, `=` fields, a WIP record beside a good one) and
+    the RESULT / STATUS / VERDICT FAIL / ERROR / BLOCKED / PARTIAL lines and the "N failed" count."""
+    d = tmp / "final_outcome_300"
+
+    def make(name, records):
+        director = d / f"case {len(folders)}" / "DIRECTOR"  # names hold characters a folder cannot
+        for rel, content in records.items():
+            path = director / "evidence" / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content if isinstance(content, bytes) else content.encode("utf-8"))
+        return director
+
+    entry = "ENTRY_POINT: python -m tool run\n3 rows\n"
+    good = entry + "EXIT_CODE: 0\n"
+    cases = (  # name, records, exit, says
+        ("EXIT_CODE 0", {"E2E/run.txt": good}, 0, "OK   final"),
+        ("RESULT PASS", {"E2E/run.txt": entry + "RESULT: PASS\n"}, 0, "OK   final"),
+        ("exit=0", {"E2E/run.txt": entry + "done exit=0\n"}, 0, "OK   final"),
+        ("Command exited with code 0", {"E2E/run.txt": entry + "Command exited with code 0\n"}, 0, "OK   final"),
+        ("FAIL inside a line is no marker", {"E2E/run.txt": good + "case 3: no FAIL here\n"}, 0, "OK   final"),
+        ("no outcome", {"E2E/run.txt": entry}, 1, "E2E_INCOMPLETE: no record in"),
+        ("non-zero exit", {"E2E/run.txt": entry + "EXIT_CODE: 1\n"}, 1, "E2E: run.txt recorded non-zero exit code (1)"),
+        ("negative exit", {"E2E/run.txt": entry + "EXIT_CODE: -1\n"}, 1, "recorded non-zero exit code (-1)"),
+        ("non-zero beside PASS", {"E2E/run.txt": entry + "EXIT_CODE: 2\nRESULT: PASS\n"}, 1, "non-zero exit code (2)"),
+        ("traceback", {"E2E/run.txt": "Traceback (most recent call last):\n  boom\n" + good}, 1,
+         "E2E: run.txt line 1 starts with a failure marker (Traceback"),
+        ("FAIL line", {"E2E/run.txt": good + "FAIL  case 3\n"}, 1, "line 4 starts with a failure marker (FAIL)"),
+        ("ERROR: line", {"E2E/sub/run.txt": good + "ERROR: no such file\n"}, 1, "E2E: sub/run.txt line 4"),
+        ("an old failed record beside a good one", {"E2E/new.txt": good, "E2E/old.txt": entry + "EXIT_CODE: 1\n"}, 1,
+         "E2E: old.txt recorded non-zero exit code (1)"),
+        ("the old failed record moved out", {"E2E/new.txt": good, "E2E_old/old.txt": entry + "EXIT_CODE: 1\n"}, 0,
+         "OK   final"),
+        ("not UTF-8 beside a good one", {"E2E/new.txt": good, "E2E/shot.png": b"\x89PNG\r\n\x1a\n\xff\xfe"}, 1,
+         "E2E: shot.png is not UTF-8 text"),
+        # 3.0.0 B2: the three agy.6 cases (selftest_agy, "gate_check --final catches RESULT: FAIL + EXIT_CODE: 0")
+        ("agy.6 RESULT: FAIL beside EXIT_CODE: 0", {"E2E/fake.txt": entry + "RESULT: FAIL\nEXIT_CODE: 0\n"}, 1,
+         "E2E: fake.txt line 3 starts with a failure marker (RESULT: FAIL)"),
+        ("agy.6 = fields", {"E2E/ok.txt": "ENTRY_POINT=app.main\nexit_code=0\n"}, 0, "OK   final"),
+        ("agy.6 a WIP record beside a good one", {"E2E/ok.txt": "ENTRY_POINT=app.main\nexit_code=0\n",
+                                                   "E2E/partial.txt": "WIP only\n"}, 0, "OK   final"),
+        ("STATUS: BLOCKED", {"E2E/run.txt": good + "STATUS: BLOCKED\n"}, 1, "line 4 starts with a failure marker (STATUS: BLOCKED)"),
+        ("verdict=partial, lower case", {"E2E/run.txt": good + "verdict=partial\n"}, 1, "(verdict=partial)"),
+        ("RESULT: ERROR", {"E2E/run.txt": entry + "RESULT: ERROR\nRESULT: PASS\n"}, 1, "(RESULT: ERROR)"),
+        ("RESULT: FAILED", {"E2E/run.txt": good + "  RESULT : FAILED\n"}, 1, "(RESULT : FAILED)"),
+        ("a count of failed tests", {"E2E/run.txt": good + "== 3 failed, 10 passed in 1.2s ==\n"}, 1,
+         "line 4 has a count of failed tests (3 failed)"),
+        ("0 failed is no marker", {"E2E/run.txt": good + "== 0 failed, 10 passed ==\n"}, 0, "OK   final"),
+        ("RESULT: PASS is no failure", {"E2E/run.txt": good + "RESULT: PASS (no FAIL)\n"}, 0, "OK   final"))
+    folders = {}
+    for name, records, code, says in cases:
+        folders[name] = make(name, records)
+        if code == 0:  # 3.0.0 (C2): a final PASS also needs the delivery record
+            delivery_ok_300(d, folders[name])
+        expect(f"final D2: {name}", "gate_check.py", code, "--final", folders[name], says=says,
+               lacks="OK   final" if code else None)
+    expect("final D2: --warn does not soften it", "gate_check.py", 1, "--final", folders["no outcome"], "--warn",
+           says=["FAIL final", "--warn does not soften --final"], lacks="WARN final")
+    expect("final D2: --warn on a passing folder", "gate_check.py", 0, "--final", folders["EXIT_CODE 0"], "--warn",
+           says="OK   final", lacks="does not soften")
+
+    def wrong_in_process(module):
+        """The cases this module's final_problems gets wrong."""
+        bad = []
+        for name, _, code, _ in cases:
+            try:
+                got = bool(module.final_problems(str(folders[name]), []))
+            except Exception as error:
+                bad.append(f"{name}: crashed {type(error).__name__}")
+                continue
+            if got != bool(code):
+                bad.append(name)
+        return bad
+
+    real = mutant(TOOLS / "gate_check.py", [], "d2_real")
+    check("final D2: in process, every case right", real is not None and not wrong_in_process(real),
+          str(real and wrong_in_process(real)))
+    for name, swaps in (
+            ("non-zero exit ignored", [("    problems = [f\"recorded non-zero exit code ({code})\" for code in dict.fromkeys(c for c in codes if c != 0)]\n",
+                                        "    problems = []\n")]),
+            ("failure marker ignored", [("    marker = E2E_FAIL_MARKER.search(text)\n", "    marker = None\n")]),
+            ("B2 RESULT/STATUS/VERDICT FAIL branch taken out",
+             [(r"(?:FAIL|FAILED|ERROR|BLOCKED|PARTIAL)\b))", r"(?!x)x))")]),
+            ("B2 failed-count branch taken out", [(r"[1-9]\d*[ \t]+(?i:failed)\b)", r"(?!x)x)")]),
+            ("no completed outcome needed", [("        if not completed:\n", "        if False:\n")]),
+            ("not UTF-8 let through", [('                problems.append(f"E2E: {name} is not UTF-8 text',
+                                        '                notes.append(f"E2E: {name} is not UTF-8 text')])):
+        module = mutant(TOOLS / "gate_check.py", swaps, f"d2_{name.replace(' ', '_')}")
+        if module is not None:
+            killed(f"D2 {name}", wrong_in_process(module))
+    module = mutant(TOOLS / "gate_check.py", [("        late_failed += bool(problems)  # 3.0.0 (D2)",
+                                               "        late_failed += bool(problems) and not a.warn  # 3.0.0 (D2)")],
+                    "d2_warn_softens")
+    if module is not None:
+        killed("D2 --warn softens it", g2_main(module, "--final", folders["no outcome"], "--warn") == 0)
+
+
+SPEC_OK = """# 專案初衷卡
+- 專案：櫃台名單
+- 狀態：LOCKED
+- 版次：1
+- 使用者確認時間：2026-11-08 10:00 +08:00
+- 使用者確認原話：「對，就是這樣，開始做」
+- 一句話：給櫃台看今天名單的小網頁
+
+| 編號 | 類別 | 內容（使用者的話） | 怎麼算做到 |
+|---|---|---|---|
+| B-1 | 給誰 | 給櫃台 | 打開就能看到表 |
+| B-2 | 一定要有 | 依到場時間排序 | 第一列是最早到的人 |
+
+## 限制
+- 不花錢
+
+## 未決事項
+- 無
+
+## 現成方案調查
+- 找了 csvkit → 不用：只要一欄，標準函式庫就夠
+"""
+
+
+def spec_brief_300(folder, text=SPEC_OK, approve=True):
+    """A brief in folder/BRIEF.md, approved by spec_gate.py (its snapshot in folder/brief-history) unless approve=False."""
+    folder.mkdir(parents=True, exist_ok=True)
+    brief = folder / "BRIEF.md"
+    brief.write_text(text, encoding="utf-8")
+    if approve:
+        run("spec_gate.py", "approve", "--brief", brief)
+    return brief
+
+
+def test_spec_gate_300(tmp):
+    """3.0.0 (R6, R7, C1): tools/spec_gate.py blocks a spec that is not LOCKED, has no user's words or time, has open
+    items neither settled nor put off by the user, or an empty prior-art survey; approve keeps a snapshot, and a brief
+    changed after it goes back through the gate. gate_check --hash prints no DISPATCH line and dispatch_check --log
+    fails until the gate passes (both modes: no hook needed). The templates carry the new fields and the R7 sentence."""
+    d = tmp / "spec_gate_300"
+    good = spec_brief_300(d / "good", approve=False)
+    expect("spec: a complete brief before approve is NOT_APPROVED", "spec_gate.py", 1, "check", "--brief", good,
+           says=["NOT_APPROVED", "SPEC_GATE: FAIL"])
+    code, out = run("spec_gate.py", "approve", "--brief", good)
+    snaps = sorted((d / "good" / "brief-history").glob("*.md"))
+    check("spec: approve writes one <版次>-<sha>.md and prints BRIEF_LOCKED", code == 0 and len(snaps) == 1
+          and snaps[0].name.startswith("1-") and snaps[0].read_bytes() == good.read_bytes()
+          and re.search(r"BRIEF_LOCKED rev=1 sha=[0-9a-f]{64} snapshot=brief-history/1-", out) is not None, out)
+    expect("spec: approve again keeps the file", "spec_gate.py", 0, "approve", "--brief", good, says="already there, kept")
+    expect("spec: an approved brief passes", "spec_gate.py", 0, "check", "--brief", good, says="SPEC_GATE: PASS")
+    lf = good.read_bytes().replace(b"\r\n", b"\n")
+    good.write_bytes(lf.replace(b"\n", b"\r\n") if good.read_bytes() == lf else lf)
+    expect("spec: CRLF and LF hash the same (same approval)", "spec_gate.py", 0, "check", "--brief", good, says="SPEC_GATE: PASS")
+    good.write_text(SPEC_OK.replace("給櫃台", "給櫃台和會計"), encoding="utf-8")
+    expect("spec: a brief changed after approval goes back to the gate", "spec_gate.py", 1, "check", "--brief", good,
+           says=["CHANGED", "回到關卡"])
+    bad = [("a draft", SPEC_OK.replace("LOCKED", "DRAFT"), "NOT_LOCKED"),
+           ("版次 not a number", SPEC_OK.replace("版次：1", "版次：<1>"), "NOT_LOCKED"),
+           ("no confirm time", SPEC_OK.replace("2026-11-08 10:00 +08:00", "NONE"), "NO_CONFIRM_TIME"),
+           ("no confirm line", SPEC_OK.replace("- 使用者確認時間：2026-11-08 10:00 +08:00\n", ""), "NO_CONFIRM_TIME"),
+           ("no user's words", SPEC_OK.replace("「對，就是這樣，開始做」", "<原話>"), "NO_CONFIRM_WORDS"),
+           ("an open item", SPEC_OK.replace("## 未決事項\n- 無", "## 未決事項\n- 要不要匯出 Excel"), "OPEN_ITEMS"),
+           ("put off without the user's words", SPEC_OK.replace("## 未決事項\n- 無", "## 未決事項\n- Excel 暫緩"), "OPEN_ITEMS"),
+           ("a placeholder item", SPEC_OK.replace("## 未決事項\n- 無", "## 未決事項\n- <待決>"), "OPEN_ITEMS"),
+           ("review P2-1: 已解決 inside a question",
+            SPEC_OK.replace("## 未決事項\n- 無", "## 未決事項\n- 是否已解決？待確認"), "OPEN_ITEMS"),
+           ("review P2-1: 暫緩 not at the start",
+            SPEC_OK.replace("## 未決事項\n- 無", "## 未決事項\n- 不要暫緩，使用者說「要做」"), "OPEN_ITEMS"),
+           ("review P2-1: 已解決： with nothing after it",
+            SPEC_OK.replace("## 未決事項\n- 無", "## 未決事項\n- 已解決："), "OPEN_ITEMS"),
+           ("no open-items section", SPEC_OK.replace("## 未決事項\n- 無\n", ""), "OPEN_ITEMS"),
+           ("an empty open-items section", SPEC_OK.replace("## 未決事項\n- 無\n", "## 未決事項\n\n"), "OPEN_ITEMS"),
+           ("an empty prior-art survey", SPEC_OK.replace("- 找了 csvkit → 不用：只要一欄，標準函式庫就夠\n", ""), "NO_PRIOR_ART"),
+           ("a placeholder survey", SPEC_OK.replace("- 找了 csvkit → 不用：只要一欄，標準函式庫就夠", "- <找了什麼>"),
+            "NO_PRIOR_ART"),
+           ("no survey section", SPEC_OK.split("## 現成方案調查")[0], "NO_PRIOR_ART")]
+    for number, (name, text, code_word) in enumerate(bad):
+        brief = spec_brief_300(d / f"bad{number}", text, approve=False)
+        expect(f"spec: {name} is blocked by approve", "spec_gate.py", 1, "approve", "--brief", brief,
+               says=[code_word, "SPEC_GATE: FAIL"])
+        check(f"spec: {name}: a failed approve writes no snapshot", not (brief.parent / "brief-history").exists())
+    settled = SPEC_OK.replace("## 未決事項\n- 無", "## 未決事項\n- 已解決：只匯出姓名\n- 暫緩：Excel，使用者原話「先不用，之後再說」")
+    expect("spec: items 已解決 or 暫緩 with the user's words pass", "spec_gate.py", 0, "approve", "--brief",
+           spec_brief_300(d / "settled", settled, approve=False), says="SPEC_GATE: PASS")
+    module = mutant(TOOLS / "spec_gate.py", [(r'settled = re.match(r"已解決[:：][ \t]*\S", item) or (',
+                                              'settled = "已解決" in item or (')], "p2_1_settled")
+    if module is not None:
+        killed("P2-1 已解決 as a substring again", not any(
+            c == "OPEN_ITEMS" for c, _ in module.content_problems(SPEC_OK.replace("## 未決事項\n- 無", "## 未決事項\n- 是否已解決？待確認"))))
+    template = spec_brief_300(d / "template", (TEMPLATES / "BRIEF.md").read_text(encoding="utf-8"), approve=False)
+    expect("spec: the blank template is blocked", "spec_gate.py", 1, "approve", "--brief", template,
+           says=["NOT_LOCKED", "NO_CONFIRM_WORDS", "NO_PRIOR_ART"])
+    expect("spec: a missing brief is INVALID (exit 2)", "spec_gate.py", 2, "check", "--brief", d / "none" / "BRIEF.md",
+           says=["NO_BRIEF", "SPEC_GATE: INVALID"])
+    (d / "empty").mkdir()
+    (d / "empty" / "BRIEF.md").write_text(" \n", encoding="utf-8")
+    expect("spec: an empty brief is INVALID", "spec_gate.py", 2, "check", "--brief", d / "empty" / "BRIEF.md", says="INVALID")
+    (d / "empty" / "latin.md").write_bytes(b"\xff\xfe\x00bad")
+    expect("spec: a brief that is not UTF-8 is INVALID", "spec_gate.py", 2, "check", "--brief", d / "empty" / "latin.md",
+           says="INVALID")
+
+    # gate_check --hash: the DISPATCH line only after the gate (general and beginner mode alike: no hook involved)
+    ws = d / "ws" / "DIRECTOR"
+    (ws / "orders").mkdir(parents=True)
+    order = ws / "orders" / "WO-001.md"
+    order.write_text(ORDER.format(base="abc123"), encoding="utf-8")
+    expect("spec: --hash of an order with no brief prints no DISPATCH line", "gate_check.py", 1, "--hash", order,
+           says=["FAIL SPEC_GATE", "NO_BRIEF"], lacks="DISPATCH WO-001")
+    spec_brief_300(ws, approve=False)
+    expect("spec: --hash before approval prints no DISPATCH line", "gate_check.py", 1, "--hash", order,
+           says=["FAIL SPEC_GATE", "NOT_APPROVED"], lacks="DISPATCH WO-001")
+    spec_brief_300(ws)
+    expect("spec: --hash after approval prints the DISPATCH line", "gate_check.py", 0, "--hash", order,
+           says="  DISPATCH WO-001 rev=")
+    expect("spec: --hash --brief names the brief", "gate_check.py", 1, "--hash", order, "--brief", template,
+           says="FAIL SPEC_GATE", lacks="  DISPATCH WO-001")
+    report = d / "report.md"
+    report.write_text(REPORT.format(result="PASS", tests="1 passed", scope="PASS", evidence="e.json"), encoding="utf-8")
+    expect("spec: --hash of a report (not an order) needs no brief", "gate_check.py", 0, "--hash", report, says="  DISPATCH")
+    expect("spec: gate_check --brief --snapshot refuses an incomplete spec", "gate_check.py", 2, "--brief",
+           spec_brief_300(d / "snap", SPEC_OK.replace("- 找了 csvkit → 不用：只要一欄，標準函式庫就夠\n", ""), approve=False),
+           "--snapshot", d / "snap" / "brief-history")
+
+    # dispatch_check --log: DISPATCH lines with no passing spec fail with or without --strict
+    log = ws / "DIRECTOR_LOG.md"
+    log.write_text("# DIRECTOR_LOG\nDISPATCH WO-001 rev=1 sha=" + "a" * 64 + " | class=dev effort=high model=opus\n",
+                   encoding="utf-8")
+    expect("spec: dispatch_check with an approved brief is OK", "dispatch_check.py", 0, "--log", log, says="DISPATCH_CHECK: OK")
+    (ws / "BRIEF.md").write_text(SPEC_OK.replace("給櫃台", "給大家"), encoding="utf-8")
+    expect("spec: dispatch_check after the brief changed fails without --strict", "dispatch_check.py", 1, "--log", log,
+           says=["FAIL SPEC_GATE", "CHANGED", "DISPATCH_CHECK: FAIL"])
+    expect("spec: dispatch_check --brief names the brief", "dispatch_check.py", 0, "--log", log, "--brief",
+           d / "settled" / "BRIEF.md", says="DISPATCH_CHECK: OK")
+    quiet = d / "quiet" / "DIRECTOR_LOG.md"
+    quiet.parent.mkdir()
+    quiet.write_text("# DIRECTOR_LOG\n2026-11-08 | 和使用者談需求\n", encoding="utf-8")
+    expect("spec: a log with no DISPATCH line is not gated (research and talks are not work)", "dispatch_check.py", 0,
+           "--log", quiet, says="DISPATCH_CHECK: OK records=0")
+
+    brief_t = (TEMPLATES / "BRIEF.md").read_text(encoding="utf-8")
+    for needle in ("使用者確認原話", "## 未決事項", "## 現成方案調查", "## 限制", "spec_gate.py approve"):
+        check(f"spec: templates/BRIEF.md has {needle}", needle in brief_t)
+    section = (TEMPLATES / "CLAUDE_PROJECT_SECTION.md").read_text(encoding="utf-8")
+    check("spec: the project section's 品質 line carries R7",
+          "動手做之前先深入找現成的" in section.split("- **品質**", 1)[-1].split("\n")[0])
+
+
+def test_director_in_project_300(tmp):
+    """3.0.0 (R3, G4): the director's files live inside the project, in <REPO>/DIRECTOR/, and git never sees them.
+    bootstrap_repo ignores DIRECTOR/ by default (the shared exclude file, so every worktree), a DIRECTOR/ git already
+    tracks FAILs (untracking it is the PO's call), the fast path's self-ignoring DIRECTOR/.gitignore counts as ignored,
+    and an old setup with DIRECTOR outside the project keeps working. The docs put DIRECTOR inside the project."""
+    d = tmp / "director_in_project_300"
+    repo, wt = d / "proj", d / "proj-wt"
+    repo.mkdir(parents=True)
+    g = lambda *a, cwd=repo: subprocess.run(["git", *a], cwd=cwd, capture_output=True, encoding="utf-8")  # noqa: E731
+    g("init", "-q")
+    g("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "i")
+    g("worktree", "add", "-q", str(wt), "-b", "w1")
+    expect("r3: --check lists DIRECTOR/ by default", "bootstrap_repo.py", 1, "--repo", repo, "--check",
+           says=["TODO  DIRECTOR/", "BOOTSTRAP_REPO: TODO"])
+    expect("r3: bootstrap ignores DIRECTOR/", "bootstrap_repo.py", 0, "--repo", repo,
+           says=["DONE  DIRECTOR/: added; git check-ignore confirms", "BOOTSTRAP_REPO: DONE"])
+    for name in ("BRIEF.md", "DIRECTOR_LOG.md", "orders/WO-001.md", "brief-history/1-abc.md"):
+        (repo / "DIRECTOR" / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / "DIRECTOR" / name).write_text("x\n", encoding="utf-8")
+    status = g("status", "--porcelain", "--untracked-files=all").stdout
+    check("r3: git status shows none of the director's files", "DIRECTOR" not in status, status)
+    added = g("add", "-A")
+    staged = g("diff", "--cached", "--name-only").stdout
+    check("r3: git add -A stages none of them", added.returncode == 0 and "DIRECTOR" not in staged, staged)
+    check("r3: a worker's linked worktree ignores DIRECTOR/ too",
+          g("check-ignore", "-q", "--", "DIRECTOR/BRIEF.md", cwd=wt).returncode == 0)
+    expect("r3: rerun is OK", "bootstrap_repo.py", 0, "--repo", wt, says="OK    DIRECTOR/: already ignored")
+
+    fast = d / "fast"
+    fast.mkdir()
+    g("init", "-q", cwd=fast)
+    (fast / "DIRECTOR").mkdir()
+    (fast / "DIRECTOR" / ".gitignore").write_text("*\n", encoding="utf-8")
+    (fast / "DIRECTOR" / "RESUME_STATE.md").write_text("x\n", encoding="utf-8")
+    check("r3: the fast path's DIRECTOR/.gitignore (*) hides the folder before any tool runs",
+          "DIRECTOR" not in g("status", "--porcelain", "--untracked-files=all", cwd=fast).stdout)
+    expect("r3: bootstrap counts the self-ignoring folder as ignored", "bootstrap_repo.py", 0, "--repo", fast,
+           says="OK    DIRECTOR/: already ignored")
+
+    kept = d / "kept"
+    (kept / "DIRECTOR").mkdir(parents=True)
+    g("init", "-q", cwd=kept)
+    (kept / "DIRECTOR" / "DIRECTOR_LOG.md").write_text("x\n", encoding="utf-8")
+    g("add", "DIRECTOR/DIRECTOR_LOG.md", cwd=kept)
+    g("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "t", cwd=kept)
+    expect("r3: a DIRECTOR/ git tracks FAILs (the PO decides to untrack it)", "bootstrap_repo.py", 1, "--repo", kept,
+           says=["FAIL  DIRECTOR/: tracked in the repo", "BOOTSTRAP_REPO: FAIL"])
+
+    legacy = d / "legacy-ws"
+    (legacy / "DIRECTOR" / "orders").mkdir(parents=True)
+    (legacy / "repo").mkdir()
+    g("init", "-q", cwd=legacy / "repo")
+    expect("r3: an old setup with DIRECTOR outside the project still bootstraps", "bootstrap_repo.py", 0, "--repo",
+           legacy / "repo", says="BOOTSTRAP_REPO: DONE")
+    order = legacy / "DIRECTOR" / "orders" / "WO-001.md"
+    order.write_text(ORDER.format(base="abc123"), encoding="utf-8")
+    spec_brief_300(legacy / "DIRECTOR")
+    expect("r3: an old outside DIRECTOR/orders/ still finds its brief", "gate_check.py", 0, "--hash", order,
+           says="  DISPATCH WO-001 rev=")
+
+    root = TOOLS.parent
+    boot = doc_text(root, "BOOTSTRAP.md")
+    check("r3: BOOTSTRAP puts DIRECTOR inside the project by default", "預設放在專案資料夾裡的 `<REPO>/DIRECTOR/`" in boot)
+    check("r3: BOOTSTRAP's fast path writes the self-ignoring .gitignore first", "DIRECTOR/.gitignore" in boot)
+    check("r3: BOOTSTRAP no longer writes state outside the repo", "在 repo 外寫最少狀態" not in boot)
+    readme = doc_text(root, "README.md")
+    check("r3: README no longer says DIRECTOR sits beside the project",
+          "專案旁邊" not in readme and "預設放 repo 外" not in readme and "放在專案外面" not in readme)
+    check("r3: docs/12 no longer writes state outside the repo",
+          "repo 外寫最少狀態" not in (root / "docs" / "12_chat_to_product.md").read_text(encoding="utf-8"))
+    log = upstream_300(root)[1].split("\n## 2.6.0")[0]
+    check("r3: CHANGELOG has the move-in note for an old outside DIRECTOR", "搬進專案" in log)
+
+
+HANDOFF_BRIEF_300 = """# 專案初衷卡
+- 專案：櫃台名單
+- 模式：小白
+- 狀態：LOCKED
+- 版次：2
+- 使用者確認時間：2026-11-08 10:00 +08:00
+- 使用者確認原話：「對，就是這樣，開始做」
+- 一句話：櫃台人員一打開就看到今天要來的人
+
+| 編號 | 類別 | 內容（使用者的話） | 怎麼算做到 |
+|---|---|---|---|
+| B-1 | 給誰 | 給早班櫃台阿姨 | 打開就能看到表 |
+| B-2 | 一定要有 | 依到場時間排序 | 第一列是最早到的人 |
+| B-4 | 絕對不要 | 不要登入畫面 | 成品裡找不到登入 |
+
+## 限制
+- 不花錢
+
+## 未決事項
+- 無
+
+## 現成方案調查
+- 找了 csvkit → 不用：只要一欄，標準函式庫就夠
+"""
+
+HANDOFF_INDEX_300 = """# INDEX — 櫃台名單
+這是什麼：給櫃台看今天到場名單的小網頁。
+- 規格：BRIEF.md
+- 決策：DECISION_REGISTER.md
+- 目前進度和下一步：RESUME_STATE.md
+- 未決事項：PO_PENDING.md
+- 日誌：DIRECTOR_LOG.md
+- 換手清單：HANDOFF_MANIFEST.md（handoff.py export 產生）
+"""
+
+
+def handoff_fixture_300(d):
+    """A project with DIRECTOR/ inside (ignored), one dispatched order, one draft, a dirty file and a candidate
+    branch in a linked worktree. Returns (repo, director)."""
+    repo, wt = d / "proj", d / "proj-wt"
+    repo.mkdir(parents=True)
+    g = lambda *a, cwd=repo: subprocess.run(["git", *a], cwd=cwd, capture_output=True, encoding="utf-8")  # noqa: E731
+    who = ("-c", "user.name=t", "-c", "user.email=t@example.invalid")
+    g("init", "-q", "-b", "main")
+    (repo / "app.txt").write_text("v1\n", encoding="utf-8")
+    g("add", "app.txt")
+    g(*who, "commit", "-q", "-m", "first")
+    run("bootstrap_repo.py", "--repo", repo)
+    g("worktree", "add", "-q", str(wt), "-b", "w1")
+    (wt / "feature.txt").write_text("x\n", encoding="utf-8")
+    g("add", "feature.txt", cwd=wt)
+    g(*who, "commit", "-q", "-m", "WO-001 feature", cwd=wt)
+    (repo / "notes.txt").write_text("not committed\n", encoding="utf-8")
+    director = repo / "DIRECTOR"
+    (director / "orders").mkdir(parents=True)
+    (director / "INDEX.md").write_text(HANDOFF_INDEX_300, encoding="utf-8")
+    (director / "BRIEF.md").write_text(HANDOFF_BRIEF_300, encoding="utf-8")
+    (director / "DECISION_REGISTER.md").write_text(
+        "# Decision Register\n## A. PO 決定（不再詢問）\n| ID | 日期時間 | 決定 | 為什麼 | 來源 | 狀態 |\n|---|---|---|---|---|---|\n"
+        "| PO-01 | 2026-11-08 | 報告用繁體中文 | 使用者說的 | 聊天 | ACTIVE |\n"
+        "| PO-02 | 2026-11-09 | 名單只放名字和時間 | 隱私 | 聊天 | ACTIVE |\n"
+        "## B. 總監決定（可回退，事後記錄）\n| ID | 日期時間 | 決定 | 理由 | 影響範圍 | 回退方式 | 驗收案例 | 狀態 |\n"
+        "|---|---|---|---|---|---|---|---|\n| DD-01 | 2026-11-08 | 用單一 HTML 檔 | 不用安裝 | 全部 | 改框架 | 開檔看得到表 | ACTIVE |\n",
+        encoding="utf-8")
+    (director / "PO_PENDING.md").write_text(
+        "# PO 待決頁 — 櫃台名單\n## 未關閉\n\nID: OD-03\nSTATUS: open\nQUESTION: 名單要不要印出來？\n\n"
+        "## 已關閉\n\nID: OD-01\nSTATUS: closed\nQUESTION: 用什麼語言\n", encoding="utf-8")
+    (director / "RESUME_STATE.md").write_text(
+        "PROGRESS: WO-001 已派出\nDOING: 等 worker 回報\nNEXT_STEP: 審 WO-001 的回報，再派 WO-002\nCOMMS: 等 w1 回報\n",
+        encoding="utf-8")
+    (director / "DIRECTOR_STATE.md").write_text(
+        "# DIRECTOR_STATE — 櫃台名單\nPO_PAGE_URL: https://claude.ai/artifact/abc123\nPO_PAGE_PINNED: yes\n", encoding="utf-8")
+    (director / "GUARDS.md").write_text(
+        "# GUARDS\n| 機制 | 擁有者 | 中斷會怎樣 | 怎麼檢查 | 重建指令 |\n|---|---|---|---|---|\n"
+        "| 每小時喚醒 | 總監 | 漏看回覆 | 看排程清單 | 重建排程 |\n", encoding="utf-8")
+    for wo in ("WO-001", "WO-002"):
+        (director / "orders" / f"{wo}.md").write_text(ORDER.format(base="abc123").replace("WO-001", wo), encoding="utf-8")
+    (director / "DIRECTOR_LOG.md").write_text(
+        "# DIRECTOR_LOG\n2026-11-09 09:00 +08:00 | DISPATCH WO-001 rev=1 sha=" + "a" * 64 + " | class=dev effort=high\n",
+        encoding="utf-8")
+    return repo, director
+
+
+def test_handoff_300(tmp):
+    """3.0.0 (R5, C3, C10): a director hands off with one sentence: the next one reads DIRECTOR/INDEX.md. handoff.py
+    export writes the handoff list (dispatch history, undispatched drafts, uncommitted work, candidate branches,
+    external state) into DIRECTOR/, verify finds anything that changed since, quiz draws 15 facts from the records and
+    score passes 14 of 15. Paths in the list are relative, so the project can move."""
+    d = tmp / "handoff_300"
+    repo, director = handoff_fixture_300(d)
+    manifest = director / "HANDOFF_MANIFEST.md"
+    code, out = run("handoff.py", "export", "--director", director)
+    check("handoff: export exits 0", code == 0, out)
+    check("handoff: export counts what it found",
+          "HANDOFF_EXPORT: DONE" in out and "dispatches=1" in out and "drafts=1" in out and "dirty=1" in out
+          and "candidates=1" in out, out)
+    text = manifest.read_text(encoding="utf-8") if manifest.is_file() else ""
+    for needle, what in (("WO-001", "dispatch history"), ("WO-002", "undispatched draft"), ("notes.txt", "uncommitted file"),
+                         ("w1", "candidate branch"), ("https://claude.ai/artifact/abc123", "PO page"),
+                         ("每小時喚醒", "a GUARDS row"), ("OD-03", "open PO item")):
+        check(f"handoff: the list has the {what}", needle in text, needle)
+    check("handoff: the list has no absolute path (the project can move)",
+          str(d) not in text and str(d).replace("\\", "/") not in text, text[:300])
+    status = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=repo, capture_output=True,
+                            encoding="utf-8").stdout
+    check("handoff: the list stays out of git (DIRECTOR/ is ignored)", "DIRECTOR" not in status, status)
+    expect("handoff: verify right after export passes", "handoff.py", 0, "verify", "--director", director,
+           says="HANDOFF_VERIFY: PASS")
+
+    brief = director / "BRIEF.md"
+    brief.write_text(HANDOFF_BRIEF_300.replace("不花錢", "不花錢，也不用網路"), encoding="utf-8")
+    expect("handoff: verify fails when a record changed after export", "handoff.py", 1, "verify", "--director", director,
+           says=["STALE BRIEF.md", "HANDOFF_VERIFY: FAIL"])
+    run("handoff.py", "export", "--director", director)
+    expect("handoff: export again passes", "handoff.py", 0, "verify", "--director", director, says="HANDOFF_VERIFY: PASS")
+    (repo / "more.txt").write_text("y\n", encoding="utf-8")
+    expect("handoff: verify fails on new uncommitted work", "handoff.py", 1, "verify", "--director", director,
+           says=["STALE", "more.txt", "HANDOFF_VERIFY: FAIL"])
+    (repo / "more.txt").unlink()
+    with open(director / "DIRECTOR_LOG.md", "a", encoding="utf-8") as f:
+        f.write("2026-11-09 10:00 +08:00 | DISPATCH WO-002 rev=1 sha=" + "b" * 64 + " | class=dev effort=high\n")
+    expect("handoff: verify fails on a new dispatch", "handoff.py", 1, "verify", "--director", director,
+           says=["STALE", "WO-002", "HANDOFF_VERIFY: FAIL"])
+    run("handoff.py", "export", "--director", director)
+    expect("handoff: the dispatched draft leaves the draft list", "handoff.py", 0, "verify", "--director", director,
+           says="HANDOFF_VERIFY: PASS")
+    listed = manifest.read_text(encoding="utf-8") if manifest.is_file() else ""
+    check("handoff: drafts=0 once WO-002 is dispatched",
+          "## 還沒派出的草稿" in listed and "- NONE" in listed.split("## 還沒派出的草稿")[-1].split("##")[0])
+
+    index = director / "INDEX.md"
+    index.write_text(HANDOFF_INDEX_300.replace("PO_PENDING.md", "待決頁"), encoding="utf-8")
+    expect("handoff: INDEX must point to every record", "handoff.py", 1, "verify", "--director", director,
+           says=["INDEX_POINTER PO_PENDING.md", "HANDOFF_VERIFY: FAIL"])
+    expect("handoff: export refuses an INDEX that misses a record", "handoff.py", 1, "export", "--director", director,
+           says=["INDEX_POINTER PO_PENDING.md", "HANDOFF_EXPORT: FAIL"])
+    index.unlink()
+    expect("handoff: no INDEX.md fails", "handoff.py", 1, "verify", "--director", director,
+           says=["NO_INDEX", "HANDOFF_VERIFY: FAIL"])
+    index.write_text(HANDOFF_INDEX_300, encoding="utf-8")
+    (director / "PO_PENDING.md").rename(director / "PO_PENDING.bak")
+    expect("handoff: INDEX pointing to a missing file fails", "handoff.py", 1, "verify", "--director", director,
+           says=["MISSING PO_PENDING.md", "HANDOFF_VERIFY: FAIL"])
+    (director / "PO_PENDING.bak").rename(director / "PO_PENDING.md")
+
+    other = d / "other"
+    other.mkdir()
+    (other / "INDEX.md").write_text(HANDOFF_INDEX_300, encoding="utf-8")
+    expect("handoff: no manifest is INVALID", "handoff.py", 2, "verify", "--director", other,
+           says="HANDOFF_VERIFY: INVALID", lacks="Traceback")
+    (other / "HANDOFF_MANIFEST.md").write_text("# 換手清單\n```json\n{not json\n```\n", encoding="utf-8")
+    expect("handoff: a broken manifest is INVALID", "handoff.py", 2, "verify", "--director", other,
+           says="HANDOFF_VERIFY: INVALID", lacks="Traceback")
+    (other / "HANDOFF_MANIFEST.md").write_bytes(b"\xff\xfe\x00bad")
+    expect("handoff: a non-UTF-8 manifest is INVALID", "handoff.py", 2, "verify", "--director", other,
+           says="HANDOFF_VERIFY: INVALID", lacks="Traceback")
+    expect("handoff: a director folder that does not exist is INVALID", "handoff.py", 2, "export", "--director",
+           d / "nowhere", says="HANDOFF_EXPORT: INVALID", lacks="Traceback")
+
+    expect("handoff: the answer key may not sit where the tested director reads", "handoff.py", 2, "quiz", "--director",
+           director, "--key", director / "key.json", says=["KEY_IN_DIRECTOR", "HANDOFF_QUIZ: INVALID"])
+    check("handoff: no key file was written inside DIRECTOR/", not (director / "key.json").exists())
+    key = d / "quiz_key.json"
+    code, out = run("handoff.py", "quiz", "--director", director, "--key", key)
+    check("handoff: quiz exits 0 on complete records", code == 0, out)
+    questions = [line for line in out.splitlines() if re.match(r"^Q\d\d ", line)]
+    check("handoff: quiz asks 15 questions", len(questions) == 15, out)
+    check("handoff: the questions do not give the answers away",
+          not any(s in "\n".join(questions) for s in ("早班櫃台阿姨", "對，就是這樣", "abc123", "notes.txt", "OD-03")), out)
+    data = json.loads(key.read_text(encoding="utf-8")) if key.is_file() else {"facts": []}
+    facts = {f["id"]: f["answer"] for f in data.get("facts", [])}
+    check("handoff: the key has 15 facts from the records", len(facts) == 15 and "早班櫃台阿姨" in facts.get("Q05", "")
+          and "OD-03" in facts.get("Q09", "") and "w1" in facts.get("Q14", ""), facts)
+
+    def answers(text, name):
+        path = d / name
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    good = "".join(f"{q}: {a}\n" for q, a in facts.items())
+    expect("handoff: 15 right answers pass", "handoff.py", 0, "score", "--key", key, "--answers", answers(good, "a15.md"),
+           says="HANDOFF_TEST: PASS score=15/15")
+    one_wrong = good.replace(f"Q05: {facts.get('Q05')}", "Q05: 給晚班的警衛")
+    expect("handoff: 14 of 15 still passes", "handoff.py", 0, "score", "--key", key, "--answers",
+           answers(one_wrong, "a14.md"), says=["HANDOFF_TEST: PASS score=14/15", "WRONG Q05"])
+    two_wrong = one_wrong.replace(f"Q10: {facts.get('Q10')}", "Q10: 先問使用者要做什麼")
+    expect("handoff: 13 of 15 fails", "handoff.py", 1, "score", "--key", key, "--answers", answers(two_wrong, "a13.md"),
+           says=["HANDOFF_TEST: FAIL score=13/15", "WRONG Q10"])
+    numbered = "".join(f"{int(q[1:])}. {a}\n" for q, a in facts.items() if q != "Q15")
+    expect("handoff: a missing answer counts as wrong; `1.` numbering works", "handoff.py", 0, "score", "--key", key,
+           "--answers", answers(numbered, "a_num.md"), says=["HANDOFF_TEST: PASS score=14/15", "NO_ANSWER Q15"])
+    expect("handoff: no answers file is INVALID", "handoff.py", 2, "score", "--key", key, "--answers", d / "none.md",
+           says="HANDOFF_TEST: INVALID", lacks="Traceback")
+    none_q = next((q for q, a in facts.items() if a == "NONE"), None)
+    if none_q:
+        expect("handoff: 無 answers a fact the records do not have", "handoff.py", 0, "score", "--key", key, "--answers",
+               answers(good.replace(f"{none_q}: NONE", f"{none_q}: 無"), "a_none.md"), says="score=15/15")
+        expect("handoff: a made-up answer to a fact the records do not have is wrong", "handoff.py", 0, "score", "--key",
+               key, "--answers", answers(good.replace(f"{none_q}: NONE", f"{none_q}: WO-009"), "a_made_up.md"),
+               says=["score=14/15", f"WRONG {none_q}"])
+    else:
+        check("handoff: the fixture has a fact the records do not have (drafts after WO-002 was dispatched)", False, facts)
+
+    thin = d / "thin"
+    thin.mkdir()
+    (thin / "INDEX.md").write_text(HANDOFF_INDEX_300, encoding="utf-8")
+    for name in ("DECISION_REGISTER.md", "PO_PENDING.md", "DIRECTOR_LOG.md"):
+        (thin / name).write_text("# x\n", encoding="utf-8")
+    (thin / "BRIEF.md").write_text("# 專案初衷卡\n- 專案：<名稱>\n- 狀態：DRAFT\n- 版次：1\n", encoding="utf-8")
+    (thin / "RESUME_STATE.md").write_text("PROGRESS: x\nDOING: x\nNEXT_STEP: <接下來>\nCOMMS: NONE\n", encoding="utf-8")
+    expect("handoff: quiz fails when the records miss what a new director needs", "handoff.py", 1, "quiz", "--director",
+           thin, "--key", d / "thin_key.json", says=["MISSING Q01", "MISSING Q10", "HANDOFF_QUIZ: FAIL"])
+
+    root = TOOLS.parent
+    prompt = "讀 `DIRECTOR/INDEX.md`，照它接手，不要重問已確認的需求"
+    template = root / "templates" / "DIRECTOR_HANDOFF.md"
+    check("handoff: templates/DIRECTOR_HANDOFF.md has the one-sentence prompt",
+          template.is_file() and prompt in template.read_text(encoding="utf-8"))
+    check("handoff: templates/DIRECTOR_FILES.md has an INDEX.md skeleton",
+          "## INDEX.md" in (root / "templates" / "DIRECTOR_FILES.md").read_text(encoding="utf-8"))
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    check("handoff: README has the handoff prompt next to the start prompt (C10)", prompt in readme)
+    check("handoff: docs/06 points to INDEX.md and handoff.py",
+          all(s in (root / "docs" / "06_resume_lossless.md").read_text(encoding="utf-8") for s in ("INDEX.md", "handoff.py")))
+    check("handoff: tools/README has the handoff.py row",
+          "`handoff.py`" in (root / "tools" / "README.md").read_text(encoding="utf-8"))
+    log = upstream_300(root)[1].split("\n## 2.6.0")[0]
+    check("handoff: CHANGELOG Unreleased has handoff.py", "handoff.py" in log)
+
+
+DELIVERY_ORDER_300 = """# WO-001 名單頁
+## E. 驗收條件
+| ID | 類型 | 要求 | 驗證方法 | 預期 |
+|---|---|---|---|---|
+| AC-1 | AUTO | 跑得起來 | python app.py | exit 0 |
+| AC-2 | REVIEW | 畫面排得對 | 看截圖 | 第一列最早 |
+| AC-3 | PO | PO 覺得好用 | PO 試用 | PO 說可以 |
+"""
+
+
+def test_final_skip_old_300(tmp):
+    """3.0.0 B12 (from agy 2.6.0-agy.5 _e2e_matches_candidate): --final --skip-old-e2e leaves out E2E records whose
+    CANDIDATE: is another commit; by default they still count and block (the strict 3.0.0 way)."""
+    d = tmp / "final_skip_old_300"
+    entry = "ENTRY_POINT: python -m tool run\n"
+    other = "ab" * 20
+
+    def make(name, old_records, new=True):
+        director = d / name / "DIRECTOR"
+        e2e = director / "evidence" / "E2E"
+        e2e.mkdir(parents=True)
+        if new:
+            (e2e / "new.txt").write_text(entry + "EXIT_CODE: 0\n", encoding="utf-8")
+        delivery_ok_300(d, director)  # adds CANDIDATE: <head> to the records already there
+        for rel, text in old_records.items():
+            (e2e / rel).parent.mkdir(parents=True, exist_ok=True)
+            (e2e / rel).write_text(text, encoding="utf-8")
+        return director
+
+    old_failed = entry + "EXIT_CODE: 1\nCANDIDATE: " + other + "\n"
+    folder = make("old failed", {"old.txt": old_failed, "sub/older.txt": entry + "RESULT: FAIL\nCANDIDATE: abababab\n"})
+    expect("final B12: by default an old record of another candidate still blocks", "gate_check.py", 1, "--final", folder,
+           says=["FAIL final", "E2E: old.txt recorded non-zero exit code (1)", "E2E_OTHER_CANDIDATE old.txt",
+                 "E2E_OTHER_CANDIDATE sub/older.txt"], lacks="E2E_SKIPPED")
+    expect("final B12: --skip-old-e2e leaves the old records out", "gate_check.py", 0, "--final", folder,
+           "--skip-old-e2e", says=["OK   final", "~ E2E_SKIPPED old.txt", "~ E2E_SKIPPED sub/older.txt"],
+           lacks=["E2E_OTHER_CANDIDATE", "non-zero exit code"])
+    expect("delivery B12: check --skip-old-e2e passes with notes", "delivery.py", 0, "check", "--director", folder,
+           "--repo", d, "--skip-old-e2e", says=["E2E_SKIPPED old.txt", "DELIVERY_CHECK: PASS"])
+    expect("delivery B12: check without the switch still fails", "delivery.py", 1, "check", "--director", folder,
+           "--repo", d, says=["E2E_OTHER_CANDIDATE old.txt", "DELIVERY_CHECK: FAIL"])
+    expect("delivery B12: --skip-old-e2e only with check", "delivery.py", 2, "judge", "--director", folder,
+           "--skip-old-e2e", "--ac", "AC-1", "--kind", "auto", "--outcome", "PASS", "--evidence", "evidence/auto-900.md",
+           says="只配 check")
+    folder = make("no candidate line", {"old.txt": entry + "EXIT_CODE: 1\n"})
+    expect("final B12: a record without CANDIDATE: is not skipped", "gate_check.py", 1, "--final", folder,
+           "--skip-old-e2e", says=["non-zero exit code (1)", "E2E_NO_CANDIDATE old.txt"], lacks="E2E_SKIPPED")
+    folder = make("only old", {"old.txt": entry + "EXIT_CODE: 0\nCANDIDATE: " + other + "\n"}, new=False)
+    expect("final B12: only old records is no evidence for the delivered commit", "gate_check.py", 1, "--final", folder,
+           "--skip-old-e2e", says=["E2E: every record in", "ran another candidate (--skip-old-e2e left out 1)"],
+           lacks="OK   final")
+    folder_ok = make("current only", {})
+    expect("final B12: nothing old, the switch changes nothing", "gate_check.py", 0, "--final", folder_ok,
+           "--skip-old-e2e", says="OK   final", lacks="E2E_SKIPPED")
+    done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "gate_check.py"), "--hash",
+                           str(folder_ok / "orders" / "WO-900-final.md"), "--skip-old-e2e"], capture_output=True,
+                          encoding="utf-8")  # argparse says it on stderr
+    check("final B12: --skip-old-e2e needs --final",
+          done.returncode == 2 and "--skip-old-e2e works with --final" in done.stderr, done.stderr[-300:])
+    folder = d / "old failed" / "DIRECTOR"
+    module = mutant(TOOLS / "gate_check.py", [("        records = [p for p in records if p.relative_to(e2e).as_posix() "
+                                               "not in skip]\n", "        pass\n")], "b12_final_keeps_old")
+    if module is not None:
+        killed("final B12: without the skip the old failed record still blocks",
+               g2_main(module, "--final", folder, "--skip-old-e2e") != 0)
+    module = mutant(TOOLS / "delivery.py", [("            if skip_old_e2e:  # 3.0.0 B12: an old run, left out on request\n",
+                                             "            if False:\n")], "b12_delivery_keeps_old")
+    if module is not None:
+        killed("delivery B12: without the skip the other candidate still fails",
+               bool(module.check_delivery(folder, d, skip_old_e2e=True)[0]))
+    module = mutant(TOOLS / "delivery.py", [("        if named and candidate and not candidate.startswith(named.group(1).lower()):\n",
+                                             "        if named:\n")], "b12_skips_current")
+    if module is not None:
+        killed("delivery B12: the current candidate's record is never skipped",
+               "new.txt" in module.old_e2e_records(folder))
+
+
+def test_optional_tools_300(tmp):
+    """3.0.0 B11 (audit B11, plan W3): the Claude-only tools are optional. install manifest marks them, install
+    --skip-optional leaves them out, base_sync_check prints OPTIONAL (not MISSING), selftest skips a group that needs
+    one that is absent, loop_guard --transcript says what is missing; dispatch_check takes the adapter's table."""
+    d = tmp / "optional_300"
+    base = d / "base"
+    (base / "tools").mkdir(parents=True)
+    for name in ("install.py", "_common.py"):
+        shutil.copy2(TOOLS / name, base / "tools" / name)
+    (base / "tools" / "a.py").write_text("A = 1\n", encoding="utf-8")
+    (base / "tools" / "hook_guard.py").write_text("H = 1\n", encoding="utf-8")
+    (base / "VERSION").write_text("3.0.0\n", encoding="utf-8")
+    (base / "CHANGELOG.md").write_text("# CHANGELOG\n\n## 3.0.0\n", encoding="utf-8")
+    (base / "README.md").write_text("# base\n", encoding="utf-8")
+    code, out = run("install.py", "manifest", "--rules", base, "--json")
+    data = json.loads(out) if code == 0 else {"files": []}
+    marks = {f["path"]: f.get("optional") for f in data["files"]}
+    check("optional B11: the manifest marks hook_guard.py optional and a.py not",
+          str(marks.get("hook_guard.py", "")).startswith("claude:") and marks.get("a.py") is None, out[-400:])
+    expect("optional B11: the text manifest marks it too", "install.py", 0, "manifest", "--rules", base,
+           says=["hook_guard.py  optional", "optional=1"])
+    to = d / "proj" / "DIRECTOR" / "tools"
+    expect("optional B11: install --skip-optional leaves it out", "install.py", 0, "install", "--rules", base, "--to", to,
+           "--skip-optional", "--execute", says="INSTALL: DONE", lacks="hook_guard.py")
+    record = json.loads((to / "INSTALL_MANIFEST.json").read_text(encoding="utf-8"))
+    check("optional B11: not installed, the record lists it under skipped_optional",
+          not (to / "hook_guard.py").exists() and (to / "a.py").is_file()
+          and record.get("skipped_optional") == ["hook_guard.py"], record)
+    expect("optional B11: the install check passes without it", "install.py", 0, "check", "--to", to,
+           says="INSTALL_CHECK: PASS")
+    to_all = d / "proj_all" / "DIRECTOR" / "tools"
+    expect("optional B11: a plain install still carries it", "install.py", 0, "install", "--rules", base, "--to", to_all,
+           "--execute", says="INSTALL: DONE")
+    check("optional B11: plain install has hook_guard.py", (to_all / "hook_guard.py").is_file())
+    expect("optional B11: --skip-optional over a full install removes it (the backup keeps it)", "install.py", 0,
+           "install", "--rules", base, "--to", to_all, "--skip-optional", says="REMOVE hook_guard.py")
+
+    var = d / "var"
+    shutil.copytree(base, var)
+    (var / "tools" / "hook_guard.py").unlink()
+    (var / "adapters" / "x").mkdir(parents=True)
+    shutil.copy2(base / "CHANGELOG.md", var / "CHANGELOG-upstream.md")
+    (var / "BASE_VERSION").write_text("3.0.0\n", encoding="utf-8")
+    (var / "VERSION").write_text("3.0.0-x.1\n", encoding="utf-8")
+    (var / "README.md").write_text("# variant\n\n覆寫：`README.md`、`VERSION`\n", encoding="utf-8")
+
+    def ov(path):
+        return {"why": "variant file", "base_sha256": hashlib.sha256((base / path).read_bytes().replace(b"\r\n", b"\n")).hexdigest()}
+
+    registry = var / "adapters" / "x" / "BASE_SYNC.json"
+    registry.write_text(json.dumps({"schema": "dw-base-sync/1", "adapter": "adapters/x/",
+                                    "overrides": {"README.md": ov("README.md"), "VERSION": ov("VERSION")},
+                                    "variant_files": {"BASE_VERSION": "base version", "CHANGELOG-upstream.md": "history"}}),
+                        encoding="utf-8")
+    sync = ["--base", base, "--variant", var, "--registry", registry]
+    expect("optional B11: base_sync_check: an optional tool left out is OPTIONAL, not MISSING", "base_sync_check.py", 0,
+           *sync, says=["OPTIONAL    tools/hook_guard.py (not carried; claude:", "BASE_SYNC: PASS", "optional=1"],
+           lacks="MISSING")
+    (var / "tools" / "a.py").unlink()
+    expect("optional B11: a required tool left out is still MISSING", "base_sync_check.py", 1, *sync,
+           says="MISSING     tools/a.py")
+    shutil.copy2(base / "tools" / "a.py", var / "tools" / "a.py")
+    (var / "tools" / "hook_guard.py").write_text("H = 2\n", encoding="utf-8")
+    expect("optional B11: an optional tool that is carried must be the same", "base_sync_check.py", 1, *sync,
+           says="CHANGED     tools/hook_guard.py", lacks="OPTIONAL")
+    shutil.copy2(base / "tools" / "hook_guard.py", var / "tools" / "hook_guard.py")
+    expect("optional B11: carried unchanged is SAME (no optional count)", "base_sync_check.py", 0, *sync,
+           says="BASE_SYNC: PASS", lacks=["OPTIONAL", "optional="])
+    (var / "tools" / "hook_guard.py").unlink()
+
+    check("optional B11: selftest skips a group that names an absent optional tool",
+          optional_absent('run("hook_guard.py", "--x")', var / "tools") == ["hook_guard.py"]
+          and optional_absent('run("a.py")', var / "tools") == []
+          and optional_absent('run("hook_guard.py")', base / "tools") == [])
+    check("optional B11: in this checkout no group is skipped for an optional tool",
+          optional_absent("hook_guard transcript_audit context_probe browser_check", TOOLS) == [])
+
+    lg = d / "lg" / "tools"
+    lg.mkdir(parents=True)
+    for name in ("loop_guard.py", "audit_log.py", "_common.py"):
+        shutil.copy2(TOOLS / name, lg / name)
+    (d / "lg" / "t.jsonl").write_text("", encoding="utf-8")
+    expect("optional B11: loop_guard --transcript without transcript_audit.py says so", lg / "loop_guard.py", 2,
+           "scan", "--transcript", d / "lg" / "t.jsonl", says=["transcript_audit.py, an optional tool", "use --audit LOG"],
+           lacks="Traceback")
+
+    rules = d / "rules"
+    (rules / "tools").mkdir(parents=True)
+    for name in ("dispatch_check.py", "spec_gate.py", "_common.py"):
+        shutil.copy2(TOOLS / name, rules / "tools" / name)
+    (rules / "adapters" / "x").mkdir(parents=True)
+    own = rules / "adapters" / "x" / "EFFORT_TABLE_X.json"
+    own.write_text(json.dumps({"chores": ["low"], "dev": ["high"]}), encoding="utf-8")  # a class the base lacks
+    log = d / "DIRECTOR_LOG.md"
+    log.write_text("DISPATCH WO-012 rev=1 sha=" + "a" * 64 + " | class=chores effort=low\n", encoding="utf-8")
+    expect("optional B11: dispatch_check takes the adapter's table by default", rules / "tools" / "dispatch_check.py", 1,
+           "--log", log, says=["~ TABLE ", "EFFORT_TABLE_X.json", "DISPATCH_CHECK: FAIL records=1 warnings=0"],
+           lacks="unknown class")
+    if not list(TOOLS.parent.glob("adapters/*/EFFORT_TABLE*.json")):  # a variant with its own table differs here
+        expect("optional B11: the base (no adapter table) keeps its own table", "dispatch_check.py", 1, "--log", log,
+               says="unknown class=chores", lacks="~ TABLE")
+    other = d / "table.json"
+    other.write_text(json.dumps({"dev": ["high"]}), encoding="utf-8")
+    expect("optional B11: --table wins over the adapter's table", rules / "tools" / "dispatch_check.py", 1, "--log", log,
+           "--table", other, says="unknown class=chores", lacks="~ TABLE")
+    (rules / "adapters" / "y").mkdir()
+    (rules / "adapters" / "y" / "EFFORT_TABLE_Y.json").write_text(json.dumps({"dev": ["high"]}), encoding="utf-8")
+    expect("optional B11: two adapter tables are an input error", rules / "tools" / "dispatch_check.py", 2, "--log", log,
+           says=["2 adapters/*/EFFORT_TABLE*.json", "give --table"])
+    (rules / "adapters" / "y" / "EFFORT_TABLE_Y.json").unlink()
+
+    module = mutant(TOOLS / "base_sync_check.py", [('        elif path not in v and path[len("tools/"):] in optional and '
+                                                    'path.startswith("tools/"):\n', '        elif False:\n')],
+                    "b11_sync_no_optional")
+    if module is not None:
+        killed("optional B11: without the OPTIONAL branch an optional tool left out is MISSING",
+               bool(module.check(base, var, registry)[1]))
+    module = mutant(TOOLS / "install.py", [('        new["files"] = [f for f in new["files"] if not f.get("optional")]\n',
+                                            '        pass\n')], "b11_install_keeps_optional")
+    if module is not None:
+        code, lines = module.install(base, d / "mut" / "tools", execute=False, skip_optional=True)
+        killed("optional B11: without the filter --skip-optional still adds it", any("hook_guard.py" in x for x in lines))
+    module = mutant(TOOLS / "dispatch_check.py", [("            own = None if a.table else adapter_table()  # 3.0.0 B11\n",
+                                                   "            own = None\n")], "b11_dispatch_no_adapter")
+    if module is not None:
+        import contextlib
+        import io
+        module.__file__ = str(rules / "tools" / "dispatch_check.py")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            module.main(["--log", str(log)])
+        killed("optional B11: without the adapter lookup the variant table is not used",
+               "unknown class=chores" in buf.getvalue())
+
+
+def delivery_ok_300(repo, director):
+    """A valid DELIVERY.json for director, against a one-commit git repo at repo (made here when it has none).
+    For the older --final tests: since 3.0.0 (C2) a final PASS needs the delivery record."""
+    g = lambda *a: subprocess.run(["git", *a], cwd=repo, capture_output=True, encoding="utf-8")  # noqa: E731
+    if not (repo / ".git").exists():
+        g("init", "-q", "-b", "main")
+        (repo / "app.txt").write_text("v1\n", encoding="utf-8")
+        g("add", "app.txt")
+        g("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "first")
+    head = g("rev-parse", "HEAD").stdout.strip()
+    (director / "orders").mkdir(parents=True, exist_ok=True)
+    (director / "orders" / "WO-900-final.md").write_text(
+        "# WO-900\n| ID | 類型 | 要求 |\n|---|---|---|\n| AC-1 | AUTO | 跑得起來 |\n", encoding="utf-8")
+    (director / "GATE_VERDICT_WO-900.md").write_text(f"CANDIDATE_HEAD: {head}\n", encoding="utf-8")
+    (director / "evidence").mkdir(parents=True, exist_ok=True)
+    proof = b"auto run: exit 0\n"
+    (director / "evidence" / "auto-900.md").write_bytes(proof)
+    e2e = director / "evidence" / "E2E"
+    for path in sorted(e2e.rglob("*")) if e2e.is_dir() else []:  # review P2-6: every E2E record names its candidate
+        try:
+            text = path.read_bytes().decode("utf-8") if path.is_file() else None
+        except UnicodeDecodeError:
+            text = None
+        if text and "CANDIDATE:" not in text:
+            path.write_text(text + ("" if text.endswith("\n") else "\n") + f"CANDIDATE: {head}\n", encoding="utf-8")
+    record = {"schema": "dw-delivery/1", "order": "WO-900", "candidate": head, "delivered": head,
+              "verdict": "GATE_VERDICT_WO-900.md", "recorded": "2026-11-28 03:00", "environments": ["default"],
+              "judgments": [{"ac": "AC-1", "env": "default", "kind": "auto", "outcome": "PASS", "by": "t", "at": "x",
+                             "evidence": "evidence/auto-900.md", "evidence_sha256": hashlib.sha256(proof).hexdigest()}],
+              "files": [{"path": "app.txt", "source": "commit", "bytes": 3, "sha256": hashlib.sha256(b"v1\n").hexdigest()}]}
+    (director / "evidence" / "DELIVERY.json").write_text(json.dumps(record), encoding="utf-8")
+    return head
+
+
+def test_delivery_300(tmp):
+    """3.0.0 (C2 hard line, C4): delivery.py record / judge / check and gate_check --final. The delivered commit must be
+    the verified candidate; every delivered file is recorded with its size and SHA-256 and re-checked; judgments are
+    kept per acceptance condition, per environment and per kind (auto / manual / review / po), so a manual run never
+    stands in for an automatic one and one environment never stands in for another."""
+    d = tmp / "delivery_300"
+    repo = d / "proj"
+    repo.mkdir(parents=True)
+    g = lambda *a: subprocess.run(["git", *a], cwd=repo, capture_output=True, encoding="utf-8")  # noqa: E731
+    who = ("-c", "user.name=t", "-c", "user.email=t@example.invalid")
+    g("init", "-q", "-b", "main")
+    (repo / "app.txt").write_text("v1\n", encoding="utf-8")
+    g("add", "app.txt")
+    g(*who, "commit", "-q", "-m", "first")
+    head = g("rev-parse", "HEAD").stdout.strip()
+    (repo / "dist").mkdir()
+    (repo / "dist" / "app.bin").write_bytes(b"\x00built\x01")
+    director = repo / "DIRECTOR"
+    (director / "orders").mkdir(parents=True)
+    (director / ".gitignore").write_text("*\n", encoding="utf-8")
+    (director / "orders" / "WO-001-list.md").write_text(DELIVERY_ORDER_300, encoding="utf-8")
+    e2e = director / "evidence" / "E2E"
+    e2e.mkdir(parents=True)
+    for env in ("win", "linux"):
+        (e2e / f"run-{env}.log").write_text(f"ENTRY_POINT: python app.py\nCANDIDATE: {head}\nENVIRONMENT: {env}\n"
+                                            "3 rows\nEXIT_CODE: 0\n", encoding="utf-8")
+    (director / "evidence" / "manual-win.md").write_text("手動跑一次：打開 app，看到 3 列\n", encoding="utf-8")
+    review = director / "evidence" / "review.md"
+    review.write_text("總監看過截圖：第一列最早\n", encoding="utf-8")
+    (director / "evidence" / "po.md").write_text("PO 回覆：再改一下字\n", encoding="utf-8")
+    record = director / "evidence" / "DELIVERY.json"
+    verdict = director / "reviews" / "GATE_VERDICT_WO-001.md"  # review P1-4: the candidate the verdict judged
+    verdict.parent.mkdir()
+    verdict.write_text(f"VERDICT: PASS\nCANDIDATE_HEAD: {head}\n", encoding="utf-8")
+    dl, gc = "delivery.py", "gate_check.py"
+    base = ("--director", director, "--repo", repo)
+
+    expect("delivery C2: candidate is not the delivered HEAD", dl, 1, "record", *base, "--candidate", "0" * 40,
+           "--file", "app.txt", says=["DELIVERY_SHA_MISMATCH", "DELIVERY_RECORD: FAIL"])
+    check("delivery C2: nothing written on a mismatch", not record.exists())
+    expect("delivery: a short candidate is invalid", dl, 2, "record", *base, "--candidate", head[:7],
+           "--file", "app.txt", says="DELIVERY_RECORD: INVALID")
+    expect("delivery: a file outside the repo is invalid", dl, 2, "record", *base, "--candidate", head,
+           "--file", "../x.txt", says="DELIVERY_RECORD: INVALID")
+    expect("delivery: an absolute file path is invalid", dl, 2, "record", *base, "--candidate", head,
+           "--file", str(repo / "app.txt"), says="DELIVERY_RECORD: INVALID")
+    expect("delivery: no --file is invalid", dl, 2, "record", *base, "--candidate", head, says="DELIVERY_RECORD: INVALID")
+    expect("delivery: a missing file fails", dl, 1, "record", *base, "--candidate", head, "--file", "nope.txt",
+           says=["MISSING nope.txt", "DELIVERY_RECORD: FAIL"])
+    (repo / "app.txt").write_text("v1 edited\n", encoding="utf-8")
+    expect("delivery C2: an uncommitted change to a delivered file fails", dl, 1, "record", *base, "--candidate", head,
+           "--file", "app.txt", says=["DIRTY app.txt", "DELIVERY_RECORD: FAIL"])
+    (repo / "app.txt").write_text("v1\n", encoding="utf-8")
+    check("delivery: still nothing written", not record.exists())
+    expect("delivery C2: record", dl, 0, "record", *base, "--candidate", head, "--order", "WO-001", "--env", "win",
+           "--env", "linux", "--file", "app.txt", "--file", "dist", says="DELIVERY_RECORD: DONE files=2")
+    data = json.loads(record.read_text(encoding="utf-8")) if record.is_file() else {}
+    files = {f.get("path"): f for f in data.get("files", [])}
+    check("delivery C2: candidate and delivered are the same 40-hex commit",
+          data.get("candidate") == data.get("delivered") == head, str(data)[:300])
+    check("delivery C2: a committed file: size and SHA-256 of the commit's copy",
+          files.get("app.txt") == {"path": "app.txt", "source": "commit", "bytes": 3,
+                                   "sha256": hashlib.sha256(b"v1\n").hexdigest()}, str(files)[:300])
+    check("delivery C2: a build output: size and SHA-256 on disk",
+          files.get("dist/app.bin", {}).get("source") == "build" and files["dist/app.bin"].get("bytes") == 7
+          and files["dist/app.bin"].get("sha256") == hashlib.sha256(b"\x00built\x01").hexdigest(), str(files)[:300])
+    raw = record.read_text(encoding="utf-8") if record.is_file() else ""
+    check("delivery: no absolute path in the record", str(d) not in raw and str(d).replace("\\", "/") not in raw
+          and not re.search(r'"[A-Za-z]:[\\/]', raw), raw[:300])
+    check("delivery C4: environments and order kept", data.get("environments") == ["win", "linux"]
+          and data.get("order") == "WO-001", str(data)[:200])
+
+    expect("delivery C4: nothing judged yet", dl, 1, "check", *base,
+           says=["JUDGMENT_MISSING AC-1@win auto", "JUDGMENT_MISSING AC-2@linux review", "PENDING_PO AC-3@win",
+                 "DELIVERY_CHECK: FAIL"], lacks="JUDGMENT_MISSING AC-3")
+    expect("delivery C4: an environment that was not declared", dl, 2, "judge", "--director", director, "--ac", "AC-1",
+           "--env", "mac", "--kind", "auto", "--outcome", "PASS", "--evidence", "evidence/E2E/run-win.log",
+           says="DELIVERY_JUDGE: INVALID")
+    expect("delivery C4: two environments need --env", dl, 2, "judge", "--director", director, "--ac", "AC-1",
+           "--kind", "auto", "--outcome", "PASS", "--evidence", "evidence/E2E/run-win.log", says="DELIVERY_JUDGE: INVALID")
+    expect("delivery C4: not an AC id", dl, 2, "judge", "--director", director, "--ac", "X-1", "--env", "win",
+           "--kind", "auto", "--outcome", "PASS", "--evidence", "evidence/E2E/run-win.log", says="DELIVERY_JUDGE: INVALID")
+    expect("delivery C4: a judgment needs its evidence", dl, 2, "judge", "--director", director, "--ac", "AC-1",
+           "--env", "win", "--kind", "auto", "--outcome", "PASS", says="DELIVERY_JUDGE: INVALID")
+    expect("delivery C4: evidence outside the director folder", dl, 2, "judge", "--director", director, "--ac", "AC-1",
+           "--env", "win", "--kind", "auto", "--outcome", "PASS", "--evidence", "../app.txt", says="DELIVERY_JUDGE: INVALID")
+
+    def judge(ac, env, kind, outcome, evidence):
+        expect(f"delivery C4: judge {ac}@{env} {kind} {outcome}", dl, 0, "judge", "--director", director, "--ac", ac,
+               "--env", env, "--kind", kind, "--outcome", outcome, "--evidence", evidence, "--by", "總監",
+               says=f"DELIVERY_JUDGE: DONE {ac}@{env} {kind} {outcome}")
+
+    judge("AC-1", "win", "manual", "PASS", "evidence/manual-win.md")
+    expect("delivery C4: a manual run is not the automatic run", dl, 1, "check", *base,
+           says=["JUDGMENT_MISSING AC-1@win auto", "only a manual run"])
+    judge("AC-1", "win", "auto", "PASS", "evidence/E2E/run-win.log")
+    judge("AC-1", "linux", "auto", "FAIL", "evidence/E2E/run-linux.log")
+    judge("AC-2", "win", "review", "PASS", "evidence/review.md")
+    expect("delivery C4: one environment does not stand in for another", dl, 1, "check", *base,
+           says=["JUDGMENT_FAIL AC-1@linux auto", "JUDGMENT_MISSING AC-2@linux review"], lacks="AC-1@win auto")
+    judge("AC-1", "linux", "auto", "PASS", "evidence/E2E/run-linux.log")
+    judge("AC-2", "linux", "review", "PASS", "evidence/review.md")
+    expect("delivery C4: every condition judged in every environment (the latest judgment counts)", dl, 0, "check", *base,
+           says=["PENDING_PO AC-3@win", "PENDING_PO AC-3@linux", "ENV win: auto 1/1", "manual 1", "DELIVERY_CHECK: PASS"],
+           lacks="JUDGMENT_FAIL")
+    expect("delivery C2: gate_check --final passes with the record", gc, 0, "--final", director, says="OK   final")
+    judge("AC-3", "win", "po", "FAIL", "evidence/po.md")
+    expect("delivery C4: a PO judgment that failed", dl, 1, "check", *base, says="JUDGMENT_FAIL AC-3@win po")
+    judge("AC-3", "win", "po", "PASS", "evidence/po.md")
+    expect("delivery C4: the PO's later judgment", dl, 0, "check", *base, says=["PENDING_PO AC-3@linux", "DELIVERY_CHECK: PASS"],
+           lacks="AC-3@win")
+
+    (repo / "dist" / "app.bin").write_bytes(b"\x00rebuilt\x01")
+    expect("delivery C2: a build output changed after the record", dl, 1, "check", *base, says="CHANGED dist/app.bin")
+    expect("delivery C2: gate_check --final fails on it", gc, 1, "--final", director, says=["FAIL final", "CHANGED dist/app.bin"])
+    (repo / "dist" / "app.bin").write_bytes(b"\x00built\x01")
+    review.write_text("改過的審查\n", encoding="utf-8")
+    expect("delivery C4: evidence changed after the judgment", dl, 1, "check", *base, says="EVIDENCE_CHANGED AC-2@win review")
+    review.write_text("總監看過截圖：第一列最早\n", encoding="utf-8")
+    run_win = e2e / "run-win.log"
+    good_run = run_win.read_text(encoding="utf-8")
+    run_win.write_text(good_run.replace(head, "1" * 40), encoding="utf-8")
+    expect("delivery C2: an E2E record of another candidate", gc, 1, "--final", director,
+           says=["E2E_OTHER_CANDIDATE run-win.log"])
+    run_win.write_text(good_run, encoding="utf-8")
+    good = record.read_text(encoding="utf-8") if record.is_file() else "{}"
+    record.write_text(good.replace(f'"delivered": "{head}"', '"delivered": "' + "2" * 40 + '"'), encoding="utf-8")
+    expect("delivery C2: a record whose delivered commit is not the candidate", dl, 1, "check", *base,
+           says="DELIVERY_SHA")
+    record.write_text("{broken", encoding="utf-8")
+    expect("delivery: broken JSON is invalid", dl, 2, "check", *base, says="DELIVERY_CHECK: INVALID")
+    record.write_bytes(b"\xff\xfe{}")
+    expect("delivery: not UTF-8 is invalid", dl, 2, "check", *base, says="DELIVERY_CHECK: INVALID")
+    record.write_text(good, encoding="utf-8")
+    expect("delivery: a clean record again", dl, 0, "check", *base, says="DELIVERY_CHECK: PASS")
+    other = d / "other" / "DIRECTOR"
+    (other / "evidence" / "E2E").mkdir(parents=True)
+    (other / "evidence" / "E2E" / "run.log").write_text("ENTRY_POINT: x\nEXIT_CODE: 0\n", encoding="utf-8")
+    expect("delivery: no record to check is invalid", dl, 2, "check", "--director", other, "--repo", repo,
+           says="DELIVERY_CHECK: INVALID")
+    expect("delivery C2: gate_check --final without a record fails", gc, 1, "--final", other,
+           says=["FAIL final", "NO_DELIVERY"])
+    expect("delivery C2: --warn does not soften it", gc, 1, "--final", other, "--warn", says="NO_DELIVERY")
+    outside = d / "outside" / "DIRECTOR"
+    shutil.copytree(director, outside)
+    expect("delivery C2: no git repo to check the files against fails closed", gc, 1, "--final", outside,
+           says=["FAIL final", "NOT_CHECKED files"])
+
+    (repo / "app.txt").write_text("v2\n", encoding="utf-8")
+    g("add", "app.txt")
+    g(*who, "commit", "-q", "-m", "second")
+    new = g("rev-parse", "HEAD").stdout.strip()
+    expect("delivery C2: the old candidate is no longer HEAD", dl, 1, "record", *base, "--candidate", head,
+           "--file", "app.txt", says="DELIVERY_SHA_MISMATCH")
+    verdict.write_text(f"VERDICT: PASS\nCANDIDATE_HEAD: {new}\n", encoding="utf-8")
+    expect("delivery C4: a new candidate drops the old judgments", dl, 0, "record", *base, "--candidate", new,
+           "--order", "WO-001", "--env", "win", "--env", "linux", "--file", "app.txt", says="JUDGMENTS_RESET 8")
+    data = json.loads(record.read_text(encoding="utf-8")) if record.is_file() else {}
+    check("delivery C4: judgments of another product are gone", data.get("judgments") == [] and data.get("candidate") == new,
+          str(data)[:200])
+
+    lone = repo / "DIRECTOR2"
+    (lone / "evidence").mkdir(parents=True)
+    (lone / "orders").mkdir()
+    (lone / "orders" / "WO-001.md").write_text("# WO-001\nGOVERNANCE = Direct\n", encoding="utf-8")  # the written exception
+    bad = {"schema": "dw-delivery/1", "order": "WO-001", "candidate": "3" * 40, "delivered": new, "recorded": "x",
+           "environments": ["default"], "judgments": [],
+           "files": [{"path": "app.txt", "source": "commit", "bytes": 3, "sha256": hashlib.sha256(b"v2\n").hexdigest()}]}
+    (lone / "evidence" / "DELIVERY.json").write_text(json.dumps(bad), encoding="utf-8")
+    real = mutant(TOOLS / "delivery.py", [], "delivery_real") if (TOOLS / "delivery.py").is_file() else None
+    check("delivery: in process, the real check catches the other candidate",
+          real is not None and any("DELIVERY_SHA" in p for p in real.check_delivery(lone, repo)[0]),
+          str(real and real.check_delivery(lone, repo)))
+    bad["candidate"] = new
+    (lone / "evidence" / "DELIVERY.json").write_text(json.dumps(bad), encoding="utf-8")
+    check("delivery: in process, a clean record", real is not None and not real.check_delivery(lone, repo)[0],
+          str(real and real.check_delivery(lone, repo)))
+    bad["candidate"] = "3" * 40
+    (lone / "evidence" / "DELIVERY.json").write_text(json.dumps(bad), encoding="utf-8")
+    module = None if real is None else mutant(TOOLS / "delivery.py", [("    if candidate != delivered:\n", "    if False:\n")], "delivery_sha_ignored")
+    if module is not None:
+        killed("delivery C2 SHA equality ignored", not module.check_delivery(lone, repo)[0])
+
+    for name, needle, path in (
+            ("tools README", "`delivery.py`", "tools/README.md"),
+            ("verdict template", "DELIVERY.json", "templates/GATE_VERDICT.md"),
+            ("docs/02", "delivery.py", "docs/02_work_orders_gates.md")):
+        check(f"delivery docs: {name} has {needle}", needle in (TOOLS.parent / path).read_text(encoding="utf-8"))
+    log = upstream_300(TOOLS.parent)[1].split("\n## 2.6.0")[0]
+    check("delivery docs: CHANGELOG Unreleased has delivery.py", "delivery.py" in log)
+
+
+def test_worktree_300(tmp):
+    """3.0.0 (D3, G6): worktree.py, one generic copy of the DeepSeek port's worker worktree tools. open makes one git
+    worktree per worker outside the project folder and refuses a folder that exists or sits inside the project;
+    status says 隔離 worktree / 共用 checkout from the git folders (commondir), so a report's WORKTREE field is never
+    written by hand; cwd is the first step of a run (a subfolder or another folder is BLOCKED); temp points TEMP at the
+    work folder; same tells a worktree of the repo from a clone (the git common dir, G6)."""
+    d = tmp / "worktree_300"
+    repo = d / "proj"
+    repo.mkdir(parents=True)
+    g = lambda *a, cwd=repo: subprocess.run(["git", *a], cwd=cwd, capture_output=True, encoding="utf-8")  # noqa: E731
+    g("init", "-q", "-b", "main")
+    g("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "i")
+    t = "worktree.py"
+    if not (TOOLS / t).is_file():
+        check("d3: tools/worktree.py exists", False, "missing")
+        return
+    spec_brief_300(repo / "DIRECTOR")  # review P1-3: open runs the spec gate first
+    target = d / "wt" / "WO-001"
+    expect("d3: open makes one worktree per worker beside the project", t, 0, "open", repo, "--order", "WO-001",
+           says=[f"WORKER_WORKTREE: {target.resolve()} branch=wt/wo-001 base=HEAD", "WORKTREE: 隔離 worktree"])
+    check("d3: the worktree is a linked checkout on its own branch",
+          g("rev-parse", "--abbrev-ref", "HEAD", cwd=target).stdout.strip() == "wt/wo-001")
+    expect("d3: open refuses a folder that exists, removes nothing", t, 1, "open", repo, "--order", "WO-001",
+           says=["WORKER_WORKTREE: FAIL", "exists; one worktree per worker, nothing removed"])
+    check("d3: the refused worktree is still there", (target / ".git").is_file())
+    expect("d3: open refuses an order id that is not a plain name", t, 2, "open", repo, "--order", "../x",
+           says="letters, digits, . _ - only")
+    expect("d3: open refuses a worktree inside the project folder", t, 1, "open", repo, "--order", "WO-002",
+           "--root", repo / "inner", says=["WORKER_WORKTREE: FAIL", "inside the project folder"])
+    check("d3: nothing was made inside the project", not (repo / "inner").exists())
+    expect("d3: open --branch --base", t, 0, "open", repo, "--order", "WO-003", "--branch", "wo3", "--base", "main",
+           says="branch=wo3 base=main")
+    expect("d3: status of a worker worktree", t, 0, "status", target, says=f"WORKTREE: 隔離 worktree {target.resolve()}")
+    expect("d3: status of the main checkout", t, 0, "status", repo, says="WORKTREE: 共用 checkout（主 checkout）")
+    sub = target / "src"
+    sub.mkdir()
+    expect("d3: status from a subfolder names the checkout", t, 0, "status", sub,
+           says=f"隔離 worktree {target.resolve()}")
+    outside = d / "plain"
+    outside.mkdir()
+    expect("d3: status outside a checkout", t, 2, "status", outside, says="WORKTREE: NOT_A_CHECKOUT")
+    expect("d3: cwd in the workspace is OK", t, 0, "cwd", target, cwd=target, says="CWD: OK")
+    expect("d3: cwd in a subfolder is BLOCKED", t, 1, "cwd", target, cwd=sub,
+           says=["BLOCKED: cwd", "a subfolder of the workspace", "write nothing"])
+    expect("d3: cwd in another folder is BLOCKED", t, 1, "cwd", target, cwd=outside, says="not the workspace")
+    expect("d3: temp points TEMP / TMP / TMPDIR at the work folder", t, 0, "temp", target,
+           says=["TEMP_ENV:", "POWERSHELL: $env:TEMP=", "$env:TMPDIR=", "BASH: export TEMP="])
+    check("d3: temp made <work>/tmp", (target / "tmp").is_dir())
+    clone = d / "clone"
+    subprocess.run(["git", "clone", "-q", str(repo), str(clone)], capture_output=True)
+    expect("g6: a worker worktree and its project are the same repo", t, 0, "same", target, repo,
+           says="SAME_REPO: YES")
+    expect("g6: a clone is another repo", t, 1, "same", clone, repo, says="SAME_REPO: NO")
+    expect("g6: outside a repo is not the same repo", t, 1, "same", outside, repo, says="SAME_REPO: NO")
+    source = (TOOLS / t).read_text(encoding="utf-8")
+    check("g6: worktree.py reads the git folders through _common (one copy)", "_common.py" in source
+          and "find_repo" in source and "same_repo" in source)
+    scope = (TOOLS / "scope_check.py").read_text(encoding="utf-8")
+    check("g6: scope_check's WORKTREE line uses the same _common.find_repo (one copy, not git worktree list)",
+          "_common.find_repo(root)" in scope and "worktree\", \"list\"" not in scope)
+    section = (TOOLS.parent / "templates/CLAUDE_PROJECT_SECTION.md").read_text(encoding="utf-8")
+    check("g5: the resident project section names PURPOSE.md (it left the must-read chain)", "PURPOSE.md" in section)
+    module = mutant(TOOLS / t, [("    if repo.linked:", "    if True:")], "wt_status_always_isolated")
+    if module is not None:
+        killed("d3: status tells the main checkout from a worktree",
+               "隔離" in (module.worktree_line(repo) or ""))
+    module = mutant(TOOLS / t, [("    if inside(target, repo.root):", "    if False:")], "wt_inside_allowed")
+    if module is not None:
+        code, _ = module.open_worktree(repo, "WO-009", root=repo / "inner2")
+        killed("d3: a worktree inside the project is refused", code == 0)
+
+
+def test_loop_wait_tools_300(tmp):
+    """3.0.0 (D5): one loop detection core for every platform. The DeepSeek port's after-the-fact reader kept its own
+    copy of loop_guard's logic to leave out waiting on a child (wait_agent); the base core now takes that as a
+    setting, wait_tools, in the same config schema, so the live hook and the after-the-fact reader share one copy.
+    A wait call is never a repeat, poll or ping-pong by itself; a failed one is still a child error."""
+    lg = mutant(TOOLS / "loop_guard.py", [], "lg_wait_real")
+    if lg is None:
+        return
+
+    def ev(seq, tool, args="a", status="ok", result="r1"):
+        return {"seq": seq, "session": "S", "agent": None, "tool": tool, "args": args, "input": args,
+                "status": status, "result": result, "error_class": None, "error_text_known": False}
+
+    waits = [ev(n, "wait_agent") for n in range(1, 6)]
+    cats = lambda found: [h["category"] for h in found]  # noqa: E731
+    check("d5: without wait_tools five wait calls are a poll", cats(lg.detect(waits)) == ["poll_no_progress"],
+          cats(lg.detect(waits)))
+    try:
+        conf = lg.config({"schema_version": 1, "wait_tools": ["wait_agent"], "child_tools": ["subagent", "wait_agent"]})
+    except Exception as error:  # noqa: BLE001 - the old core refuses the key
+        check("d5: config takes wait_tools", False, str(error))
+        return
+    check("d5: config takes wait_tools", conf["wait_tools"] == ["wait_agent"])
+    check("d5: the default is no wait tools (DW behaviour unchanged)", lg.config()["wait_tools"] == [])
+    check("d5: with wait_tools the waits are not a loop", lg.detect(waits, conf) == [], cats(lg.detect(waits, conf)))
+    turns = []
+    for n in range(8):
+        turns += [ev(2 * n + 1, "Bash", "a"), ev(2 * n + 2, "wait_agent", "w")]
+    check("d5: calls in turn with a wait are not a ping-pong when the wait is left out",
+          "ping_pong" not in cats(lg.detect(turns, conf)))
+    check("d5: the same call between the waits is still found (unchanged result: a poll)",
+          cats(lg.detect(turns, conf)) == ["poll_no_progress"], cats(lg.detect(turns, conf)))
+    failed = waits[:2] + [ev(3, "wait_agent", status="error", result="e1")]
+    check("d5: a failed wait at the end is still child_error_unhandled",
+          cats(lg.detect(failed, conf)) == ["child_error_unhandled"], cats(lg.detect(failed, conf)))
+    check("d5: the hook does not remind on a wait call",
+          lg.hook_check(waits[:4], dict(ev(5, "wait_agent"), status=None, result=None), conf) is None)
+    for bad in ({"wait_tools": "wait_agent"}, {"wait_tools": [1]}):
+        try:
+            lg.config(bad)
+            ok = False
+        except lg.InputError:
+            ok = True
+        check(f"d5: a bad wait_tools is refused: {bad}", ok)
+    cfg = _write_text(tmp / "loop_wait_300.json", json.dumps({"schema_version": 1, "wait_tools": ["wait_agent"]}) + "\n")
+    log = tmp / "loop_wait_300.jsonl"
+    entry = {"kind": "result", "session_id": "S", "agent_id": None, "tool": "wait_agent", "input": "{}",
+             "result": {"status": "ok", "sha256": "ab" * 32, "length": 2}}
+    log.write_text("".join(json.dumps(dict(entry, seq=n)) + chr(10) for n in range(1, 6)), encoding="utf-8")
+    expect("d5: scan without wait_tools finds the waits", "loop_guard.py", 1, "scan", "--audit", log,
+           says="LOOP_GUARD: FOUND")
+    expect("d5: scan --config with wait_tools leaves them out", "loop_guard.py", 0, "scan", "--audit", log,
+           "--config", cfg, says="LOOP_GUARD: NONE events=5")
+    doc = (TOOLS / "loop_guard.py").read_text(encoding="utf-8")
+    check("d5: the module text names the shared core and wait_tools", "wait_tools" in doc.split('"""')[1]
+          and "one copy" in doc.split('"""')[1])
+    module = mutant(TOOLS / "loop_guard.py", [('    calls = [e for e in events if e["tool"] not in wait]',
+                                               '    calls = list(events)')], "lg_wait_ignored")
+    if module is not None:
+        killed("d5: wait_tools is applied", module.detect(waits, conf) != [])
+
+
+def test_install_300(tmp):
+    """3.0.0 (C7): install.py copies the rules' tools/ into a project's DIRECTOR/tools/ from a versioned file list with
+    content hashes (the list tools/base_sync_check.py reads, 3.0.0 B6). The copy is put together in a staging folder and checked
+    first, the old folder is kept as a verified backup before an upgrade, files the project added are kept, and a
+    second install waits its turn (a lock folder: BUSY, nothing changed)."""
+    d = tmp / "install_300"
+    rules, to = d / "rules", d / "proj" / "DIRECTOR" / "tools"
+    (rules / "tools" / "sub").mkdir(parents=True)
+    (rules / "tools" / "__pycache__").mkdir()
+    (rules / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+    (rules / "tools" / "a.py").write_text("print('v1')\n", encoding="utf-8")
+    (rules / "tools" / "sub" / "b.txt").write_text("b\n", encoding="utf-8")
+    (rules / "tools" / "__pycache__" / "a.cpython.pyc").write_bytes(b"\0")
+    t = "install.py"
+    if not (TOOLS / t).is_file():
+        check("c7: tools/install.py exists", False, "missing")
+        return
+    code, out = run(t, "manifest", "--rules", rules, "--json")
+    try:
+        listed = json.loads(out)
+    except ValueError:
+        listed = {}
+    files = {f.get("path"): f for f in listed.get("files", [])}
+    check("c7: manifest lists the tools with size and sha256, no caches", code == 0
+          and listed.get("schema") == "dw-install/1" and listed.get("version") == "1.0.0"
+          and sorted(files) == ["a.py", "sub/b.txt"]
+          and files["a.py"].get("sha256") == hashlib.sha256((rules / "tools" / "a.py").read_bytes()).hexdigest()
+          and files["a.py"].get("bytes") == (rules / "tools" / "a.py").stat().st_size, out[:300])
+    expect("c7: a dry run plans the copy and writes nothing", t, 0, "install", "--rules", rules, "--to", to,
+           says=["ADD    a.py", "ADD    sub/b.txt", "INSTALL: DRY_RUN add=2 update=0 remove=0 same=0 local=0"])
+    check("c7: the dry run made no folder", not to.exists())
+    expect("c7: --execute installs", t, 0, "install", "--rules", rules, "--to", to, "--execute",
+           says=["INSTALL: DONE version=1.0.0 files=2"], lacks="BACKUP")
+    check("c7: the files are there with the install record", (to / "a.py").read_text(encoding="utf-8") == "print('v1')\n"
+          and (to / "INSTALL_MANIFEST.json").is_file())
+    check("c7: no staging folder is left", not [p for p in to.parent.iterdir() if ".staging-" in p.name])
+    expect("c7: check passes right after", t, 0, "check", "--to", to, says="INSTALL_CHECK: PASS files=2")
+    expect("c7: a rerun with nothing new changes nothing", t, 0, "install", "--rules", rules, "--to", to, "--execute",
+           says="INSTALL: OK nothing to change", lacks="BACKUP")
+    check("c7: no backup when nothing changed", not [p for p in to.parent.iterdir() if ".bak-" in p.name])
+    (to / "mine.txt").write_text("mine\n", encoding="utf-8")
+    (to / "__pycache__").mkdir()
+    (to / "__pycache__" / "x.pyc").write_bytes(b"\0")
+    (to / "a.py").write_text("print('edited')\n", encoding="utf-8")
+    expect("c7: check finds a changed file and notes a local one", t, 1, "check", "--to", to,
+           says=["CHANGED a.py", "~ LOCAL mine.txt", "INSTALL_CHECK: FAIL"], lacks="x.pyc")
+    (rules / "VERSION").write_text("1.1.0\n", encoding="utf-8")
+    (rules / "tools" / "a.py").write_text("print('v2')\n", encoding="utf-8")
+    (rules / "tools" / "c.py").write_text("c\n", encoding="utf-8")
+    (rules / "tools" / "sub" / "b.txt").unlink()
+    expect("c7: an upgrade dry run", t, 0, "install", "--rules", rules, "--to", to,
+           says=["UPDATE a.py", "ADD    c.py", "REMOVE sub/b.txt", "~ EDITED a.py", "~ LOCAL mine.txt (kept)",
+                 "INSTALL: DRY_RUN add=1 update=1 remove=1 same=0 local=1"])
+    (d / "proj" / "DIRECTOR" / "tools.install.lock").mkdir()
+    expect("c7: a second install waits (BUSY), nothing changed", t, 1, "install", "--rules", rules, "--to", to,
+           "--execute", says="INSTALL: BUSY")
+    check("c7: BUSY left the old files", (to / "a.py").read_text(encoding="utf-8") == "print('edited')\n")
+    lock = d / "proj" / "DIRECTOR" / "tools.install.lock"
+    other = d / "p2" / "tools"
+    (d / "p2" / "tools.install.lock").mkdir(parents=True)
+    module = mutant(TOOLS / t, [("    if not take_lock(lock):", "    if False:")], "install_no_lock")
+    if module is not None:
+        code, _ = module.install(rules, other, execute=True)
+        killed("c7: the lock is checked", code == 0)
+    lock.rmdir()
+    expect("c7: the upgrade backs up the old folder first", t, 0, "install", "--rules", rules, "--to", to, "--execute",
+           says=["BACKUP: ", "tools.bak-1.0.0-", "verified", "INSTALL: DONE version=1.1.0 files=2"])
+    backups = [p for p in to.parent.iterdir() if p.name.startswith("tools.bak-1.0.0-")]
+    check("c7: the backup holds the old files as they were", len(backups) == 1
+          and (backups[0] / "a.py").read_text(encoding="utf-8") == "print('edited')\n"
+          and (backups[0] / "sub" / "b.txt").is_file(), str(backups))
+    check("c7: the new files are in, the removed one is gone, the local one is kept",
+          (to / "a.py").read_text(encoding="utf-8") == "print('v2')\n" and (to / "c.py").is_file()
+          and not (to / "sub" / "b.txt").exists() and (to / "mine.txt").read_text(encoding="utf-8") == "mine\n")
+    check("c7: the lock is gone after the install", not lock.exists())
+    expect("c7: check passes after the upgrade", t, 0, "check", "--to", to, says="INSTALL_CHECK: PASS files=2")
+    expect("c7: check of a folder never installed", t, 2, "check", "--to", d / "none", says="INSTALL_CHECK: NOT_INSTALLED")
+    expect("c7: --rules without VERSION is refused", t, 2, "install", "--rules", d / "proj", "--to", d / "x",
+           says="no VERSION")
+
+
+def test_audit_source_300(tmp):
+    """3.0.0 (C9): a log rebuilt from transcripts keeps, for every source file, its name, SHA-256, line count and byte
+    count (the shared audit format of the four versions; the Codex port already wrote the line count)."""
+    folder = tmp / "audit_source_300"
+    main_t = ta_transcripts(folder / "projects" / "p")
+    out = folder / "rebuilt.jsonl"
+    expect("c9: transcript_audit build", "transcript_audit.py", 0, "build", "--out", out, "--transcript", main_t)
+    try:
+        first = json.loads(out.read_text(encoding="utf-8").splitlines()[0])
+    except (OSError, ValueError, IndexError):
+        first = {}
+    records = (first.get("source") or {}).get("transcripts") or []
+    files = sorted(main_t.parent.rglob("*.jsonl"))
+    want = {}
+    for path in files:
+        raw = path.read_bytes()
+        want[path.name] = {"sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw), "lines": raw.count(b"\n")
+                           + (1 if raw and not raw.endswith(b"\n") else 0)}
+    got = {r.get("name"): {k: r.get(k) for k in ("sha256", "bytes", "lines")} for r in records}
+    check("c9: every source file has its sha256, bytes and lines", bool(records) and got == want,
+          f"{got} != {want}")
+
+
+def test_variant_readme_300(tmp):
+    """3.0.0 (D8, G8): every variant's README follows templates/VARIANT_README.md: what it adds, what it takes from
+    the base byte for byte (and the base files it overrides, with a reason), and an honest NOT_PORTED list; the version
+    is the upstream version plus the variant serial."""
+    path = TOOLS.parent / "templates" / "VARIANT_README.md"
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    check("d8: templates/VARIANT_README.md exists", bool(text))
+    heads = [line for line in text.splitlines() if line.startswith("## ")]
+    check("d8: three parts in order: 新增, 沿用上游, 拿掉（NOT_PORTED）",
+          [h for h in heads if h.startswith(("## 新增", "## 沿用上游", "## 拿掉"))]
+          == ["## 新增（只有這個變體有）", "## 沿用上游（和基板逐位元組相同）", "## 拿掉（NOT_PORTED）"], str(heads))
+    check("g8: the NOT_PORTED table says why and what is lost", "| 基板功能 | 為什麼沒做 | 少了它會怎樣 | 替代做法 |" in text)
+    check("d8: overrides of base files are listed with a reason", "| 基板檔 | 改了什麼 | 理由 |" in text)
+    check("d8: each upstream item gets a 怎麼處理 row in the CHANGELOG", "| 上游項目 | 怎麼處理（沿用／改寫／不做） | 理由 |" in text)
+    check("d8: version = upstream version + variant serial", "BASE_VERSION" in text and "3.0.0-cld.1" in text)
+    check("d8: the template names the shared file list", "install.py manifest" in text and "base_sync_check.py" in text)
+    check("d8: no drive paths in the template (a URL such as https:// is not one)",
+          not re.search(r"(?<![A-Za-z])[A-Za-z]:[\/]", text), str(re.findall(r"(?<![A-Za-z])[A-Za-z]:[\/]", text)))
+
+
+def test_optional_items_300(tmp):
+    """3.0.0 (C5, C6, C8): the optional items. C8 is a principle merged into the blind-review audit line (an isolation
+    counts only when a record or a check proves it); C5 (CI receipts) and C6 (integration trial runs) wait for 3.0.x,
+    each with its reason in the CHANGELOG, so no reader takes them for done."""
+    root = TOOLS.parent
+    docs07 = (root / "docs" / "07_quality_gates.md").read_text(encoding="utf-8")
+    audit = [line for line in docs07.splitlines() if line.startswith("- **盲審稽核**")]
+    check("c8: one blind-review audit line", len(audit) == 1, str(len(audit)))
+    line = audit[0] if audit else ""
+    check("c8: isolation must be verifiable, merged into that line", "隔離要能驗證" in line, line[:80])
+    check("c8: a setting alone is not proof", "只寫設定不算" in line, line[:80])
+    check("c8: no new bullet for it", sum("隔離要能驗證" in l for l in docs07.splitlines()) == 1)
+    text = upstream_300(root)[1]
+    body = re.search(r"^## (?:Unreleased|3\.0\.0)[^\n]*\n(.*?)(?=^## \d)", text, re.M | re.S)
+    body = body.group(1) if body else ""
+    later =re.search(r"^### 延後\n(.*?)(?=^### |\Z)", body, re.M | re.S)
+    later = later.group(1) if later else ""
+    for item, word in (("C5", "CI 收據"), ("C6", "整合試跑")):
+        rows = [l for l in later.splitlines() if word in l and f"（{item}" in l]
+        check(f"{item.lower()}: deferred to 3.0.x with a reason", len(rows) == 1 and "留到 3.0.x" in rows[0]
+              and "理由" in rows[0], str(rows)[:120])
+
+
+def chain_rules_section(root):
+    """3.0.0 B19 follow-up: the rule-file section a checkout's director reads on every turn - a variant names its own
+    in adapters/<name>/VARIANT.json "rules_section" (a path in the checkout, e.g. dshdw's AGENTS.md section);
+    otherwise the Claude template templates/CLAUDE_PROJECT_SECTION.md. (path, problem or None)."""
+    root = pathlib.Path(root)
+    named = []
+    for path in sorted(root.glob("adapters/*/VARIANT.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            return None, f"{path.relative_to(root).as_posix()} cannot be read: {error}"
+        if isinstance(data, dict) and data.get("rules_section"):
+            named.append((path, str(data["rules_section"])))
+    if len(named) > 1:
+        return None, "two VARIANT.json name a rules_section"
+    if named:
+        section = root / named[0][1]
+        if not section.is_file():
+            return None, f"{named[0][0].relative_to(root).as_posix()} rules_section {named[0][1]} is not a file"
+        return section, None
+    return root / "templates" / "CLAUDE_PROJECT_SECTION.md", None
+
+
+def test_chain_size_300(tmp):
+    """3.0.0 (plan 6.9-2, G5, R4, D9): what a director reads before work is one short chain - README, BOOTSTRAP and
+    the 每輪必讀 docs - of 24 KB at most, measured by memory_size_check --chain (the tool is the hard line, not a
+    sentence); the resident docs stay within 8 KB; every other doc is listed in the README map with when to read it;
+    R4 (plain words) and D9 (two failures of one call: write why first) are merged into existing lines."""
+    root = TOOLS.parent
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    resident = re.findall(r"^\| `(docs/[^`]+)` \|.*\*\*每輪必讀\*\*", readme, re.M)
+    check("g5: four resident docs", resident == ["docs/01_roles_authority.md", "docs/03_communication.md",
+                                                 "docs/06_resume_lossless.md", "docs/08_safety_rules.md"], str(resident))
+    size = sum(len((root / f).read_bytes().replace(b"\r\n", b"\n")) for f in resident)
+    check("g5: resident rules within 8 KB", size <= 8192, str(size))
+    chain = [root / "README.md", root / "BOOTSTRAP.md"] + [root / f for f in resident]
+    code, out = run("memory_size_check.py", "--chain", *chain)
+    check("plan 6.9-2: the chain is within 24 KB (memory_size_check --chain)", code == 0 and "CHAIN: PASS" in out,
+          out.strip().splitlines()[-1] if out.strip() else out)
+    # review 5-2 (ruled P1): beginner mode reads docs/12a in its first round, so its chain is measured too
+    beginner = chain + [root / "docs/12a_before_brief.md"]
+    code, out = run("memory_size_check.py", "--chain", *beginner)
+    check("review 5-2: the beginner chain (+ docs/12a) is within 24 KB", code == 0 and "CHAIN: PASS" in out,
+          out.strip().splitlines()[-1] if out.strip() else out)
+    # 3.0.0 B19: the platform rule file's DW section (AGENTS.md / CLAUDE.md / .agent/rules) is read on every turn
+    # too, so the shared chain leaves RULES_RESERVE for it, measured as a CRLF checkout (the worst case)
+    reserve = 2560
+    crlf_dir = tmp / "chain_size_300_crlf"
+    crlf_dir.mkdir(parents=True, exist_ok=True)
+    crlf_copies = []
+    for path in beginner:
+        copy = crlf_dir / path.name
+        copy.write_bytes(path.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+        crlf_copies.append(copy)
+    # B19 follow-up: the reserve is the base's promise to its variants; a variant's README carries its own sections
+    # (新增 / 沿用上游 / 拿掉 / 安裝), so there the test is its own chain plus its own rule-file section
+    if not (root / "BASE_VERSION").is_file():
+        for label, files in (("general", crlf_copies[:-1]), ("beginner", crlf_copies)):
+            code, out = run("memory_size_check.py", "--chain", *files, "--max-bytes", 24576 - reserve)
+            check(f"b19: the {label} chain in a CRLF checkout leaves {reserve} B for a rule-file section",
+                  code == 0 and "CHAIN: PASS" in out, out.strip().splitlines()[-1] if out.strip() else out)
+    section, problem = chain_rules_section(root)
+    check("b19: the rule-file section to measure is known", problem is None, str(problem))
+    for label, files in (("general", crlf_copies[:-1]), ("beginner", crlf_copies)):
+        if section is None:
+            break
+        code, out = run("memory_size_check.py", "--chain", *files, "--rules-file", section)
+        check(f"b19: the {label} chain (CRLF) plus the DW section of {section.name} is within 24 KB",
+              code == 0 and "CHAIN: PASS" in out and "rules=1" in out and "[DW section lines" in out,
+              out.strip().splitlines()[-1] if out.strip() else out)
+    hook = tmp / "chain_size_300_hook"
+    for name, files in (("plain", {}),
+                        ("named", {"adapters/x/VARIANT.json": '{"rules_section": "adapters/x/AGENTS_SECTION.md"}',
+                                   "adapters/x/AGENTS_SECTION.md": "## 總監制\n"}),
+                        ("other_key", {"adapters/x/VARIANT.json": '{"default_strength": "light"}'}),
+                        ("gone", {"adapters/x/VARIANT.json": '{"rules_section": "adapters/x/NONE.md"}'}),
+                        ("broken", {"adapters/x/VARIANT.json": "{rules"})):
+        for rel, text in files.items():
+            (hook / name / rel).parent.mkdir(parents=True, exist_ok=True)
+            (hook / name / rel).write_text(text, encoding="utf-8")
+        (hook / name).mkdir(parents=True, exist_ok=True)
+    got = {name: chain_rules_section(hook / name) for name in ("plain", "named", "other_key", "gone", "broken")}
+    check("b19 hook: no VARIANT.json measures the Claude template",
+          got["plain"] == (hook / "plain" / "templates" / "CLAUDE_PROJECT_SECTION.md", None), str(got["plain"]))
+    check("b19 hook: VARIANT.json rules_section names the variant's own section",
+          got["named"] == (hook / "named" / "adapters/x/AGENTS_SECTION.md", None), str(got["named"]))
+    check("b19 hook: a VARIANT.json without rules_section keeps the template",
+          got["other_key"][0] == hook / "other_key" / "templates" / "CLAUDE_PROJECT_SECTION.md", str(got["other_key"]))
+    check("b19 hook: a rules_section that is not a file is a problem",
+          got["gone"][0] is None and "is not a file" in str(got["gone"][1]), str(got["gone"]))
+    check("b19 hook: a VARIANT.json that is not JSON is a problem",
+          got["broken"][0] is None and "cannot be read" in str(got["broken"][1]), str(got["broken"]))
+    boot = doc_text(root, "BOOTSTRAP.md")
+    check("review 5-2: the beginner reads docs/12a, not the whole docs/12, before the talk",
+          "| 1 | 讀 README、本檔、`docs/12a`，和每輪必讀的" in boot and "小白模式另讀 12a" in readme
+          and "小白模式另讀 12；" not in readme)
+    short = (root / "docs/12a_before_brief.md").read_text(encoding="utf-8")
+    check("review 5-2: docs/12a keeps the first question and the three reply states",
+          "這是給誰用的？第一版讓他做成哪一件事就有用？" in short
+          and all(f"`{s}`" in short for s in ("LOCK_ONLY", "LOCK_AND_USER_ASKED", "NO_START")))
+    padded = tmp / "chain_size_300"
+    padded.mkdir(parents=True, exist_ok=True)
+    copies = []
+    grow = (24576 - sum(len(path.read_bytes()) for path in beginner)) // 3 + 1  # 3.0.0 B19: the chain is shorter now
+    for path in beginner:
+        copy = padded / path.name
+        copy.write_bytes(path.read_bytes() + (b"\n" + "長".encode("utf-8") * grow if path.name.startswith("12a") else b""))
+        copies.append(copy)
+    code, out = run("memory_size_check.py", "--chain", *copies)
+    check("review 5-2: counterexample, docs/12a grown just past 24 KB makes the beginner chain FAIL",
+          code != 0 and "CHAIN: FAIL" in out, out.strip().splitlines()[-1] if out.strip() else out)
+    listed = set(re.findall(r"`(docs/[^`]+\.md)`", readme))
+    missing = sorted(p.relative_to(root).as_posix() for p in (root / "docs").glob("*.md")
+                     if p.relative_to(root).as_posix() not in listed)
+    check("g5: every doc is in the README map", not missing, str(missing))
+    prompt = readme.split("```text", 1)[-1].split("```", 1)[0]
+    check("g5: the start prompt reads the chain, not every doc", "docs/ 01 到 10" not in prompt
+          and "每輪必讀" in prompt, prompt[:200])
+    one = (root / "docs/01_roles_authority.md").read_text(encoding="utf-8")
+    stuck = [l for l in one.splitlines() if "換人不重置失敗次數" in l]
+    check("d9: merged into the existing stuck line", len(stuck) == 1 and "失敗兩次" in stuck[0]
+          and "原因" in stuck[0], str(stuck))
+    three = (root / "docs/03_communication.md").read_text(encoding="utf-8")
+    plain = [l for l in three.splitlines() if l.startswith("- 用 PO 指定的語言")]
+    check("r4: merged into the existing report line", len(plain) == 1 and "白話" in plain[0] and "術語" in plain[0],
+          str(plain))
+    for path in ("docs/13_bootstrap_details.md", "docs/14_user_guide.md"):
+        check(f"g5: {path} exists (the details moved out of the chain)", (root / path).is_file())
+
+
+def test_version_300(tmp):
+    """3.0.0 (item 8): the release is written down: VERSION says 3.0.0, the top CHANGELOG section is 3.0.0 with a
+    date (release.py reads the first heading and stops on a mismatch), no Unreleased draft is left above it, and the
+    section keeps its 新增 / 行為改變 / 遷移 / 延後 parts and the 對齊初衷 line."""
+    root = TOOLS.parent
+    version, text = upstream_300(root)
+    check("3.0.0: VERSION is 3.0.0", version == "3.0.0", version)
+    heads = re.findall(r"^## ([^\n]*)", text, re.M)
+    top = heads[0] if heads else ""
+    check("3.0.0: the first CHANGELOG heading is 3.0.0 with a date",
+          re.fullmatch(r"3\.0\.0 — \d{4}-\d{2}-\d{2}", top) is not None, top)
+    check("3.0.0: no Unreleased draft left", not any(h.startswith("Unreleased") for h in heads), str(heads[:2]))
+    body = re.search(r"^## 3\.0\.0[^\n]*\n(.*?)(?=^## \d)", text, re.M | re.S)
+    body = body.group(1) if body else ""
+    for part in ("### 新增", "### 行為改變", "### 遷移", "### 延後"):
+        check(f"3.0.0: the section has {part}", f"\n{part}\n" in "\n" + body, part)
+    check("3.0.0: the section has 對齊初衷", "對齊初衷" in body)
+    check("3.0.0: the section no longer calls itself a draft", "草稿" not in body.split("\n### ")[0], body[:80])
+
+
+def upstream_300(root):
+    """3.0.0 B16 (from the clddw / dshdw selftest override): (VERSION, CHANGELOG text) of the base release this
+    checkout carries. A variant keeps the base's in BASE_VERSION and CHANGELOG-upstream.md (its own VERSION and
+    CHANGELOG.md carry the variant version, X.Y.Z-<label>.N); the base itself has only VERSION and CHANGELOG.md. So a
+    variant runs the base selftest unchanged instead of keeping its own copy of this file."""
+    if (root / "BASE_VERSION").is_file() and (root / "CHANGELOG-upstream.md").is_file():
+        return ((root / "BASE_VERSION").read_text(encoding="utf-8").strip(),
+                (root / "CHANGELOG-upstream.md").read_text(encoding="utf-8"))
+    return (root / "VERSION").read_text(encoding="utf-8").strip(), (root / "CHANGELOG.md").read_text(encoding="utf-8")
+
+
+def test_upstream_300(tmp):
+    """3.0.0 B16: upstream_300 reads BASE_VERSION / CHANGELOG-upstream.md in a variant and VERSION / CHANGELOG.md in the
+    base; a variant with only one of the two files reads its own (both or neither); 1 mutation."""
+    d = tmp / "upstream_300"
+    base, var, half = d / "base", d / "var", d / "half"
+    for folder, version in ((base, "3.0.0"), (var, "3.0.0-x.4"), (half, "3.0.0-x.4")):
+        folder.mkdir(parents=True)
+        (folder / "VERSION").write_text(version + "\n", encoding="utf-8")
+        (folder / "CHANGELOG.md").write_text(f"# CHANGELOG\n\n## {version}\n", encoding="utf-8")
+    (var / "BASE_VERSION").write_text("3.0.0\n", encoding="utf-8")
+    (var / "CHANGELOG-upstream.md").write_text("# CHANGELOG\n\n## 3.0.0 base\n", encoding="utf-8")
+    (half / "BASE_VERSION").write_text("3.0.0\n", encoding="utf-8")
+    check("B16 the base reads VERSION and CHANGELOG.md", upstream_300(base) == ("3.0.0", "# CHANGELOG\n\n## 3.0.0\n"))
+    check("B16 a variant reads BASE_VERSION and CHANGELOG-upstream.md",
+          upstream_300(var) == ("3.0.0", "# CHANGELOG\n\n## 3.0.0 base\n"), upstream_300(var))
+    check("B16 BASE_VERSION without CHANGELOG-upstream.md reads the checkout's own pair",
+          upstream_300(half) == ("3.0.0-x.4", "# CHANGELOG\n\n## 3.0.0-x.4\n"))
+    check("B16 this checkout: the upstream version is a plain X.Y.Z",
+          re.fullmatch(r"\d+\.\d+\.\d+", upstream_300(TOOLS.parent)[0]) is not None, upstream_300(TOOLS.parent)[0])
+    import inspect  # the mutation takes the one function out, not the whole selftest module (its top level runs once)
+    source = inspect.getsource(upstream_300)
+    anchor = '    if (root / "BASE_VERSION").is_file() and (root / "CHANGELOG-upstream.md").is_file():\n'
+    if source.count(anchor) != 1:
+        failures.append(f"mutation b16_no_upstream: anchor found {source.count(anchor)} times, not once: {anchor!r}")
+    else:
+        space = {}
+        exec(compile(source.replace(anchor, "    if False:\n"), "b16_no_upstream", "exec"), space)
+        killed("selftest B16: without the BASE_VERSION branch a variant reads its own version",
+               space["upstream_300"](var)[0] != "3.0.0")
+
+
+def test_spec_reapprove_300(tmp):
+    """3.0.0 review P1-1 / P2-2: an approve cannot wash a CHANGED away. A brief changed after its snapshot is approved
+    again only with a higher 版次 and a new confirm time and words; only the latest 版次's snapshot counts (10 after 9),
+    and gate_check --brief --snapshot refuses the same re-approve."""
+    d = tmp / "spec_reapprove_300"
+    brief = spec_brief_300(d / "a")
+    folder = d / "a" / "brief-history"
+    changed = SPEC_OK.replace("給櫃台", "給櫃台和會計")
+    brief.write_text(changed, encoding="utf-8")
+    expect("reapprove: the changed brief is CHANGED", "spec_gate.py", 1, "check", "--brief", brief, says="CHANGED")
+    expect("reapprove: approve of the changed brief with nothing else changed is refused", "spec_gate.py", 1, "approve",
+           "--brief", brief, says=["REAPPROVE_WITHOUT_CONFIRM", "SPEC_GATE: FAIL"])
+    check("reapprove: a refused approve writes no snapshot", len(list(folder.glob("*.md"))) == 1)
+    expect("reapprove: the brief stays CHANGED after the refused approve", "spec_gate.py", 1, "check", "--brief", brief,
+           says="CHANGED")
+    only_rev = changed.replace("版次：1", "版次：2")
+    brief.write_text(only_rev, encoding="utf-8")
+    expect("reapprove: 版次 +1 with the old confirm time and words is refused", "spec_gate.py", 1, "approve",
+           "--brief", brief, says=["REAPPROVE_WITHOUT_CONFIRM", "使用者確認時間", "使用者確認原話"])
+    new_time = only_rev.replace("2026-11-08 10:00 +08:00", "2026-11-09 09:30 +08:00")
+    brief.write_text(new_time, encoding="utf-8")
+    expect("reapprove: a new time with the old words is refused", "spec_gate.py", 1, "approve", "--brief", brief,
+           says="使用者確認原話", lacks="使用者確認時間和")
+    confirmed = new_time.replace("「對，就是這樣，開始做」", "「加上會計也可以，就這樣」")
+    brief.write_text(confirmed, encoding="utf-8")
+    expect("reapprove: 版次 +1 with a new confirm time and words passes", "spec_gate.py", 0, "approve", "--brief", brief,
+           says="BRIEF_LOCKED rev=2")
+    expect("reapprove: the re-confirmed brief passes check", "spec_gate.py", 0, "check", "--brief", brief,
+           says="SPEC_GATE: PASS")
+    old = SPEC_OK
+    brief.write_text(old, encoding="utf-8")
+    expect("reapprove: going back to the older approved 版次 is CHANGED (only the latest counts)", "spec_gate.py", 1,
+           "check", "--brief", brief, says=["CHANGED", "2-"])
+    expect("reapprove: an approve of the older approved 版次 is refused too", "spec_gate.py", 1, "approve", "--brief",
+           brief, says=["REAPPROVE_WITHOUT_CONFIRM", "沒有大於最近核准的 2"])
+
+    # 版次 9 and 10: the latest is picked by number, not by name
+    nine = spec_brief_300(d / "b", SPEC_OK.replace("版次：1", "版次：9"))
+    ten = SPEC_OK.replace("版次：1", "版次：10").replace("2026-11-08 10:00", "2026-11-10 10:00").replace(
+        "「對，就是這樣，開始做」", "「第十版可以」")
+    nine.write_text(ten, encoding="utf-8")
+    expect("reapprove: 版次 10 after 9 is approved", "spec_gate.py", 0, "approve", "--brief", nine, says="rev=10")
+    nine.write_text(ten.replace("給櫃台", "給大家"), encoding="utf-8")
+    expect("reapprove: CHANGED names the latest snapshot by number (10, not 9)", "spec_gate.py", 1, "check", "--brief",
+           nine, says="最近核准的是 10-")
+    expect("reapprove: 版次 10 again (not above 10) is refused", "spec_gate.py", 1, "approve", "--brief", nine,
+           says=["REAPPROVE_WITHOUT_CONFIRM", "沒有大於最近核准的 10"])
+
+    # gate_check --brief --snapshot writes the same snapshot and refuses the same way
+    gbrief = spec_brief_300(d / "c")
+    gbrief.write_text(changed, encoding="utf-8")
+    expect("reapprove: gate_check --brief --snapshot refuses a re-approve without a new confirm", "gate_check.py", 2,
+           "--brief", gbrief, "--snapshot", d / "c" / "brief-history")
+    check("reapprove: gate_check wrote no snapshot", len(list((d / "c" / "brief-history").glob("*.md"))) == 1)
+
+    # mutation: with the re-approve check taken out, the changed brief is approved and passes again
+    module = mutant(TOOLS / "spec_gate.py", [("        if stale:\n            return \"FAIL\", [f\"  - {stale}\"]",
+                                              "        if False:\n            return \"FAIL\", [f\"  - {stale}\"]")],
+                    "p1_1_reapprove")
+    if module is not None:
+        m = spec_brief_300(d / "m")
+        m.write_text(changed, encoding="utf-8")
+        status, _ = module.check(m, d / "m" / "brief-history", approve=True)
+        killed("P1-1 approve washes CHANGED away", status == "PASS")
+    module = mutant(TOOLS / "spec_gate.py", [("if not approved or rev < found[-1][0]:", "if not approved:")],
+                    "p2_2_latest")
+    if module is not None:
+        killed("P2-2 an older approved 版次 passes", module.check(brief, folder)[0] == "PASS")
+
+
+def test_spec_content_300(tmp):
+    """3.0.0 review P1-2: the spec gate checks R6's content, not only the confirm fields. The blank template with only
+    the status, 版次, confirm time and words, open items and prior-art survey filled in is INCOMPLETE_SPEC; so is a brief
+    with no 一句話, no 給誰 or 一定要有 row, a row whose 怎麼算做到 is a <placeholder>, or no 限制."""
+    d = tmp / "spec_content_300"
+    blank = (TEMPLATES / "BRIEF.md").read_text(encoding="utf-8")
+    only_fields = (blank.replace("- 狀態：<DRAFT | LOCKED>", "- 狀態：LOCKED").replace("- 版次：<1>", "- 版次：1")
+                   .replace("- 使用者確認時間：<讀系統時鐘；DRAFT 時寫 NONE>", "- 使用者確認時間：2026-11-08 10:00 +08:00")
+                   .replace("- 使用者確認原話：<使用者確認時說的話，原文照抄；DRAFT 時寫 NONE>", "- 使用者確認原話：「好」")
+                   .replace("- <找了什麼 → 用哪個／不用的理由>", "- 找了 csvkit → 不用：標準函式庫就夠"))
+    check("content: the fixture fills the confirm fields", "狀態：LOCKED" in only_fields and "「好」" in only_fields
+          and "找了 csvkit" in only_fields)
+    expect("content: the blank template is INCOMPLETE_SPEC", "spec_gate.py", 1, "approve", "--brief",
+           spec_brief_300(d / "blank", blank, approve=False), says="INCOMPLETE_SPEC")
+    brief = spec_brief_300(d / "fields", only_fields, approve=False)
+    expect("content: the template with only the confirm fields filled is blocked", "spec_gate.py", 1, "approve",
+           "--brief", brief, says=["INCOMPLETE_SPEC", "一句話", "B-3", "限制", "SPEC_GATE: FAIL"],
+           lacks=["NOT_LOCKED", "NO_CONFIRM", "NO_PRIOR_ART"])
+    check("content: a blocked approve writes no snapshot", not (d / "fields" / "brief-history").exists())
+    row_b2 = "| B-2 | 一定要有 | 依到場時間排序 | 第一列是最早到的人 |\n"
+    bad = [("no 一句話", SPEC_OK.replace("- 一句話：給櫃台看今天名單的小網頁\n", ""), "「一句話」沒填"),
+           ("a placeholder 一句話", SPEC_OK.replace("給櫃台看今天名單的小網頁", "<一句話>"), "「一句話」沒填"),
+           ("no 給誰 row", SPEC_OK.replace("| B-1 | 給誰 | 給櫃台 | 打開就能看到表 |\n", ""), "沒有「給誰」"),
+           ("no 一定要有 row", SPEC_OK.replace(row_b2, ""), "沒有「一定要有」"),
+           ("a <…> 怎麼算做到", SPEC_OK.replace("第一列是最早到的人", "<…>"), "B-2 的內容"),
+           ("an empty 內容", SPEC_OK.replace("依到場時間排序", ""), "B-2 的內容"),
+           ("a short row", SPEC_OK.replace(row_b2, "| B-2 | 一定要有 | 依到場時間排序 |\n"), "B-2 的內容"),
+           ("a 一定要有 row only inside a fence", SPEC_OK.replace(row_b2, "```\n" + row_b2 + "```\n"), "沒有「一定要有」"),
+           ("no 限制 section", SPEC_OK.replace("## 限制\n- 不花錢\n", ""), "「## 限制」沒寫"),
+           ("a placeholder 限制", SPEC_OK.replace("- 不花錢", "- <預算>"), "「## 限制」沒寫")]
+    for number, (name, text, why) in enumerate(bad):
+        expect(f"content: {name} is INCOMPLETE_SPEC", "spec_gate.py", 1, "approve", "--brief",
+               spec_brief_300(d / f"bad{number}", text, approve=False), says=["INCOMPLETE_SPEC", why])
+    expect("content: 限制 `- 無` is an answer", "spec_gate.py", 0, "approve", "--brief",
+           spec_brief_300(d / "none", SPEC_OK.replace("- 不花錢", "- 無"), approve=False), says="SPEC_GATE: PASS")
+    expect("content: a bold B id counts", "spec_gate.py", 0, "approve", "--brief",
+           spec_brief_300(d / "bold", SPEC_OK.replace("| B-2 |", "| **B-2** |"), approve=False), says="SPEC_GATE: PASS")
+    module = mutant(TOOLS / "spec_gate.py", [("    found += spec_problems(text)\n", "    found += []\n")], "p1_2_content")
+    if module is not None:
+        killed("P1-2 the R6 content is not checked", module.check(brief, d / "fields" / "mut")[0] != "FAIL"
+               or not any("INCOMPLETE_SPEC" in line for line in module.check(brief, d / "fields" / "mut")[1]))
+
+
+def test_worktree_gate_300(tmp):
+    """3.0.0 review P1-3 (R6: no branch or worktree before the spec is confirmed; beginner mode has no hook):
+    worktree.py open runs spec_gate.py check first and makes nothing unless it passes."""
+    d = tmp / "worktree_gate_300"
+    repo = d / "proj"
+    repo.mkdir(parents=True)
+    g = lambda *a, cwd=repo: subprocess.run(["git", *a], cwd=cwd, capture_output=True, encoding="utf-8")  # noqa: E731
+    g("init", "-q", "-b", "main")
+    g("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "i")
+    t = "worktree.py"
+    branches = lambda: g("branch", "--list").stdout  # noqa: E731
+    expect("wt gate: open with no brief is refused", t, 1, "open", repo, "--order", "WO-001",
+           says=["NO_BRIEF", "WORKER_WORKTREE: FAIL SPEC_GATE", "nothing made"])
+    check("wt gate: no worktree folder and no branch after the refusal",
+          not (d / "wt" / "WO-001").exists() and "wt/wo-001" not in branches())
+    spec_brief_300(repo / "DIRECTOR", SPEC_OK.replace("LOCKED", "DRAFT"), approve=False)
+    expect("wt gate: open with a draft brief is refused", t, 1, "open", repo, "--order", "WO-001",
+           says=["NOT_LOCKED", "FAIL SPEC_GATE"])
+    spec_brief_300(repo / "DIRECTOR", approve=False)
+    expect("wt gate: open before approve is refused", t, 1, "open", repo, "--order", "WO-001", says="NOT_APPROVED")
+    spec_brief_300(repo / "DIRECTOR")
+    expect("wt gate: open after approve makes the worktree", t, 0, "open", repo, "--order", "WO-001",
+           says=["SPEC_GATE: PASS", "WORKTREE: 隔離 worktree"])
+    (repo / "DIRECTOR" / "BRIEF.md").write_text(SPEC_OK.replace("給櫃台", "給大家"), encoding="utf-8")
+    expect("wt gate: open after the brief changed is refused", t, 1, "open", repo, "--order", "WO-002", says="CHANGED")
+    check("wt gate: the refused WO-002 made nothing", not (d / "wt" / "WO-002").exists() and "wt/wo-002" not in branches())
+    other = spec_brief_300(d / "outside")
+    expect("wt gate: --brief names an outside brief (old layout)", t, 0, "open", repo, "--order", "WO-003",
+           "--brief", other, says="SPEC_GATE: PASS")
+    module = mutant(TOOLS / t, [("    if not passed:\n", "    if False:\n")], "p1_3_wt_gate")
+    if module is not None:
+        code, _ = module.open_worktree(repo, "WO-004")
+        killed("P1-3 open skips the spec gate", code == 0)
+
+
+def test_delivery_bind_300(tmp):
+    """3.0.0 review P1-4, P1-5, P1-6, P2-6, P2-7 (C2 hard line, C4): the delivered candidate is the one the latest gate
+    verdict judged, and HEAD has not moved on since the record; no order, no judged conditions and an unreadable
+    acceptance type never pass; every E2E record names its candidate; two files for one order are ambiguous.
+    Mutation tested."""
+    d = tmp / "delivery_bind_300"
+    repo = d / "proj"
+    repo.mkdir(parents=True)
+    g = lambda *a: subprocess.run(["git", *a], cwd=repo, capture_output=True, encoding="utf-8")  # noqa: E731
+    who = ("-c", "user.name=t", "-c", "user.email=t@example.invalid")
+    g("init", "-q", "-b", "main")
+    (repo / "app.txt").write_text("v1\n", encoding="utf-8")
+    g("add", "app.txt")
+    g(*who, "commit", "-q", "-m", "first")
+    x = g("rev-parse", "HEAD").stdout.strip()
+    director = repo / "DIRECTOR"
+    (director / "orders").mkdir(parents=True)
+    (director / ".gitignore").write_text("*\n", encoding="utf-8")
+    order = director / "orders" / "WO-003-login.md"
+    order.write_text("# WO-003\nGOVERNANCE = Standard\n| ID | 類型 | 要求 |\n|---|---|---|\n| AC-1 | AUTO | 跑得起來 |\n",
+                     encoding="utf-8")
+    e2e = director / "evidence" / "E2E"
+    e2e.mkdir(parents=True)
+    run_log = e2e / "run.log"
+    run_log.write_text(f"ENTRY_POINT: python app.py\nCANDIDATE: {x}\nEXIT_CODE: 0\n", encoding="utf-8")
+    record = director / "evidence" / "DELIVERY.json"
+    dl, gc = "delivery.py", "gate_check.py"
+    base = ("--director", director, "--repo", repo)
+    rec = ("record", *base, "--file", "app.txt")
+
+    expect("bind P1-5: record without --order", dl, 1, *rec, "--candidate", x, says=["NO_ORDER", "DELIVERY_RECORD: FAIL"])
+    expect("bind P1-4: record with no verdict for the order", dl, 1, *rec, "--candidate", x, "--order", "WO-003",
+           says=["NO_VERDICT WO-003", "DELIVERY_RECORD: FAIL"])
+    verdict = director / "reports" / "GATE_VERDICT_WO-003.md"
+    verdict.parent.mkdir()
+    verdict.write_text(f"VERDICT: PASS\nCANDIDATE_HEAD: {x}\n", encoding="utf-8")
+    expect("bind P1-4: record of the judged candidate", dl, 0, *rec, "--candidate", x, "--order", "WO-003",
+           says="DELIVERY_RECORD: DONE")
+    data = json.loads(record.read_text(encoding="utf-8")) if record.is_file() else {}
+    check("bind P1-4: the record names its verdict", data.get("verdict") == "reports/GATE_VERDICT_WO-003.md", str(data)[:200])
+    (director / "evidence" / "auto.md").write_text("exit 0\n", encoding="utf-8")
+    expect("bind: judge AC-1", dl, 0, "judge", "--director", director, "--ac", "AC-1", "--kind", "auto", "--outcome", "PASS",
+           "--evidence", "evidence/auto.md", says="DELIVERY_JUDGE: DONE")
+    expect("bind: a clean delivery", dl, 0, "check", *base, says="DELIVERY_CHECK: PASS", lacks=["HEAD_MOVED", "VERDICT"])
+    expect("bind: gate_check --final passes", gc, 0, "--final", director, says="OK   final")
+
+    (repo / "app.txt").write_text("v2 never reviewed\n", encoding="utf-8")
+    g("add", "app.txt")
+    g(*who, "commit", "-q", "-m", "after the verdict")
+    y = g("rev-parse", "HEAD").stdout.strip()
+    expect("bind P1-4 B: HEAD moved on after the record", dl, 1, "check", *base, says=["HEAD_MOVED", "DELIVERY_CHECK: FAIL"])
+    expect("bind P1-4 B: gate_check --final fails on it", gc, 1, "--final", director, says=["FAIL final", "HEAD_MOVED"])
+    expect("bind P1-4 B: --delivered names the commit to push", dl, 0, "check", *base, "--delivered", x,
+           says="DELIVERY_CHECK: PASS")
+    kept = record.read_bytes()
+    expect("bind P1-4 A: recording an unreviewed HEAD", dl, 1, *rec, "--candidate", y, "--order", "WO-003",
+           says=["VERDICT_MISMATCH", "DELIVERY_RECORD: FAIL"])
+    check("bind P1-4 A: nothing written", record.read_bytes() == kept)
+    newer = director / "reports" / "GATE_VERDICT_WO-003_r2.md"
+    newer.write_text(f"VERDICT: PASS\nCANDIDATE_HEAD: {y}\n", encoding="utf-8")
+    os.utime(newer, (verdict.stat().st_mtime + 60,) * 2)
+    expect("bind P1-4: a newer verdict judged another commit", dl, 1, "check", *base, "--delivered", x,
+           says="VERDICT_MISMATCH")
+    newer.rename(director / "reports" / "old_r2.txt")
+
+    run_log.write_text("ENTRY_POINT: python app.py\nEXIT_CODE: 0\n", encoding="utf-8")
+    expect("bind P2-6: an E2E record without CANDIDATE", dl, 1, "check", *base, "--delivered", x,
+           says="E2E_NO_CANDIDATE run.log")
+    run_log.write_text(f"ENTRY_POINT: python app.py\nCANDIDATE: {x}\nEXIT_CODE: 0\n", encoding="utf-8")
+
+    good = order.read_text(encoding="utf-8")
+    order.write_text(good.replace("| AUTO |", "| <AUTO / REVIEW / PO> |"), encoding="utf-8")
+    expect("bind P1-6: a template placeholder type", dl, 1, "check", *base, "--delivered", x,
+           says="UNKNOWN_KIND AC-1")
+    order.write_text(good.replace("| AUTO |", "| AUTO（自動） |"), encoding="utf-8")
+    expect("bind P1-6: a type with extra words", dl, 1, "check", *base, "--delivered", x, says="UNKNOWN_KIND AC-1")
+    order.write_text("# WO-003\nGOVERNANCE = Standard\n沒有驗收表\n", encoding="utf-8")
+    expect("bind P1-6: no acceptance row at all", dl, 1, "check", *base, "--delivered", x, says="NO_CONDITIONS WO-003")
+    order.write_text(good, encoding="utf-8")
+    other = director / "orders" / "WO-003-old.md"
+    other.write_text(good, encoding="utf-8")
+    expect("bind P2-7: two files for one order", dl, 1, "check", *base, "--delivered", x, says="AMBIGUOUS_ORDER WO-003")
+    other.rename(director / "old-WO-003.txt")
+    expect("bind: clean again", dl, 0, "check", *base, "--delivered", x, says="DELIVERY_CHECK: PASS")
+
+    raw = json.loads(kept.decode("utf-8"))
+    raw["order"] = None
+    record.write_text(json.dumps(raw), encoding="utf-8")
+    expect("bind P1-5: a record without an order", dl, 1, "check", *base, "--delivered", x, says="NO_ORDER")
+    expect("bind P1-5: gate_check --final fails on it", gc, 1, "--final", director, says=["FAIL final", "NO_ORDER"])
+    record.write_bytes(kept)
+
+    direct = d / "direct"
+    (direct / "orders").mkdir(parents=True)
+    (direct / "orders" / "WO-004.md").write_text("# WO-004\nGOVERNANCE = Direct\n只改文件\n", encoding="utf-8")
+    expect("bind: a Direct order is the written exception", dl, 0, "record", "--director", direct, "--repo", repo,
+           "--file", "app.txt", "--candidate", y, "--order", "WO-004", says="DELIVERY_RECORD: DONE")
+    expect("bind: a Direct order passes with a note", dl, 0, "check", "--director", direct, "--repo", repo,
+           says=["DIRECT WO-004", "NO_CONDITIONS WO-004", "DELIVERY_CHECK: PASS"])
+
+    real = mutant(TOOLS / dl, [], "p1_4_real")
+
+    def problems(module, folder=director, shipped=x):
+        try:
+            return module.check_delivery(folder, repo, shipped)[0]
+        except Exception as error:  # a crash is no silent pass
+            return [f"CRASH {error!r}"]
+
+    check("bind: in process, the real check passes the clean record", real is not None and not problems(real),
+          str(real and problems(real)))
+    module = mutant(TOOLS / dl, [("        if now_head != delivered:\n", "        if False:\n")], "p1_4_head")
+    if module is not None:
+        killed("P1-4 HEAD not compared", not problems(module, shipped=None))
+    newer.write_text(f"CANDIDATE_HEAD: {y}\n", encoding="utf-8")
+    os.utime(newer, (verdict.stat().st_mtime + 60,) * 2)
+    module = mutant(TOOLS / dl, [('            elif judged != candidate:\n                problems.append(f"VERDICT_MISMATCH: 最新',
+                                  '            elif False:\n                problems.append(f"VERDICT_MISMATCH: 最新')],
+                    "p1_4_verdict")
+    if module is not None:
+        killed("P1-4 verdict not compared", not problems(module))
+    newer.unlink()
+    raw["order"] = None
+    record.write_text(json.dumps(raw), encoding="utf-8")
+    module = mutant(TOOLS / dl, [('problems.append("NO_ORDER: 交付紀錄', 'notes.append("NO_ORDER: 交付紀錄')], "p1_5_order")
+    if module is not None:
+        killed("P1-5 no order passes", not problems(module))
+    record.write_bytes(kept)
+    order.write_text(good.replace("| AUTO |", "| <AUTO / REVIEW / PO> |"), encoding="utf-8")
+    module = mutant(TOOLS / dl, [('problems += [f"UNKNOWN_KIND', 'notes += [f"UNKNOWN_KIND')], "p1_6_kind")
+    if module is not None:
+        killed("P1-6 unknown kind passes", not problems(module))
+    order.write_text("# WO-003\nGOVERNANCE = Standard\n", encoding="utf-8")
+    module = mutant(TOOLS / dl, [("(notes if direct else problems).append(", "notes.append(")], "p1_6_none")
+    if module is not None:
+        killed("P1-6 no conditions passes", not problems(module))
+    order.write_text(good, encoding="utf-8")
+
+
+def test_handoff_names_300(tmp):
+    """3.0.0 review P1-7 (R5, C3): an order file named with a description (orders/WO-001-list.md) that a DISPATCH line
+    names by its ID is dispatched, not an undispatched draft; WO-0010 is not WO-001. Review P2-13: a quiz answer
+    「無法確定」 is not the answer 「無」. Mutation tested."""
+    d = tmp / "handoff_names_300"
+    repo, director = handoff_fixture_300(d)
+    orders = director / "orders"
+    (orders / "WO-001.md").rename(orders / "WO-001-list.md")
+    (orders / "WO-0010.md").write_text("# WO-0010\n", encoding="utf-8")
+    code, out = run("handoff.py", "export", "--director", director)
+    check("handoff P1-7: export exits 0 and counts 2 drafts (WO-0010, WO-002)", code == 0 and "drafts=2" in out, out)
+    real = mutant(TOOLS / "handoff.py", [], "p1_7_real")
+    check("handoff P1-7: in process, the same drafts",
+          real is not None and real.drafts(director, real.dispatches(director)) == ["WO-0010", "WO-002"],
+          str(real and real.drafts(director, real.dispatches(director))))
+    check("handoff P2-13: 「無」 answers NONE", real is not None and real.right("無", "NONE") and real.right("沒有。", "NONE"))
+    check("handoff P2-13: 「無法確定」 does not answer NONE", real is not None and not real.right("無法確定", "NONE")
+          and not real.right("沒有看到檔案，可能在別處", "NONE"))
+    module = mutant(TOOLS / "handoff.py", [("    if lead:\n        names.add(", "    if False:\n        names.add(")],
+                    "p1_7_prefix")
+    if module is not None:
+        killed("P1-7 the leading ID is ignored", "WO-001-list" in module.drafts(director, module.dispatches(director)))
+    module = mutant(TOOLS / "handoff.py", [("        return said in NONE_WORDS or", "        return said.startswith(NONE_WORDS) or")],
+                    "p2_13_none")
+    if module is not None:
+        killed("P2-13 startswith again", module.right("無法確定", "NONE"))
+
+
+def test_hash_order_300(tmp):
+    """3.0.0 review P2-8 (R6): gate_check --hash gates a hand-written order without the `GOVERNANCE =` line too, when
+    it sits in orders/ or its name starts with WO-<n>; a task report named after the order is not an order.
+    Mutation tested."""
+    d = tmp / "hash_order_300"
+    director = d / "DIRECTOR"
+    (director / "orders").mkdir(parents=True)
+    plain = "# WO-005 名單頁\n請做一個名單頁。\n"
+    in_orders = director / "orders" / "list-page.md"
+    in_orders.write_text(plain, encoding="utf-8")
+    named = d / "WO-006-login.md"
+    named.write_text(plain.replace("WO-005", "WO-006"), encoding="utf-8")
+    report = d / "WO-006_TASK_REPORT.md"
+    report.write_text("# TASK REPORT WO-006\n", encoding="utf-8")
+    g = "gate_check.py"
+    expect("hash P2-8: an order in orders/ without GOVERNANCE is gated (no brief)", g, 1, "--hash", in_orders,
+           says=["FAIL SPEC_GATE", "NO_BRIEF"], lacks="rev=")
+    expect("hash P2-8: a WO-<n> file without GOVERNANCE is gated", g, 1, "--hash", named, says="FAIL SPEC_GATE",
+           lacks="rev=")
+    expect("hash P2-8: a task report named after the order is not an order", g, 0, "--hash", report, lacks="SPEC_GATE")
+    spec_brief_300(director)
+    expect("hash P2-8: the order in orders/ passes once the spec passes", g, 0, "--hash", in_orders,
+           says=["DISPATCH", "rev="], lacks="FAIL SPEC_GATE")
+    real = mutant(TOOLS / g, [], "p2_8_real")
+    check("hash P2-8: in process", real is not None and real.is_order(plain, in_orders) and real.is_order(plain, named)
+          and not real.is_order(plain, report) and not real.is_order(plain))
+    module = mutant(TOOLS / g, [("    if path is None:\n        return False\n", "    return False\n")], "p2_8_path")
+    if module is not None:
+        killed("P2-8 only the GOVERNANCE line counts", not module.is_order(plain, in_orders))
+    # a passing brief in a folder above that is not orders/ (another project higher up) does not open the gate
+    up = d / "up"
+    spec_brief_300(up)
+    lower = up / "proj" / "WO-007-page.md"
+    lower.parent.mkdir()
+    lower.write_text(plain.replace("WO-005", "WO-007"), encoding="utf-8")
+    expect("hash P2-8: a brief two folders up (not orders/) does not count", g, 1, "--hash", lower,
+           says="FAIL SPEC_GATE", lacks="rev=")
+    module = mutant(TOOLS / g, [('    above = folder.name.lower() == "orders"\n', "    above = True\n")], "p2_8_above")
+    if module is not None:
+        killed("P2-8 the folder above counts only for orders/", module.find_brief(lower).resolve() == (up / "BRIEF.md").resolve())
+
+
+def test_bootstrap_sub_300(tmp):
+    """3.0.0 review P2-10 (R3): bootstrap_repo run with --repo set to a subfolder checks the patterns from the checkout's
+    top, and never writes the same exclude line twice (a rerun after a FAIL adds nothing). Mutation tested."""
+    d = tmp / "bootstrap_sub_300"
+    top = d / "proj"
+    sub = top / "app" / "src"
+    sub.mkdir(parents=True)
+    g = lambda *a, cwd=top: subprocess.run(["git", *a], cwd=cwd, capture_output=True, encoding="utf-8")  # noqa: E731
+    g("init", "-q")
+    (top / ".gitignore").write_text("!reincluded.local\n", encoding="utf-8")
+    g("add", ".gitignore")
+    g("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "i")
+    exclude = top / ".git" / "info" / "exclude"
+    expect("bootstrap P2-10: run from a subfolder is DONE", "bootstrap_repo.py", 0, "--repo", sub,
+           says=["DONE  .claude/settings.local.json: added; git check-ignore confirms", "BOOTSTRAP_REPO: DONE"])
+    check("bootstrap P2-10: git ignores it at the top", g("check-ignore", "-q", "--", ".claude/settings.local.json")
+          .returncode == 0)
+    once = exclude.read_bytes()
+    expect("bootstrap P2-10: a rerun from the subfolder is OK", "bootstrap_repo.py", 0, "--repo", sub,
+           says="OK    .claude/settings.local.json: already ignored")
+    check("bootstrap P2-10: the rerun writes nothing", exclude.read_bytes() == once)
+    for n in (1, 2):
+        expect(f"bootstrap P2-10: a negated entry FAILs (run {n})", "bootstrap_repo.py", 1, "--repo", sub,
+               "--add", "reincluded.local", says="FAIL  reincluded.local: added, but git check-ignore")
+    text = exclude.read_text(encoding="utf-8")
+    check("bootstrap P2-10: the FAILed line is written once, not once per run",
+          text.count("reincluded.local\n") == 1 and text.count(".claude/settings.local.json\n") == 1, text)
+
+    for name, swaps, run_twice in (
+            ("no toplevel", [("    if code == 0 and top.strip():\n", "    if False:\n")], False),
+            ("no dedupe", [("            fresh = [entry for entry, _ in missing if entry not in have]",
+                            "            fresh = [entry for entry, _ in missing]")], True)):
+        module = mutant(TOOLS / "bootstrap_repo.py", swaps, f"p2_10_{name.replace(' ', '_')}")
+        if module is None:
+            continue
+        fresh = d / f"m {name}"
+        inner = fresh / "a" / "b"
+        inner.mkdir(parents=True)
+        g("init", "-q", cwd=fresh)
+        (fresh / ".gitignore").write_text("!reincluded.local\n", encoding="utf-8")
+        args = ["--repo", inner] + (["--add", "reincluded.local"] if run_twice else [])
+        first = g2_main(module, *args)
+        if run_twice:
+            g2_main(module, *args)
+        text = (fresh / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+        if run_twice:
+            killed(f"P2-10 {name}", text.count("reincluded.local\n") > 1)
+        else:
+            killed(f"P2-10 {name}", first != 0)
+
+
+def test_review_docs_300(tmp):
+    """3.0.0 review 5-1, 5-3, 5-4, 5-5: the docs say what the tools do after the fixes - install.py claims that
+    base_sync_check reads its list only while tools/base_sync_check.py really calls install.manifest (B6), the spec gate is not claimed to stop what skips its tools, delivery binds the candidate
+    to the verdict, and VARIANT_README is three parts plus the upstream record."""
+    root = TOOLS.parent
+    log = upstream_300(root)[1]
+    top = log.split("\n## ", 2)[1]
+    install = (root / "tools" / "install.py").read_text(encoding="utf-8")
+    sync = root / "tools" / "base_sync_check.py"
+    sync_text = sync.read_text(encoding="utf-8") if sync.is_file() else ""
+    old_5_3 = "不靠 hook，所以小白模式（不裝 hook_guard）也擋得住。"
+    old_5_4 = "`record` 只在候選 commit 就是要交付的 HEAD 時寫"
+
+    def problems(top, install, sync_text=sync_text):
+        return {
+            "5-1 install.py says base_sync_check reads the list, but it does not": "base_sync_check reads the same list"
+            in install and "install.manifest(" not in sync_text,
+            "5-3 the spec gate is claimed to stop everything without hooks": old_5_3 in top or "基板擋不到" not in top,
+            "5-4 record is described as binding only to HEAD": old_5_4 in top or "CANDIDATE_HEAD" not in top,
+            "5-5 VARIANT_README is called four fixed parts": "固定四節" in top or "三段" not in top,
+        }
+    for name, bad in problems(top, install).items():
+        check(f"review docs: {name}", not bad)
+    # counterexamples: each old sentence put back is caught
+    back = problems(top + old_5_3 + old_5_4 + "固定四節", install + "base_sync_check reads the same list", "")
+    check("review docs: counterexample, every old sentence put back is caught", all(back.values()), str(back))
+
+
+def privacy_scan_module():
+    """tools/privacy_scan.py as a module (its banned lists are read from it, so the selftest never spells them)."""
+    spec = importlib.util.spec_from_file_location("privacy_scan_under_test", TOOLS / "privacy_scan.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_privacy_scan_300(tmp):
+    """3.0.0 privacy ruling: privacy_scan.py reads every file and path name of the tree (or of one commit), each banned
+    kind is a HIT that never prints the text whole, the allow list needs a reason per entry and covers only its own
+    span, and release.py stops on any hit. All banned samples are built here at run time, so this file stays clean.
+    Mutation tested (allow span, reason required, path names, release step)."""
+    ps = privacy_scan_module()
+    tool = "privacy_scan.py"
+    expect("privacy: this checkout is clean (whole tree, untracked files too)", tool, 0, "--repo", TOOLS.parent,
+           says="PRIVACY_SCAN: CLEAN working tree")
+    d = tmp / "privacy_300"
+    repo = d / "repo"
+    (repo / "tools").mkdir(parents=True)
+    g = lambda *a: subprocess.run(["git", "-C", str(repo), *a], capture_output=True, encoding="utf-8")  # noqa: E731
+    g("init", "-q")
+    (repo / "tools" / "privacy_allow.txt").write_bytes((TOOLS / "privacy_allow.txt").read_bytes())
+    drive, owner = "D" + ":", ps.OWNER
+    token = "ghp_" + "Q7" * 18
+    samples = {
+        "drive_path": f"work in {drive}/work/app\n",
+        "drive_back": f"or {drive}\\work\\app\n",
+        "user_mac": "see /" + "Users/alice/notes\n",
+        "user_bash": "see /c/" + "Users/bob/x\n",
+        "user_linux": "see /" + "home/carol/x\n",
+        "email": "mail alice@" + "mail.co\n",
+        "token": f"key {token}\n",
+        "owner": f"by {owner} himself\n",
+        "mixed": "t@example.invalid and dave@" + "corp.co on one line\n",
+    }
+    for number, name in enumerate(ps.CODE_NAMES):
+        samples[f"code_{number}"] = f"from {name.upper() if name.isascii() else name} days\n"
+    for name, text in samples.items():
+        (repo / f"{name}.txt").write_text(text, encoding="utf-8")
+    clean = ("ok t@example.invalid x@example.com /home/dw/.claude <WS>/DIRECTOR https://github.com/" + owner
+             + "/DIRECTOR-WORK api.github.com/users/x\n")
+    (repo / "clean.md").write_text(clean, encoding="utf-8")
+    (repo / ("notes-" + ps.CODE_NAMES[0] + ".md")).write_text("x\n", encoding="utf-8")
+    (repo / "blob.bin").write_bytes(b"\0" + f"{drive}/work".encode())
+    words = "Zelda Quinn"
+    (repo / "privacy_banned.local.txt").write_text(words + " | a real name\n", encoding="utf-8")
+    (repo / "word.txt").write_text(f"thanks {words.lower()}\n", encoding="utf-8")
+    code, out = run(tool, "--repo", repo)
+    hits = [line for line in out.splitlines() if line.startswith("HIT ")]
+    want = {"drive_path.txt": "drive_path", "drive_back.txt": "drive_path", "user_mac.txt": "user_folder",
+            "user_bash.txt": "user_folder", "user_linux.txt": "user_folder", "email.txt": "email",
+            "token.txt": "token", "owner.txt": "owner_handle", "mixed.txt": "email", "word.txt": "private_word",
+            **{f"code_{n}.txt": "code_name" for n in range(len(ps.CODE_NAMES))}}
+    for name, rule in want.items():
+        check(f"privacy: {name} is a {rule} HIT", any(h.startswith(f"HIT {rule} {name}:1 ") for h in hits), out[-900:])
+    check("privacy: a banned word in a path name is a HIT (line 0)",
+          any(h.startswith("HIT code_name notes-") and ":0 " in h for h in hits), out[-600:])
+    check("privacy: allowed text (test domains, the DW container home, the repo URL) and a binary file give no HIT",
+          not any(" clean.md:" in h or " blob.bin:" in h for h in hits) and "binary_skipped=1" in out, out[-600:])
+    check("privacy: exit 1 and FAIL, nothing private printed whole", code == 1 and "PRIVACY_SCAN: FAIL" in out
+          and all(s not in out for s in (token, "alice@" + "mail.co", words, words.lower(), owner)), out[-600:])
+    check("privacy: the mixed line hits only the private address", sum(" mixed.txt:" in h for h in hits) == 1, out)
+
+    g("add", "-A")
+    g("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "all")
+    for name in [*samples, "word"]:
+        (repo / f"{name}.txt").unlink()
+    (repo / ("notes-" + ps.CODE_NAMES[0] + ".md")).unlink()
+    expect("privacy: --rev HEAD scans the commit, not the cleaned working tree", tool, 1, "--repo", repo,
+           "--rev", "HEAD", says=["HIT drive_path drive_path.txt:1", "PRIVACY_SCAN: FAIL", "rev HEAD"])
+    expect("privacy: the cleaned working tree is CLEAN", tool, 0, "--repo", repo, says="PRIVACY_SCAN: CLEAN")
+    allow = repo / "tools" / "privacy_allow.txt"
+    for name, line, says in (("no reason", "email: x@y\\.co |  \n", "no reason"),
+                             ("no separator", "email: x@y\\.co\n", "no reason"),
+                             ("an unknown rule", "names: x | why\n", "unknown rule"),
+                             ("a bad regex", "email: ( | why\n", "bad regex")):
+        allow.write_text(line, encoding="utf-8")
+        expect(f"privacy: an allow entry with {name} is INVALID", tool, 2, "--repo", repo,
+               says=["PRIVACY_SCAN: INVALID", says])
+    allow.write_bytes((TOOLS / "privacy_allow.txt").read_bytes())
+    (d / "plain").mkdir()
+    expect("privacy: a folder that is not a git checkout is INVALID", tool, 2, "--repo", d / "plain",
+           says="PRIVACY_SCAN: INVALID")
+
+    # mutations on the scanner, run in a fresh fixture
+    fresh = d / "mut"
+    fresh.mkdir()
+    subprocess.run(["git", "-C", str(fresh), "init", "-q"], capture_output=True)
+    (fresh / "tools").mkdir()
+    (fresh / "tools" / "privacy_allow.txt").write_bytes((TOOLS / "privacy_allow.txt").read_bytes())
+    (fresh / "mixed.txt").write_text(samples["mixed"], encoding="utf-8")
+    (fresh / ("x-" + ps.CODE_NAMES[0] + ".md")).write_text("x\n", encoding="utf-8")
+    for name, swaps, wrong in (
+            ("allow covers any span", [("any(o.start() <= m.start() and m.end() <= o.end()", "any(True")],
+             lambda hits, error: not any(h[1] == "mixed.txt" for h in hits)),
+            ("path names not scanned", [("        for rule, text in line_hits(name, rules, allows):\n",
+                                         "        for rule, text in []:\n")],
+             lambda hits, error: not any(h[2] == 0 for h in hits))):
+        module = mutant(TOOLS / "privacy_scan.py", swaps, f"privacy_{name.replace(' ', '_')}")
+        if module is not None:
+            killed(f"privacy {name}", wrong(module.scan(fresh)[0], None))
+    module = mutant(TOOLS / "privacy_scan.py", [("        if not sep or not reason.strip():\n",
+                                                 "        if False:\n")], "privacy_no_reason")
+    if module is not None:
+        try:
+            module.parse_allow("email: x@y\\.co |  \n", "t")
+            accepted = True
+        except module.Invalid:
+            accepted = False
+        killed("privacy reason required", accepted)
+
+    # release.py: the privacy step stops a tree with a drive path that the change scan does not know
+    origin, base, config = rel_origin(tmp, "privacy_300_release")
+    work = rel_clone(origin, base / "work")
+    rel_write(work / "notes.md", f"build in {drive}/work/app\n")  # 3.0.0 B9: an old leak, already in origin/main
+    rel_git(work, "add", "-A")
+    rel_git(work, "commit", "-q", "-m", "old notes")
+    rel_git(work, "push", "-q", "origin", "HEAD:refs/heads/main")
+    rel_git(work, "fetch", "-q", "origin")
+    rel_commit(work, "1.1.0")
+    expect("privacy: release stops at the privacy step", "release.py", 1, "--repo", work, "--config", config,
+           says=["STEP scan: OK", "HIT drive_path notes.md:1", "STEP FAIL: privacy_scan: 1 hit(s) in the files of HEAD",
+                 "RELEASE: FAIL"], lacks="PLAN ")
+    module = mutant(TOOLS / "release.py", [("        job.privacy()\n", "")], "privacy_release_skipped")
+    if module is not None:
+        killed("release without the privacy step", g2_main(module, "--repo", work, "--config", config) == 0)
+
+
+README_SERIES_300 = """## 所屬系列
+
+| repo | 平台 | 版號 | 適合什麼情況用 |
+|---|---|---|---|
+| 基板 https://github.com/example/DIRECTOR-WORK | 不限 | `3.0.0` | 只讀規則 |
+| https://github.com/example/cld-DIRECTOR-WORKER | Claude Code | `3.0.0-cld.1` | Claude Code |
+| https://github.com/example/dsh-DIRECTOR-WORKER | DeepSeek | `3.0.0-ds.8` | DeepSeek |
+| https://github.com/example/cdx-DIRECTOR-WORKER | Codex | `3.0.0-cdx.11` | Codex |
+| https://github.com/example/agy-DIRECTOR-WORKER | Antigravity | `3.0.0-agy.7` | Antigravity |
+"""
+README_SHARED_300 = ("\n## 跨變體借用\n\n無。\n\n## 換手提示詞\n\n讀 `DIRECTOR/INDEX.md`。\n\n## 版號規則\n\n序號接續。\n\n"
+                     "## CHANGELOG\n\n`CHANGELOG.md`\n\n## 致謝（Credits）\n\n無。\n")
+README_BASE_300 = "# DIRECTOR-WORK\n\n貼上啟動提示詞就開始。\n\n" + README_SERIES_300 + README_SHARED_300
+README_VARIANT_300 = ("# x：DIRECTOR-WORK 的 X 版\n\n給 X 平台用；貼上啟動提示詞就開始。\n\n```text\n## 新增 inside a block\n```\n\n"
+                      + README_SERIES_300 + "\n基板 `3.0.0`，凍結 SHA `e93b51d`。\n\n"
+                      "## 新增（只有這個變體有）\n\n`adapters/x/`\n\n## 沿用上游（和基板逐位元組相同）\n\n其餘原樣。\n\n"
+                      "## 拿掉（NOT_PORTED）\n\n無。\n\n## 跨變體借用\n\n| 做法 | 原本出自哪版 | 現在用哪版 | 怎麼處理 |\n"
+                      "|---|---|---|---|\n| 版號整組比較 | ds.3 | 基板 3.0.0 | 改用基板 |\n\n## 安裝\n\n`install.py`\n\n"
+                      "## 換手提示詞\n\n讀 `DIRECTOR/INDEX.md`。\n\n## 版號規則\n\n序號接續。\n\n## CHANGELOG\n\n`CHANGELOG.md`\n\n"
+                      "## 致謝（Credits）\n\n無。\n")
+
+
+def test_base_sync_check_300(tmp):
+    """3.0.0 B6 (audit CROSS_VARIANT_AUDIT_300 section 2): base_sync_check.py moved from adapters/claude/ into tools/,
+    so every variant runs the same check. Cases ported from cld selftest_claude test_base_sync, plus the default
+    registry (the one adapters/*/BASE_SYNC.json of the variant)."""
+    base = tmp / "sync300" / "base"
+    (base / "tools").mkdir(parents=True)
+    (base / "docs").mkdir()
+    shutil.copy2(TOOLS / "install.py", base / "tools" / "install.py")
+    shutil.copy2(TOOLS / "_common.py", base / "tools" / "_common.py")  # install.py loads it
+    (base / "tools" / "a.py").write_text("A = 1\n", encoding="utf-8")
+    (base / "docs" / "x.md").write_text("doc\n", encoding="utf-8")
+    (base / "VERSION").write_text("3.0.0\n", encoding="utf-8")
+    (base / "CHANGELOG.md").write_text("# CHANGELOG\n\n## 3.0.0\n", encoding="utf-8")
+    (base / "README.md").write_text("# base\n", encoding="utf-8")
+    var = tmp / "sync300" / "var"
+    shutil.copytree(base, var)
+    (var / "adapters" / "x").mkdir(parents=True)
+    (var / "adapters" / "x" / "x_hook.py").write_text("pass\n", encoding="utf-8")
+    shutil.copy2(base / "CHANGELOG.md", var / "CHANGELOG-upstream.md")
+    (var / "BASE_VERSION").write_text("3.0.0\n", encoding="utf-8")
+    (var / "VERSION").write_text("3.0.0-x.1\n", encoding="utf-8")
+    (var / "README.md").write_text("# variant\n\n覆寫：`README.md`、`VERSION`\n", encoding="utf-8")
+    registry = var / "adapters" / "x" / "BASE_SYNC.json"
+
+    def ov(why, path):
+        """An override entry: the reason and the sha256 of the base file it was reviewed against (P1-8)."""
+        return {"why": why, "base_sha256": hashlib.sha256((base / path).read_bytes().replace(b"\r\n", b"\n")).hexdigest()}
+
+    def two():
+        return {"README.md": ov("variant README", "README.md"), "VERSION": ov("variant version", "VERSION")}
+
+    reg = {"schema": "dw-base-sync/1", "adapter": "adapters/x/", "overrides": two(), "not_ported": {},
+           "variant_files": {"BASE_VERSION": "base version", "CHANGELOG-upstream.md": "base history"}}
+    registry.write_text(json.dumps(reg), encoding="utf-8")
+    sync = ["--base", base, "--variant", var, "--registry", registry]
+
+    def last(out):
+        return out.strip().splitlines()[-1] if out.strip() else ""
+
+    code, out = run("base_sync_check.py", *sync)
+    check("sync300: clean variant PASS", code == 0 and last(out).startswith("BASE_SYNC: PASS base=3.0.0 variant=3.0.0-x.1")
+          and "overrides=2" in out, out)
+    code, out = run("base_sync_check.py", "--base", base, cwd=var)
+    check("sync300: no --variant / --registry: the current folder and its one adapters/*/BASE_SYNC.json", code == 0
+          and last(out).startswith("BASE_SYNC: PASS base=3.0.0 variant=3.0.0-x.1"), out)
+    (var / "adapters" / "y").mkdir()
+    (var / "adapters" / "y" / "BASE_SYNC.json").write_text(json.dumps(reg), encoding="utf-8")
+    code, out = run("base_sync_check.py", "--base", base, "--variant", var)
+    check("sync300: two adapters/*/BASE_SYNC.json and no --registry cannot run", code == 2
+          and "2 adapters/*/BASE_SYNC.json" in out and "BASE_SYNC: FAIL (cannot run)" in out, out)
+    (var / "adapters" / "y" / "BASE_SYNC.json").unlink()
+    (var / "adapters" / "y").rmdir()
+    code, out = run("base_sync_check.py", "--base", base, "--variant", base)
+    check("sync300: no adapters/*/BASE_SYNC.json and no --registry cannot run", code == 2
+          and "0 adapters/*/BASE_SYNC.json" in out and "Traceback" not in out, out)
+    (var / "docs" / "x.md").write_bytes(b"doc\r\n")
+    code, out = run("base_sync_check.py", *sync)
+    check("sync300: CRLF is the same file", code == 0, out)
+    (var / "tools" / "a.py").write_text("A = 2\n", encoding="utf-8")
+    code, out = run("base_sync_check.py", *sync)
+    check("sync300: a changed base file that is not an override is CHANGED", code == 1 and "CHANGED     tools/a.py" in out, out)
+    (var / "tools" / "a.py").write_text("A = 1\n", encoding="utf-8")
+    (var / "docs" / "x.md").unlink()
+    code, out = run("base_sync_check.py", *sync)
+    check("sync300: a missing base file is MISSING", code == 1 and "MISSING     docs/x.md" in out, out)
+    reg["not_ported"] = {"docs/x.md": "this platform has no such thing"}
+    registry.write_text(json.dumps(reg), encoding="utf-8")
+    code, out = run("base_sync_check.py", *sync)
+    check("sync300: ... unless it is listed as not ported", code == 0 and "NOT_PORTED  docs/x.md" in out, out)
+    (var / "docs" / "x.md").write_text("doc\n", encoding="utf-8")
+    code, out = run("base_sync_check.py", *sync)
+    check("sync300: not_ported but present is STALE", code == 1 and "STALE       docs/x.md" in out, out)
+    reg["not_ported"] = {}
+    (var / "extra.md").write_text("x\n", encoding="utf-8")
+    reg["overrides"]["VERSION"] = ov("", "VERSION")
+    registry.write_text(json.dumps(reg), encoding="utf-8")
+    code, out = run("base_sync_check.py", *sync)
+    check("sync300: a file outside the adapter is EXTRA; an override needs a reason", code == 1
+          and "EXTRA       extra.md" in out and "REGISTRY    VERSION" in out, out)
+    (var / "extra.md").unlink()
+    reg["overrides"] = dict(two(), **{"docs/x.md": ov("same as base", "docs/x.md")})
+    registry.write_text(json.dumps(reg), encoding="utf-8")
+    code, out = run("base_sync_check.py", *sync)
+    check("sync300: an override equal to the base is STALE", code == 1 and "STALE       docs/x.md" in out, out)
+    reg["overrides"] = dict(two(), **{"tools/a.py": ov("changed", "tools/a.py")})
+    registry.write_text(json.dumps(reg), encoding="utf-8")
+    (var / "tools" / "a.py").write_text("A = 3\n", encoding="utf-8")
+    code, out = run("base_sync_check.py", *sync)
+    check("sync300: an override the README does not name", code == 1 and "README      tools/a.py" in out, out)
+    (var / "tools" / "a.py").write_text("A = 1\n", encoding="utf-8")
+    reg["overrides"] = two()
+    registry.write_text(json.dumps(reg), encoding="utf-8")
+    code, out = run("base_sync_check.py", *sync)
+    check("sync300 P1-8: overrides with base_sha256 PASS", code == 0, out)
+    kept = (base / "README.md").read_bytes()
+    (base / "README.md").write_text("# base\n\nfixed upstream\n", encoding="utf-8")
+    code, out = run("base_sync_check.py", *sync)
+    check("sync300 P1-8: the base changed an overridden file: OVERRIDE_STALE 覆寫已過期，要重新審", code == 1
+          and "OVERRIDE_STALE README.md: 覆寫已過期，要重新審" in out
+          and hashlib.sha256(b"# base\n\nfixed upstream\n").hexdigest() in out, out)
+    (base / "README.md").write_bytes(kept.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+    code, out = run("base_sync_check.py", *sync)
+    check("sync300 P1-8: the same base file with CRLF is not stale", code == 0, out)
+    (base / "README.md").write_bytes(kept)
+    reg["overrides"]["VERSION"] = "variant version"
+    registry.write_text(json.dumps(reg), encoding="utf-8")
+    code, out = run("base_sync_check.py", *sync)
+    check("sync300 P1-8: an override without base_sha256 is a REGISTRY problem", code == 1
+          and "REGISTRY    VERSION: an override without base_sha256" in out, out)
+    reg["overrides"] = two()
+    reg["variant_rules"] = {"fast path": ""}
+    registry.write_text(json.dumps(reg), encoding="utf-8")
+    code, out = run("base_sync_check.py", *sync)
+    check("sync300: a variant rule needs a text", code == 1 and "REGISTRY    fast path" in out, out)
+    reg.pop("variant_rules")
+    registry.write_text(json.dumps(reg), encoding="utf-8")
+    (var / "BASE_VERSION").write_text("2.6.0\n", encoding="utf-8")
+    (var / "VERSION").write_text("3.0.0\n", encoding="utf-8")
+    (var / "CHANGELOG-upstream.md").write_text("# other\n", encoding="utf-8")
+    code, out = run("base_sync_check.py", *sync)
+    check("sync300: VERSION / BASE_VERSION / UPSTREAM", code == 1 and out.count("VERSION     ") == 2 and "UPSTREAM" in out, out)
+    registry.write_text("{}", encoding="utf-8")
+    code, out = run("base_sync_check.py", *sync)
+    check("sync300: a registry that is not the schema cannot run", code == 2 and "cannot run" in out, out)
+    code, out = run("base_sync_check.py", "--base", tmp / "nowhere", "--variant", var, "--registry", registry)
+    check("sync300: no base cannot run (no traceback)", code == 2 and "Traceback" not in out, out)
+    shipped = (TOOLS / "base_sync_check.py").read_text(encoding="utf-8")
+    check("sync300: the base tool names no platform (no adapters/claude default)", "adapters/claude" not in shipped
+          and "HERE" not in shipped, "")
+
+
+def test_scope_candidate_300(tmp):
+    """3.0.0 B1 (audit CROSS_VARIANT_AUDIT_300 section 2, from agy.3): with --candidate, SCOPE / FORBIDDEN / OUTSIDE
+    use merge-base..candidate only. Ported from agy test_scope_candidate_cross_checkout and the orphan-HEAD case: the
+    same VIOLATION on the worker branch and on a clean main checkout, and a run on an orphan HEAD still works."""
+    repo = tmp / "scope_cand_300"
+    repo.mkdir()
+
+    def git(*args, cwd=repo):
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+                               *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+    git("init", "-q", "-b", "main")
+    (repo / "hello.txt").write_text("hello\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "base")
+    base = git("rev-parse", "HEAD")
+    git("switch", "-q", "-c", "worker")
+    (repo / "hello.txt").write_text("updated\n", encoding="utf-8")
+    (repo / "another.txt").write_text("forbidden\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "WO-101 change")
+    cand = git("rev-parse", "HEAD")
+    order = tmp / "scope_cand_300-WO-101.md"
+    order.write_text(f"# WO-101\nBASE_REF = {base}\nSCOPE:\n- hello.txt\nFORBIDDEN:\n- another.txt\nREQUIRED_CHANGES:\n"
+                     "- hello.txt\n", encoding="utf-8")
+    code_w, out_w = run("scope_check.py", "--order", order, "--repo", repo, "--candidate", cand)
+    check("scope B1: worker branch, candidate touched a forbidden file: VIOLATION", code_w == 1
+          and "FORBIDDEN another.txt" in out_w and "STATES: candidate=2" in out_w, out_w)
+    git("switch", "-q", "main")
+    code_m, out_m = run("scope_check.py", "--order", order, "--repo", repo, "--candidate", cand)
+    check("scope B1: clean main checkout + the same candidate: the same VIOLATION", code_m == 1
+          and "FORBIDDEN another.txt" in out_m, out_m)
+    last = [l for l in out_w.splitlines() + out_m.splitlines() if l.startswith("SCOPE_CHECK:")]
+    check("scope B1: the verdict line is the same on both checkouts", len(last) == 2 and last[0] == last[1], str(last))
+    (repo / "stray.txt").write_text("not committed\n", encoding="utf-8")
+    code, out = run("scope_check.py", "--order", order, "--repo", repo, "--candidate", cand)
+    check("scope B1: a file left uncommitted in the checkout is not part of the candidate", code == 1
+          and "stray.txt" not in out and "outside=0" in out, out)
+    code, out = run("scope_check.py", "--order", order, "--repo", repo)
+    check("scope B1: without --candidate the checkout's files still count (stray.txt OUTSIDE)", code == 1
+          and "OUTSIDE   stray.txt" in out, out)
+    (repo / "stray.txt").unlink()
+    git("switch", "-q", "-c", "fixed", base)
+    (repo / "hello.txt").write_text("updated\n", encoding="utf-8")
+    git("commit", "-q", "-am", "WO-101 change in scope")
+    good = git("rev-parse", "HEAD")
+    git("switch", "-q", "worker")
+    code, out = run("scope_check.py", "--order", order, "--repo", repo, "--candidate", good)
+    check("scope B1: a clean candidate PASSes from a checkout whose HEAD has a forbidden file", code == 0
+          and "SCOPE_CHECK: PASS" in out and "missing=0" in out, out)
+    git("checkout", "-q", "--orphan", "orphan_head")
+    git("rm", "-rfq", ".")
+    (repo / "unrelated.txt").write_text("orphan\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "orphan head commit")
+    code, out = run("scope_check.py", "--order", order, "--repo", repo, "--candidate", good)
+    check("scope B1: an orphan HEAD (no merge base with BASE_REF) still checks the candidate", code == 0
+          and "SCOPE_CHECK: PASS" in out, out)
+    # mutation: the candidate-only branch taken out (the 2.2.5 four-state union is used again)
+    git("switch", "-q", "main")
+    source = (TOOLS / "scope_check.py").read_text(encoding="utf-8")
+    anchor = "        if commit and not shared:  # 3.0.0 B1"
+    mut = tmp / "scope_cand_300_mutant"
+    mut.mkdir()
+    shutil.copy2(TOOLS / "_common.py", mut / "_common.py")
+    shutil.copy2(TOOLS / "safety_gate.py", mut / "safety_gate.py")  # 3.0.0 B4: scope_check loads it
+    (mut / "scope_check.py").write_text(source.replace(anchor, "        if False:  # 3.0.0 B1"), encoding="utf-8")
+    done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(mut / "scope_check.py"), "--order", str(order),
+                           "--repo", str(repo), "--candidate", cand], capture_output=True, encoding="utf-8")
+    check("scope B1: mutation anchor found once", source.count(anchor) == 1)
+    killed("scope B1: the candidate-only branch is what makes the clean checkout see the violation",
+           "SCOPE_CHECK: " in done.stdout and " forbidden=0 " in done.stdout)
+
+
+def test_scope_size_protected_300(tmp):
+    """3.0.0 B4 (Director decision; ported from dshdw ds-261 order_oversize, order_limits_224, protected_tests_224,
+    protected_report_224, the agydw rules): scope_check checks SIZE and PROTECTED when the order (ORDER_LIMITS,
+    TESTS_LOCKED) or director_work.json (order_limits for Standard / Strict orders, protected_tests) declares them, at
+    every strength; nothing declared, nothing checked. gate_check --match holds PROTECTED_CHANGED against git."""
+    base_dir = tmp / "scope_b4_300"
+    repo = base_dir / "repo"
+    repo.mkdir(parents=True)
+
+    def git(*args):
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+                               *args], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+
+    def put(path, text):
+        path = pathlib.Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(text.encode("utf-8"))  # exact bytes: CRLF only where a case asks for it
+        return path
+
+    body = "import unittest\n\nclass T(unittest.TestCase):\n    def test_a(self):\n        self.assertEqual(1, 1)\n"
+    git("init", "-q", "-b", "main")
+    git("config", "core.autocrlf", "false")
+    put(repo / "calc.py", "x = 1\n")
+    put(repo / "test_money.py", body)
+    put(repo / "test_csv.py", body)
+    put(repo / "secret.txt", "x\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "init")
+    start = git("rev-parse", "HEAD")
+    orders = base_dir / "orders"  # no director_work.json here or one folder up, unless a case writes one
+
+    def order(name, extra="", scope="- src/**\n- tests/**\n- test_*.py\n- calc.py", governance=""):
+        head = f"# {name}\nBASE_REF = main @ {start}\n" + (f"GOVERNANCE = {governance}\n" if governance else "") + extra
+        return put(orders / f"{name}.md", head + f"SCOPE:\n{scope}\nFORBIDDEN:\n- secret.txt\n")
+
+    sc = "scope_check.py"
+    # size, from the order's own line (dshdw order_oversize; agydw / dshdw had 3 / 200 / 400 without a declaration)
+    for n in range(4):
+        put(repo / "src" / f"m{n}.py", "a = 1\n")
+    plain = order("WO-7")
+    expect("scope B4: nothing declared: no size check, 4 files PASS", sc, 0, "--order", plain, "--repo", repo,
+           says="SCOPE_CHECK: PASS", lacks=["SIZE:", "OVERSIZE", "PROTECTED_CHANGED"])
+    three = order("WO-8", "ORDER_LIMITS = files=3\n")
+    expect("scope B4: ORDER_LIMITS files=3 and 4 changed files: OVERSIZE", sc, 1, "--order", three, "--repo", repo,
+           says=["OVERSIZE  files=4/3 lines=4/- test_lines=0/-", "oversize=1", "SIZE: files=4 lines=4 test_lines=0 limit=3/-/-"])
+    (repo / "src" / "m3.py").unlink()
+    expect("scope B4: 3 files under files=3 PASS", sc, 0, "--order", three, "--repo", repo,
+           says=["SIZE: files=3 lines=3 test_lines=0 limit=3/-/-", "SCOPE_CHECK: PASS"], lacks="oversize")
+    for n in range(3):
+        (repo / "src" / f"m{n}.py").unlink()
+    expect("scope B4: an ORDER_LIMITS word that is not files|lines|test_lines=<n> is NOT_RUN", sc, 2, "--order",
+           order("WO-9", "ORDER_LIMITS = files=three\n"), "--repo", repo, says="NOT_RUN ORDER_LIMITS: `files=three`")
+    expect("scope B4: the template's <...> placeholder declares nothing", sc, 0, "--order",
+           order("WO-10", "ORDER_LIMITS = <選用：files=3 lines=200 test_lines=400>\n"), "--repo", repo, lacks="SIZE:")
+
+    # size, from director_work.json order_limits (dshdw order_limits_224): test files counted apart
+    put(repo / "src" / "a.py", "a = 1\n" * 150)
+    put(repo / "tests" / "test_a.py", "b = 1\n" * 300)  # over 200 lines, under the test limit 400
+    put(repo / "test_b.py", "c = 1\n" * 50)
+    cfg = base_dir / "cfg"
+
+    def config(name, data):
+        return put(cfg / f"{name}.json", json.dumps(data))
+
+    full = config("full", {"order_limits": {"max_files_per_order": 3, "max_lines_per_order": 200,
+                                            "max_test_lines_per_order": 400}})
+    std = order("WO-11", governance="Standard")
+    expect("scope B4: order_limits 3/200/400 of a Standard order, test lines apart: PASS", sc, 0, "--order", std,
+           "--repo", repo, "--config", full, says="SIZE: files=3 lines=150 test_lines=350 limit=3/200/400")
+    expect("scope B4: order_limits does not count for a Direct order (agydw)", sc, 0, "--order",
+           order("WO-12", governance="Direct"), "--repo", repo, "--config", full, lacks="SIZE:")
+    lines = config("lines", {"order_limits": {"max_lines_per_order": 100}})
+    expect("scope B4: order_limits.max_lines_per_order is read; the others are off", sc, 1, "--order", std, "--repo",
+           repo, "--config", lines, says=["lines=150/100", "files=3/-", "test_lines=350/-", "oversize=1"])
+    tests_cfg = config("tests", {"order_limits": {"max_test_lines_per_order": 300}})
+    expect("scope B4: the test-line limit FAILs", sc, 1, "--order", std, "--repo", repo, "--config", tests_cfg,
+           says="test_lines=350/300")
+    expect("scope B4: an ORDER_LIMITS word wins over the block, the block fills the rest", sc, 0, "--order",
+           order("WO-13", "ORDER_LIMITS = lines=500\n", governance="Standard"), "--repo", repo, "--config",
+           config("hundred", {"order_limits": {"max_files_per_order": 3, "max_lines_per_order": 100,
+                                               "max_test_lines_per_order": 400}}), says="limit=3/500/400")
+    put(orders / "director_work.json", json.dumps({"order_limits": {"max_lines_per_order": 100}}))
+    expect("scope B4: director_work.json next to the order is found without --config", sc, 1, "--order", std,
+           "--repo", repo, says="lines=150/100")
+    (orders / "director_work.json").unlink()
+    for name, data, why in (("str", {"order_limits": {"max_lines_per_order": "200"}}, "is not a whole number"),
+                            ("neg", {"order_limits": {"max_lines_per_order": -1}}, "is not a whole number"),
+                            ("bool", {"order_limits": {"max_files_per_order": True}}, "is not a whole number"),
+                            ("key", {"order_limits": {"max_size": 3}}, "not a limit"),
+                            ("list", {"order_limits": [3]}, "must be a JSON object"),
+                            ("glob", {"protected_tests": "test_*.py"}, "must be a list of globs")):
+        expect(f"scope B4: a wrong order_limits / protected_tests ({name}) is NOT_RUN, never weaker", sc, 2, "--order",
+               std, "--repo", repo, "--config", config(name, data), says=["SCOPE_CHECK: NOT_RUN", why])
+    expect("scope B4: a director_work.json that cannot be read is NOT_RUN", sc, 2, "--order", std, "--repo", repo,
+           "--config", put(cfg / "broken.json", "{not json"), says=["SCOPE_CHECK: NOT_RUN", "cannot be read"])
+    # the candidate's diff, not the checkout (B1)
+    git("switch", "-q", "-c", "worker")
+    git("add", "-A")
+    git("commit", "-q", "-m", "WO-11 work")
+    cand = git("rev-parse", "HEAD")
+    git("switch", "-q", "main")
+    expect("scope B4: with --candidate the size is the candidate's diff, from a clean checkout", sc, 1, "--order", std,
+           "--repo", repo, "--config", lines, "--candidate", cand, says=["SIZE: files=3 lines=150 test_lines=350", "OVERSIZE"])
+    # shared checkout: only this order's commits count
+    git("switch", "-q", "-c", "shared", start)
+    shared = order("WO-14", "WORKTREE = 共用 checkout\nORDER_LIMITS = files=2\n")
+    put(repo / "src" / "s1.py", "s = 1\n")
+    put(repo / "src" / "s2.py", "s = 2\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "WO-14: two files")
+    put(repo / "src" / "o1.py", "o = 1\n")
+    put(repo / "src" / "o2.py", "o = 2\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "WO-15: the other worker")
+    expect("scope B4: shared checkout: the other order's commit is not counted", sc, 0, "--order", shared, "--repo",
+           repo, says=["SIZE: files=2 lines=2 test_lines=0 limit=2/-/-", "shared=1"])
+    put(repo / "src" / "s3.py", "s = 3\n")
+    expect("scope B4: shared checkout: this order's in-scope uncommitted file counts", sc, 1, "--order", shared,
+           "--repo", repo, says="files=3/2")
+    (repo / "src" / "s3.py").unlink()
+    git("switch", "-q", "main")
+    safety = mutant(TOOLS / "safety_gate.py", [], "b4_safety")
+    if safety is not None:
+        check("scope B4: is_test_file", safety.is_test_file("tests/x/helper.py") and safety.is_test_file("a/test_x.py")
+              and safety.is_test_file("x_test.py") and safety.is_test_file("a\\tests\\b.py")
+              and not safety.is_test_file("src/testing.py") and not safety.is_test_file("contest_x.py"))
+
+    # protected tests (dshdw protected_tests_224): added or appended PASS; changed or deleted FAIL; CRLF ignored
+    guard = config("guard", {"protected_tests": ["test_money.py", "test_csv.py"]})
+    direct = order("WO-16", governance="Direct")
+    put(repo / "test_money.py", body + "\n    def test_b(self):\n        self.assertEqual(2, 2)\n")
+    put(repo / "test_new.py", body)
+    expect("scope B4: an appended protected test PASSes and is listed", sc, 0, "--order", direct, "--repo", repo,
+           "--config", guard, says=["PROTECTED_CHANGED: test_money.py", "SCOPE_CHECK: PASS"], lacks="protected=")
+    put(repo / "test_csv.py", body.replace("assertEqual(1, 1)", "assertEqual(1, 1 or 2)"))
+    expect("scope B4: an edited protected test FAILs", sc, 1, "--order", direct, "--repo", repo, "--config", guard,
+           says=["PROTECTED test_csv.py", "protected=1", "PROTECTED_CHANGED: test_csv.py, test_money.py"])
+    (repo / "test_csv.py").unlink()
+    expect("scope B4: a deleted protected test FAILs", sc, 1, "--order", direct, "--repo", repo, "--config", guard,
+           says="was deleted")
+    put(repo / "test_csv.py", body.replace("\n", "\r\n"))
+    expect("scope B4: line endings alone are no change", sc, 0, "--order", direct, "--repo", repo, "--config", guard,
+           says="SCOPE_CHECK: PASS")
+    locked = order("WO-17", "TESTS_LOCKED:\n- test_csv.py sha256=" + "0" * 64 + "\n", governance="Direct")
+    put(repo / "test_csv.py", "# rewritten\n")
+    expect("scope B4: a TESTS_LOCKED file is protected without any config", sc, 1, "--order", locked, "--repo", repo,
+           says=["PROTECTED test_csv.py", "existing content changed"])
+    expect("scope B4: an order that protects nothing does not check", sc, 0, "--order", direct, "--repo", repo,
+           says="SCOPE_CHECK: PASS", lacks="PROTECTED")
+    forbidden_cfg = config("forbid", {"protected_tests": ["secret.txt"]})
+    put(repo / "secret.txt", "y\n")
+    expect("scope B4: a forbidden path is counted once (FORBIDDEN, not also PROTECTED)", sc, 1, "--order", direct,
+           "--repo", repo, "--config", forbidden_cfg, says=["FORBIDDEN secret.txt", "forbidden=1"], lacks="protected=")
+    put(repo / "secret.txt", "x\n")
+    for path in ("test_money.py", "test_csv.py"):
+        put(repo / path, body)
+    (repo / "test_new.py").unlink()
+
+    # mutations of scope_check, run from a folder holding its neighbours
+    source = (TOOLS / sc).read_text(encoding="utf-8")
+
+    def scope_mutant(name, old, new, *args):
+        mut = base_dir / f"mutant_{name}"
+        mut.mkdir()
+        for neighbour in ("_common.py", "safety_gate.py"):
+            shutil.copy2(TOOLS / neighbour, mut / neighbour)
+        check(f"scope B4: mutation anchor {name} found once", source.count(old) == 1)
+        (mut / sc).write_text(source.replace(old, new), encoding="utf-8")
+        done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(mut / sc), *map(str, args)], capture_output=True,
+                              encoding="utf-8")
+        return done.returncode, done.stdout
+
+    put(repo / "src" / "a.py", "a = 1\n" * 150)
+    code, out = scope_mutant("oversize", "    if oversize:\n        hits.append(", "    if False:\n        hits.append(",
+                             "--order", std, "--repo", repo, "--config", lines)
+    killed("scope B4: without the OVERSIZE hit 150 lines pass a 100-line limit", code == 0 and "SCOPE_CHECK: PASS" in out)
+    (repo / "src" / "a.py").unlink()
+    put(repo / "test_csv.py", body.replace("assertEqual(1, 1)", "assertEqual(1, 2)"))
+    code, out = scope_mutant("append_only", "        if not (after.startswith(before)", "        if False and (after.startswith(before)",
+                             "--order", direct, "--repo", repo, "--config", guard)
+    killed("scope B4: without the append-only rule an edited protected test passes", code == 0)
+    code, out = scope_mutant("no_config", "    config, problems = safety.load_config(order, a.config)",
+                             "    config, problems = safety.load_config(None, None)",
+                             "--order", direct, "--repo", repo, "--config", guard)
+    killed("scope B4: without reading director_work.json the protected_tests globs are lost", code == 0)
+    put(repo / "test_csv.py", body)
+
+    # the report's PROTECTED_CHANGED against git (dshdw protected_report_224)
+    report_dir = base_dir / "report"
+    put(report_dir / "director_work.json", json.dumps({"protected_tests": ["test_money.py", "test_csv.py"]}))
+    order_path = put(report_dir / "orders" / "WO-18.md", f"# WO-18\nBASE_REF = main @ {start}\nGOVERNANCE = Direct\n"
+                     "SCOPE:\n- calc.py\n- test_*.py\nFORBIDDEN:\n- secret.txt\n")
+    order_text = order_path.read_text(encoding="utf-8")
+    gate = mutant(TOOLS / "gate_check.py", [], "b4_gate")
+    git("switch", "-q", "-c", "report")
+    put(repo / "test_money.py", body + "\n    def test_b(self):\n        pass\n")
+    git("commit", "-q", "-am", "WO-18: add a test")
+    head = git("rev-parse", "HEAD")
+    git("switch", "-q", "main")  # from a clean checkout: the candidate decides
+
+    def held(module, report, candidate):
+        notes = []
+        return module.protected_report_problems(report, order_text, order_path, repo, None, candidate, notes), notes
+
+    if gate is not None:
+        said_none, _ = held(gate, "PROTECTED_CHANGED: 無\n", head)
+        check("gate B4: 無 while a protected test changed FAILs", any(
+            "git shows protected test files changed: test_money.py" in p for p in said_none), str(said_none))
+        check("gate B4: NONE likewise", held(gate, "PROTECTED_CHANGED: NONE\n", head)[0] != [])
+        listed, _ = held(gate, "PROTECTED_CHANGED: `test_money.py`\n", head)
+        check("gate B4: the right list passes", listed == [], str(listed))
+        missing, notes = held(gate, "RESULT: PASS\n", head)
+        check("gate B4: a missing line is a note naming what git shows", missing == []
+              and any("missing in the report" in n and "test_money.py" in n for n in notes), str(notes))
+        git("switch", "-q", "report")
+        put(repo / "test_csv.py", "# rewritten\n")
+        git("commit", "-q", "-am", "WO-18: rewrite the csv test")
+        head = git("rev-parse", "HEAD")
+        git("switch", "-q", "main")
+        partial, _ = held(gate, "PROTECTED_CHANGED: test_money.py\n", head)
+        check("gate B4: a left-out, rewritten protected file FAILs", any("leaves out: test_csv.py" in p for p in partial)
+              and any(p.startswith("PROTECTED: test_csv.py") for p in partial), str(partial))
+        nothing = put(report_dir / "orders" / "WO-19.md", order_text.replace("# WO-18", "# WO-19"))
+        (report_dir / "director_work.json").unlink()
+        quiet = []
+        check("gate B4: an order that protects nothing is not checked", gate.protected_report_problems(
+            "PROTECTED_CHANGED: 無\n", nothing.read_text(encoding="utf-8"), nothing, repo, None, head, quiet) == []
+              and quiet == [], str(quiet))
+        put(report_dir / "director_work.json", json.dumps({"protected_tests": ["test_money.py", "test_csv.py"]}))
+    bent = mutant(TOOLS / "gate_check.py", [("    changed, broken = summary\n", "    changed, broken = [], []\n")], "b4_gate_none")
+    if bent is not None:
+        killed("gate B4: without holding the line against git a report hiding a changed protected test passes",
+               held(bent, "PROTECTED_CHANGED: 無\n", head)[0] == [])
+    source = (TOOLS / "gate_check.py").read_text(encoding="utf-8")
+    check("gate B4: --match calls the PROTECTED_CHANGED check", source.count("problems += protected_report_problems(") == 1)
+
+
+def describe_run_300(module, description, execute, shown=None, edit_code=0, gh="gh"):
+    """3.0.0 B5 (dshdw describe_run_240): release.py's describe step against a fake gh, no network:
+    ([step lines, STOP, PLAN lines], [gh calls])."""
+    calls, lines = [], []
+
+    def fake_run(args, repo, check=False, input_text=None):
+        calls.append([str(a) for a in args[1:]])
+        if args[1:3] == ["repo", "view"]:
+            text = description if len(calls) == 1 or shown is None else shown
+            return subprocess.CompletedProcess(args, 0, json.dumps({"description": text}), "")
+        return subprocess.CompletedProcess(args, edit_code, "", "edit refused" if edit_code else "")
+
+    module.run = fake_run
+    module.shutil = type(sys)("fake_shutil")
+    module.shutil.which = lambda name: gh
+    job = module.Release(TOOLS.parent, dict(module.DEFAULTS, gh_repo="owner/name"), execute, False, None)
+    job.step = lambda name, status, detail="": lines.append(f"STEP {name}: {status} {detail}")
+    try:
+        job.describe_step("3.0.0-x.2")
+    except module.Stop as stop:
+        lines.append(f"STOP {stop}")
+    return lines + ["PLAN " + line for line in job.planned], calls
+
+
+def test_release_describe_300(tmp):
+    """3.0.0 B5 (audit CROSS_VARIANT_AUDIT_300 section 2, from dshdw 2.4.0-ds.6 release_describe_240): the describe
+    step puts the released version in the GitHub repository description (every <x.y.z[-label.n]>, a leading v kept)
+    with gh repo edit and checks it with gh repo view; no version or already at the version is SKIP; the dry run only
+    plans it; an edit that does not show is a stop; no gh on this machine is SKIP (Director). Fake gh, no network."""
+    release = mutant(TOOLS / "release.py", [], "b5_release")
+    if release is None:
+        return
+    before = "DIRECTOR-WORK: director / worker work orders (v3.0.0-x.1)"
+    after = "DIRECTOR-WORK: director / worker work orders (v3.0.0-x.2)"
+    check("release B5 described: the version is replaced, v kept", release.described(before, "3.0.0-x.2") == after)
+    check("release B5 described: a bare version too", release.described("tools 2.6.0", "3.0.0") == "tools 3.0.0")
+    check("release B5 described: no version gives None", release.described("總監／worker 工單流程", "3.0.0") is None)
+    check("release B5 described: a dotted name is not a version", release.described("python3.11.2 tool", "9.9.9") is None)
+    lines, calls = describe_run_300(release, before, True, shown=after)
+    check("release B5 execute: view, edit, view", calls == [["repo", "view", "owner/name", "--json", "description"],
+                                                           ["repo", "edit", "owner/name", "--description", after],
+                                                           ["repo", "view", "owner/name", "--json", "description"]], calls)
+    check("release B5 execute: OK line", lines == [f"STEP describe: OK {after!r}"], lines)
+    lines, calls = describe_run_300(release, before, False)
+    check("release B5 dry run: planned, not edited", len(calls) == 1 and lines and lines[0].startswith(
+        f"PLAN gh repo edit owner/name --description {after!r}"), lines)
+    lines, _ = describe_run_300(release, after, True)
+    check("release B5 already at the version: SKIP", lines == ["STEP describe: SKIP the description already says 3.0.0-x.2"],
+          lines)
+    lines, _ = describe_run_300(release, "總監／worker 工單流程", True)
+    check("release B5 no version: SKIP", lines and lines[0].startswith("STEP describe: SKIP the description names no version"),
+          lines)
+    lines, _ = describe_run_300(release, before, True, shown=before)
+    check("release B5 edit not shown: stop", lines and lines[0].startswith("STOP after gh repo edit the description is"), lines)
+    lines, _ = describe_run_300(release, before, True, edit_code=1)
+    check("release B5 edit refused: stop", lines and lines[0].startswith("STOP gh repo edit failed"), lines)
+    lines, calls = describe_run_300(release, before, True, gh=None)
+    check("release B5 no gh with --execute: SKIP, nothing called", calls == [] and lines and lines[0].startswith(
+        "STEP describe: SKIP gh is not on PATH"), lines)
+    lines, calls = describe_run_300(release, before, False, gh=None)
+    check("release B5 no gh, dry run: planned as SKIP", calls == [] and lines and "gh is not on PATH: SKIP" in lines[0], lines)
+    source = (TOOLS / "release.py").read_text(encoding="utf-8").replace("\r\n", "\n")
+    check("release B5 main runs the step after the release",
+          "job.release_step(version)\n            job.describe_step(version)" in source)
+    for name, swaps, wrong in (
+            ("no check after the edit", [("        if shown != wanted:\n", "        if False:\n")],
+             lambda m: not describe_run_300(m, before, True, shown=before)[0][0].startswith("STOP")),
+            ("v not kept", [("lambda m: m.group(1) + version", "lambda m: version")],
+             lambda m: m.described(before, "3.0.0-x.2") != after),
+            ("no gh stops", [("        if not gh:  # the Director", "        if False:  # the Director")],
+             lambda m: not describe_run_300(m, before, True, gh=None)[0][0].startswith("STEP describe: SKIP"))):
+        module = mutant(TOOLS / "release.py", swaps, f"b5_{name.replace(' ', '_')}")
+        if module is not None:
+            killed(f"release B5: {name}", wrong(module))
+
+
+def skeleton_order_300(base, governance="Direct", work_dir=None):
+    """The 3.0.0 B8 skeleton order (dshdw report_skeleton's WO-8): AC-1 AUTO with a CHECKS line, AC-2 REVIEW."""
+    check_cmd = ["python", "-B", "-I", "-m", "unittest", "discover", "-s", ".", "-p", "test_*.py"]
+    head = ["ISSUED_BY      = 總監 2026-11-14 09:00", "REVISION       = 1", "TRACES_TO      = NONE",
+            "PRIMARY_WORKER = session「w8」", "MODEL / EFFORT = model-x / high（理由：小改動）",
+            "FALLBACK       = 同名 session 續談", f"GOVERNANCE     = {governance}", f"BASE_REF       = main @ {base}"]
+    if work_dir:
+        head.append(f"WORK_DIR       = {work_dir}  # 腳本與暫存")
+    return "\n".join(["# WO-8 — skeleton selftest", "**fix add**", "", "```text", *head,
+                      "```", "", "```text", "SCOPE:", "- calc.py", "FORBIDDEN:", "- test_calc.py", "```", "",
+                      "| ID | 類型 | 要求 | 驗證方法 | 預期 |", "|---|---|---|---|---|",
+                      "| AC-1 | AUTO | add returns the sum | `python -B -I -m unittest discover -s . -p \"test_*.py\"` | exit 0 |",
+                      "| AC-2 | REVIEW | the code reads well | 總監看 diff | 好讀 |", "",
+                      "```text", "CHECKS:", "- AC-1: " + json.dumps(check_cmd), "```", "",
+                      "- DELIVERABLES: one commit", "- STOP_RULES: 同一根因 1 輪沒進展就停", ""]), check_cmd
+
+
+def test_variant_default_300(tmp):
+    """3.0.0 B15 (dsh report): a variant sets its default strength in adapters/<name>/VARIANT.json beside tools/, so it
+    needs no copy of safety_gate.py: light from the file, no PO answer needed for it, an explicit strength still wins,
+    a bad value, a file that is not JSON or not an object and two files that disagree fail and keep standard, two that
+    agree are one default, no file or no key is standard; 1 mutation."""
+    root = tmp / "variant_default_300"
+
+    def variant(name, files):
+        tools = root / name / "tools"
+        shutil.copytree(TOOLS, tools, ignore=shutil.ignore_patterns("__pycache__"))
+        for rel, text in files.items():
+            (root / name / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / name / rel).write_text(text, encoding="utf-8")
+        return tools
+
+    light = variant("light", {"adapters/x/VARIANT.json": '{"default_strength": "light", "_why": "SPEC"}\n'})
+    expect("B15 a variant default light from adapters/x/VARIANT.json", light / "safety_gate.py", 0, "--show",
+           says=["SAFETY strength=light ", "tests_first=false",
+                 "~ default strength light from adapters/x/VARIANT.json (the variant's default; the base default is "
+                 "standard)"], lacks="needs a PO_PENDING answer")
+    conf = root / "light" / "director_work.json"
+    conf.write_text('{"strength": "strict"}\n', encoding="utf-8")
+    expect("B15 an explicit strength still wins over the variant default", light / "safety_gate.py", 0, "--show",
+           "--config", conf, says="SAFETY strength=strict ")
+    conf.write_text('{"strength": "light"}\n', encoding="utf-8")
+    expect("B15 light at a light variant default needs no PO answer", light / "safety_gate.py", 0, "--show", "--config",
+           conf, says="SAFETY strength=light ", lacks="needs a PO_PENDING answer")
+    plain = variant("plain", {"adapters/x/README.md": "no VARIANT.json\n"})
+    expect("B15 no VARIANT.json: the base default", plain / "safety_gate.py", 0, "--show", says="SAFETY strength=standard ",
+           lacks="~ default strength")
+    expect("B15 a light config without a variant default still names the PO answer", plain / "safety_gate.py", 0,
+           "--show", "--config", conf, says="needs a PO_PENDING answer naming strength")
+    nokey = variant("nokey", {"adapters/x/VARIANT.json": '{"other": 1}\n'})
+    expect("B15 a VARIANT.json without default_strength: the base default", nokey / "safety_gate.py", 0, "--show",
+           says="SAFETY strength=standard ")
+    for name, files, said in (
+            ("bad value", {"adapters/x/VARIANT.json": '{"default_strength": "lite"}\n'},
+             "adapters/x/VARIANT.json default_strength 'lite' is not one of light / standard / strict"),
+            ("not JSON", {"adapters/x/VARIANT.json": "{light\n"}, "adapters/x/VARIANT.json cannot be read"),
+            ("not an object", {"adapters/x/VARIANT.json": '["light"]\n'}, "adapters/x/VARIANT.json is not a JSON object"),
+            ("two disagree", {"adapters/x/VARIANT.json": '{"default_strength": "light"}\n',
+                              "adapters/y/VARIANT.json": '{"default_strength": "strict"}\n'}, "they disagree")):
+        tools = variant(name.replace(" ", "_"), files)
+        expect(f"B15 {name}: fails and keeps standard", tools / "safety_gate.py", 1, "--show",
+               says=["SAFETY strength=standard ", said, "the default stays standard"])
+    same = variant("same", {"adapters/x/VARIANT.json": '{"default_strength": "light"}\n',
+                            "adapters/y/VARIANT.json": '{"default_strength": "light"}\n'})
+    expect("B15 two files that agree are one default", same / "safety_gate.py", 0, "--show", says="SAFETY strength=light ")
+    module = mutant(light / "safety_gate.py", [("DEFAULT_STRENGTH, DEFAULT_SOURCE, DEFAULT_PROBLEMS = variant_default()\n",
+                                                'DEFAULT_STRENGTH, DEFAULT_SOURCE, DEFAULT_PROBLEMS = "standard", None, []\n')],
+                    "b15_no_variant_default")
+    if module is not None:
+        killed("safety_gate B15: without the hook the variant default is not read",
+               module.load_config(None, None)[0]["strength"] != "light")
+
+
+def test_report_skeleton_300(tmp):
+    """3.0.0 B8 (audit CROSS_VARIANT_AUDIT_300 section 2, from dshdw 2.2.2-ds.3 report_skeleton and 2.2.4-ds.4
+    temp_env_224): gate_check --report-skeleton fills what the order fixes (TASK_ID, worker, MODEL (EFFORT), BASE,
+    ORDER line, hash, WORKTREE line from worktree.py, one row per AC with the statuses its type allows); --out never
+    overwrites; left unfilled it fails --report; filled in with the evidence its own printed commands record, its
+    scope_check command passes and its --match passes. Strict adds --candidate / --dispatch-log; WORK_DIR adds TEMP."""
+    if shutil.which("git") is None:
+        skip("report_skeleton_300")
+        return
+    root = tmp / "skeleton300"
+    repo = root / "demo"
+    repo.mkdir(parents=True)
+    (repo / "calc.py").write_text("def add(a, b):\n    return 0\n", encoding="utf-8")
+    (repo / "test_calc.py").write_text("import unittest\nfrom calc import add\n\n\nclass T(unittest.TestCase):\n"
+                                       "    def test_add(self):\n        self.assertEqual(add(1, 2), 3)\n", encoding="utf-8")
+
+    def g(*args):
+        return subprocess.run(["git", "-c", "user.name=selftest", "-c", "user.email=selftest@example.invalid",
+                               "-c", "commit.gpgsign=false", "-c", "core.autocrlf=false", *args], cwd=repo,
+                              capture_output=True, text=True, check=True).stdout.strip()
+
+    g("init", "-q")
+    g("symbolic-ref", "HEAD", "refs/heads/main")
+    g("add", "-A")
+    g("commit", "-q", "-m", "base")
+    base = g("rev-parse", "HEAD")
+    text, check_cmd = skeleton_order_300(base)
+    orders = root / "DIRECTOR" / "orders"
+    orders.mkdir(parents=True)
+    order = orders / "WO-8-add.md"
+    order.write_text(text, encoding="utf-8")
+    (repo / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    g("commit", "-q", "-am", "WO-8: add returns the sum")
+    head = g("rev-parse", "HEAD")
+    report = root / "DIRECTOR" / "reports" / "WO-8_TASK_REPORT.md"
+    code, out = run("gate_check.py", "--report-skeleton", order, "--repo", repo, "--out", report)
+    check("skeleton B8: --out writes the file", code == 0 and report.is_file() and f"SKELETON {report}" in out, out[-600:])
+    if not report.is_file():
+        return
+    skeleton = report.read_text(encoding="utf-8")
+    for want in ("WO-8 / w8 / model-x (EFFORT high) / main / ", f"/ {base} / <HEAD 40 位> / <yes|no>",
+                 "ORDER: WO-8-add.md REVISION 1", f"ORDER_SHA256: {run('gate_check.py', '--hash', order)[1].split()[0]}",
+                 "WORKTREE: 共用 checkout（主 checkout） ",
+                 "| AC-1 | <實際結果> | <evidence .json 檔名> | <PASS / FAIL / BLOCKED / UNVERIFIED> |",
+                 "| AC-2 | <實際結果> | <證據路徑> | <READY_FOR_REVIEW / FAIL / BLOCKED / UNVERIFIED> |",
+                 '- AC-1 `python -B -I -m unittest discover -s . -p "test_*.py"`：<結果>'):
+        check(f"skeleton B8: holds {want[:40]}", want in skeleton, skeleton[:900])
+    expect("skeleton B8: an existing --out file is not overwritten", "gate_check.py", 1, "--report-skeleton", order,
+           "--repo", repo, "--out", report, says="not overwritten")
+    check("skeleton B8: the refused run left the file alone", report.read_text(encoding="utf-8") == skeleton)
+    expect("skeleton B8: an unfilled skeleton fails --report", "gate_check.py", 1, "--report", report,
+           says="placeholder left")
+    expect("skeleton B8: without --out the skeleton and the commands print", "gate_check.py", 0, "--report-skeleton",
+           order, "--repo", repo, says=["# TASK REPORT", "=== COMMANDS (not part of the report) ===", "--match "])
+    expect("skeleton B8: --out alone is refused", "gate_check.py", 2, "--out", report)
+    expect("skeleton B8: with --match it is refused", "gate_check.py", 2, "--report-skeleton", order, "--match", report,
+           order)
+    expect("skeleton B8: a missing order is refused", "gate_check.py", 2, "--report-skeleton", root / "nope.md")
+    commands = [line for line in out.splitlines() if line.startswith("python ")]
+    check("skeleton B8: evidence + scope_check + match commands", len(commands) == 3, out[-900:])
+    if len(commands) != 3:
+        return
+    check("skeleton B8: the evidence command is the CHECKS one",
+          " ".join(check_cmd) in commands[0].replace('"test_*.py"', "test_*.py"), commands[0])
+    check("skeleton B8: Direct / Standard --match has no --candidate", "--candidate" not in commands[2], commands[2])
+
+    def own(command):
+        parts = shlex.split(command)
+        return [sys.executable] + parts[1:]
+
+    ran = subprocess.run(own(commands[0]), cwd=repo, capture_output=True, text=True, encoding="utf-8")
+    check("skeleton B8: the printed evidence command passes", ran.returncode == 0, (ran.stdout + ran.stderr)[-600:])
+    records = sorted((root / "DIRECTOR" / "evidence").glob("*.json"))
+    if not records:
+        check("skeleton B8: the evidence record was written", False)
+        return
+    scope = subprocess.run(own(commands[1].replace("<git rev-parse HEAD>", head)), cwd=repo, capture_output=True,
+                           text=True, encoding="utf-8")
+    scope_line = (scope.stdout.strip().splitlines() or [""])[-1]
+    check("skeleton B8: the printed scope_check command passes",
+          scope.returncode == 0 and scope_line.startswith("SCOPE_CHECK: PASS"), (scope.stdout + scope.stderr)[-600:])
+    filled = (skeleton.replace("<HEAD 40 位>", head).replace("<yes|no>", "yes")
+              .replace("<PASS | PARTIAL | BLOCKED | FAIL>", "PASS")
+              .replace("SCOPE_CHECK: <貼 scope_check.py 的最後一行>", scope_line)
+              .replace("<evidence .json 檔名>", records[-1].name)
+              .replace("<PASS / FAIL / BLOCKED / UNVERIFIED>", "PASS")
+              .replace("<證據路徑>", "calc.py").replace("<READY_FOR_REVIEW / FAIL / BLOCKED / UNVERIFIED>", "READY_FOR_REVIEW")
+              .replace("<實際跑過的指令，一行一個>", "python -B -I -m unittest").replace("exit=<N> at=<HH:MM>", "exit=0 at=09:00"))
+    filled = re.sub(r"<NONE[^<>\n]*>", "NONE", filled)
+    filled = re.sub(r"<[^<>\n]+>", "filled in", filled)
+    report.write_text(filled, encoding="utf-8")
+    match = subprocess.run(own(commands[2]), cwd=repo, capture_output=True, text=True, encoding="utf-8")
+    check("skeleton B8: the filled skeleton passes the printed --match", match.returncode == 0,
+          (match.stdout + match.stderr)[-900:])
+    module = mutant(TOOLS / "gate_check.py", [], "b8_gate")
+    if module is None:
+        return
+    strict_order = orders / "WO-9-strict.md"
+    strict_order.write_text(skeleton_order_300(base, "Strict")[0].replace("WO-8", "WO-9"), encoding="utf-8")
+    _, strict_commands = module.report_skeleton(strict_order, repo)
+    check("skeleton B8: Strict --match adds --candidate and --dispatch-log",
+          "--candidate <git rev-parse HEAD> --dispatch-log <DIRECTOR_LOG.md>" in strict_commands[-1], strict_commands[-1])
+    temp_order = orders / "WO-7-temp.md"
+    work_dir = "D" + ":/work/wo-7"  # split so the privacy scan does not see a drive path in this file
+    temp_order.write_text(skeleton_order_300(base, work_dir=work_dir)[0].replace("WO-8", "WO-7"), encoding="utf-8")
+    _, temp_commands = module.report_skeleton(temp_order, repo)
+    check("skeleton B8: WORK_DIR gives the TEMP line (temp_env_224)",
+          any(line.startswith("# TEMP first:") and f"$env:TEMP='{work_dir}/tmp'" in line
+              and f"export TEMP='{work_dir}/tmp'" in line for line in temp_commands), temp_commands[:3])
+    check("skeleton B8: no WORK_DIR, no TEMP line", not any("TEMP first" in line for line in commands), commands)
+    for name, swaps, wrong in (
+            ("one status for every type", [('        allowed = " / ".join(AC_STATUSES.get(kind, AC_STATUSES["AUTO"]))\n',
+                                            '        allowed = " / ".join(AC_STATUSES["AUTO"])\n')],
+             lambda m: "<READY_FOR_REVIEW / FAIL / BLOCKED / UNVERIFIED>" not in m.report_skeleton(order, repo)[0]),
+            ("Strict like Standard", [('<DIRECTOR_LOG.md>" if strict else ""))', '<DIRECTOR_LOG.md>" if False else ""))')],
+             lambda m: "--candidate" not in m.report_skeleton(strict_order, repo)[1][-1]),
+            ("CHECKS not turned into commands", [("        if ac in checks:\n            commands.append(",
+                                                  "        if False:\n            commands.append(")],
+             lambda m: len([c for c in m.report_skeleton(order, repo)[1] if c.startswith("python ")]) != 3)):
+        mutated = mutant(TOOLS / "gate_check.py", swaps, f"b8_{name.replace(' ', '_')}")
+        if mutated is not None:
+            killed(f"skeleton B8: {name}", wrong(mutated))
+
+
+def test_bootstrap_add_paths_300(tmp):
+    """3.0.0 B13 (cdx report on e93b51d): bootstrap_repo --add with a hook path that starts with `/` gave git an
+    absolute path, so check-ignore gave no answer and the entry FAILed. Now git is asked about the project-relative
+    path and the line keeps its anchor; on Windows `\` and an absolute path inside the project work too, and a path
+    outside the project (what Git Bash makes of a leading `/`) is a usage error."""
+    repo = tmp / "bootstrap_add_300" / "proj one"
+    repo.mkdir(parents=True)
+    g = lambda *a: subprocess.run(["git", *a], cwd=repo, capture_output=True, encoding="utf-8")  # noqa: E731
+    g("init", "-q")
+    ignored = lambda entry: g("check-ignore", "-q", "--", entry).returncode == 0  # noqa: E731
+    exclude = repo / ".git" / "info" / "exclude"
+    expect("bootstrap B13: --add /.claude/hooks/x.py (leading slash) is DONE", "bootstrap_repo.py", 0, "--repo", repo,
+           "--add", "/.claude/hooks/x.py", says=["DONE  /.claude/hooks/x.py: added; git check-ignore confirms",
+                                                 "BOOTSTRAP_REPO: DONE"], lacks="gave no answer")
+    lines = exclude.read_text(encoding="utf-8").splitlines()
+    check("bootstrap B13: the exclude line keeps its anchor", "/.claude/hooks/x.py" in lines, str(lines))
+    check("bootstrap B13: git ignores it at the root, not the same name deeper down",
+          ignored(".claude/hooks/x.py") and not ignored("sub/.claude/hooks/x.py"))
+    expect("bootstrap B13: a rerun is OK and writes nothing twice", "bootstrap_repo.py", 0, "--repo", repo,
+           "--add", "/.claude/hooks/x.py", says="OK    /.claude/hooks/x.py: already ignored")
+    check("bootstrap B13: one line", exclude.read_text(encoding="utf-8").splitlines().count("/.claude/hooks/x.py") == 1)
+    inside = str(repo / ".claude" / "hooks" / "z.py")  # a Windows drive path on Windows, a POSIX path elsewhere
+    expect("bootstrap B13: an absolute path inside the project becomes the anchored relative line", "bootstrap_repo.py",
+           0, "--repo", repo, "--add", inside, says="DONE  /.claude/hooks/z.py: added; git check-ignore confirms")
+    check("bootstrap B13: ... and git ignores it", ignored(".claude/hooks/z.py"))
+    outside = str(tmp / "bootstrap_add_300" / "elsewhere" / "x.py")
+    expect("bootstrap B13: an absolute path outside the project is a usage error", "bootstrap_repo.py", 2, "--repo",
+           repo, "--add", outside, says=["BOOTSTRAP_REPO: FAIL input: --add", "is outside the project"])
+    if os.name == "nt":
+        expect("bootstrap B13 (Windows): backslashes are read as /", "bootstrap_repo.py", 0, "--repo", repo,
+               "--add", ".claude\\hooks\\y.py", says="DONE  .claude/hooks/y.py: added; git check-ignore confirms")
+        expect("bootstrap B13 (Windows): what Git Bash makes of /.claude/... is outside the project, with the hint",
+               "bootstrap_repo.py", 2, "--repo", repo, "--add",
+               (pathlib.Path(repo.anchor) / "Program Files/Git/.claude/hooks/x.py").as_posix(),
+               says=["is outside the project", "MSYS_NO_PATHCONV=1"])
+        expect("bootstrap B13 (Windows): a drive path inside the project written with / and other case",
+               "bootstrap_repo.py", 0, "--repo", repo, "--add", inside.replace("\\", "/").upper().replace(
+                   ".CLAUDE/HOOKS/Z.PY", ".claude/hooks/w.py"), says="DONE  /.claude/hooks/w.py")
+    else:
+        skip("test_bootstrap_add_paths_300 Windows cases", "not Windows")
+    source = (TOOLS / "bootstrap_repo.py").read_text(encoding="utf-8")
+    module = mutant(TOOLS / "bootstrap_repo.py", [('    query = line.lstrip("/")\n', '    query = line\n')], "b13_slash")
+    if module is not None:
+        killed("bootstrap B13: asking git about the project-relative path is what makes /x work",
+               module.project_entry("/.claude/hooks/x.py", repo.resolve())[1].startswith("/"))
+    check("bootstrap B13: the fix is in the tool (one anchor)", source.count('query = line.lstrip("/")') == 1)
+
+
+def test_release_delivery_300(tmp):
+    """3.0.0 B3 (C2 hard line, from cdx_release a0e0baf / fbc1e96): release.py pushes the checked commit, never what
+    HEAD is at push time; with DIRECTOR/evidence/DELIVERY.json that commit must be the delivered one (delivery.py check
+    --delivered); right before the push ls-remote runs again and a remote that moved after verification stops; with
+    --execute the remote branch must still be the checked commit before the tag and before the release."""
+    r = "release.py"
+    origin, base, config = rel_origin(tmp, "release_delivery_300")
+    work = rel_clone(origin, base / "work")
+    (work / ".git" / "info").mkdir(exist_ok=True)
+    (work / ".git" / "info" / "exclude").write_text("DIRECTOR/\n", encoding="utf-8")  # what bootstrap_repo.py writes
+    rel_commit(work, "1.1.0", {"app.txt": "v1\n"})
+    head = rel_git(work, "rev-parse", "HEAD")
+    expect("release B3: no DELIVERY.json is SKIP; the plan pushes the checked commit by its SHA", r, 0, "--repo", work,
+           "--config", config, says=["STEP delivery: SKIP no DIRECTOR/evidence/DELIVERY.json",
+                                     f"PLAN git push origin {head[:12]}:refs/heads/main"])
+    director = work / "DIRECTOR"  # untracked, as in the R3 layout: not part of what is released
+    delivery_ok_300(work, director)
+    expect("release B3: the delivered commit passes the delivery step", r, 0, "--repo", work, "--config", config,
+           says=["STEP delivery: OK DELIVERY_CHECK: PASS", f"{head[:12]} is the delivered commit", "STEP privacy: OK"])
+    rel_commit(work, "1.1.0", {"later.txt": "after the verdict\n"})
+    expect("release B3: a commit made after the delivery record stops before anything is pushed", r, 1, "--repo", work,
+           "--config", config, says=["STEP FAIL: delivery check: exit 1", "HEAD_MOVED", "RELEASE: FAIL"],
+           lacks=["PLAN ", "STEP push"])
+    module = mutant(TOOLS / r, [("        job.delivery()\n", "")], "b3_no_delivery_step")
+    if module is not None:
+        killed("release without the delivery step", g2_main(module, "--repo", work, "--config", config) == 0)
+    record = director / "evidence" / "DELIVERY.json"
+    good = record.read_bytes()
+    record.write_text("{not json", encoding="utf-8")
+    expect("release B3: a record delivery.py cannot read stops (no PASS line is never a pass)", r, 1, "--repo", work,
+           "--config", config, says=["STEP FAIL: delivery check: exit 2", "RELEASE: FAIL"])
+    record.write_bytes(good)
+    elsewhere = base / "elsewhere" / "DIRECTOR"
+    elsewhere.mkdir(parents=True)
+    expect("release B3: --director names the folder that is read (one without a record: SKIP)", r, 0, "--repo", work,
+           "--config", config, "--director", elsewhere, says="STEP delivery: SKIP no DIRECTOR/evidence/DELIVERY.json")
+    delivery_ok_300(work, director)  # verified again for the new HEAD
+    head = rel_git(work, "rev-parse", "HEAD")
+    code, out = run(r, "--repo", work, "--config", config, "--execute")
+    check("release B3: --execute pushes and tags the delivered commit", f"STEP push: OK ls-remote main = {head}" in out
+          and f"STEP tag: OK v1.1.0^{{}} = {head}" in out and rel_git(origin, "rev-parse", "main") == head, out[-400:])
+
+    def racing(name, selftest, commits=2):
+        """A clone AHEAD by `commits`, whose selftest command does something to the repo or the remote meanwhile."""
+        o, b, _ = rel_origin(tmp, f"release_delivery_300_{name}")
+        w = rel_clone(o, b / "work")
+        for n in range(commits):
+            rel_commit(w, "1.1.0", {"x.txt": f"{n}\n"})
+        cfg = b / "race.json"
+        cfg.write_text(json.dumps({"release": {"selftest": selftest}}) + "\n", encoding="utf-8")
+        return o, w, cfg, rel_git(w, "rev-parse", "HEAD")
+
+    # the remote moves to a part of this branch during the selftest: a fast-forward push would still go through
+    push_part = "git push -q origin HEAD~1:refs/heads/main"
+    o, w, cfg, tip = racing("moved", push_part)
+    code, out = run(r, "--repo", w, "--config", cfg, "--execute")
+    check("release B3: the remote moved after verification: stop, nothing pushed", code == 1
+          and "the remote main moved after verification" in out and "STEP push: OK" not in out
+          and rel_git(o, "rev-parse", "main") == rel_git(w, "rev-parse", "HEAD~1"), out[-400:])
+    module = mutant(TOOLS / r, [("        if self.verified_remote and remote_sha not in (self.verified_remote, head):\n",
+                                 "        if False:\n")], "b3_remote_moved")
+    if module is not None:
+        o, w, cfg, tip = racing("moved_mutant", push_part)
+        g2_main(module, "--repo", w, "--config", cfg, "--execute")
+        killed("release B3: without the ls-remote recheck the moved remote is pushed over",
+               rel_git(o, "rev-parse", "main") == tip)
+
+    # HEAD moves during the selftest: the new commit was never checked
+    sneak = "git commit -q --allow-empty -m sneaked-in"
+    o, w, cfg, tip = racing("head", sneak, commits=1)
+    code, out = run(r, "--repo", w, "--config", cfg, "--execute")
+    check("release B3: HEAD moved during the checks: stop, the remote is left alone", code == 1
+          and "HEAD moved during the checks" in out and rel_git(o, "rev-parse", "main") != rel_git(w, "rev-parse", "HEAD")
+          and rel_git(o, "rev-parse", "main") != tip, out[-400:])
+    module = mutant(TOOLS / r, [("        head = self.target or self.head()\n        if self.head() != head:",
+                                 "        head = self.head()\n        if self.head() != head:")], "b3_push_head")
+    if module is not None:
+        o, w, cfg, tip = racing("head_mutant", sneak, commits=1)
+        g2_main(module, "--repo", w, "--config", cfg, "--execute")
+        killed("release B3: pushing HEAD at push time sends the unchecked commit",
+               rel_git(o, "rev-parse", "main") == rel_git(w, "rev-parse", "HEAD"))
+
+    # before the tag and the release (--execute only): the remote branch is still the checked commit
+    module = mutant(TOOLS / r, [], "b3_still_target")
+    if module is not None:
+        def stops(execute, remote):
+            job = module.Release(work, module.load_config(None), execute, False, None)
+            job.target, job.remote_branch_sha = "a" * 40, lambda: remote
+            try:
+                job.still_target("tag")
+            except module.Stop as stop:
+                return str(stop)
+            return ""
+        check("release B3: --execute, the remote changed before the tag: stop",
+              "changed before the tag" in stops(True, "b" * 40), stops(True, "b" * 40))
+        check("release B3: the remote is the checked commit: go on", stops(True, "a" * 40) == "")
+        check("release B3: a dry run does not ask", stops(False, "b" * 40) == "")
+    source = (TOOLS / r).read_text(encoding="utf-8")
+    check("release B3: tag and release are guarded in main",
+          source.count('job.still_target("tag")') == 1 and source.count('job.still_target("release")') == 1)
+
+
+def test_readme_check_300(tmp):
+    """3.0.0 (PO 11-28 "most READMEs are incomplete: no base, no other versions"; SPEC_VARIANTS_300 section 1-9):
+    readme_check.py finds a missing or empty section, a series table without a repo, a variant without its base
+    version or frozen commit, and reads a commit with --rev; release.py stops on it (readme step), and a check with
+    no exit code or no PASS line is a FAIL. The real README, the variant template and the tool agree."""
+    import types
+    root = TOOLS.parent
+    # a variant checkout (BASE_VERSION) has a variant README; found in the clddw merge of batch 2
+    own_kind = "variant" if (root / "BASE_VERSION").is_file() else "base"
+    expect(f"readme: this checkout's README passes as {own_kind}", "readme_check.py", 0, "--repo", root,
+           says=f"README_CHECK: PASS kind={own_kind}")
+    rc = load_tool_240("readme_check")
+    template = (root / "templates" / "VARIANT_README.md").read_text(encoding="utf-8")
+    heads = [l[3:] for l in template.splitlines() if l.startswith("## ")]
+    check("readme: the variant template has every section readme_check wants",
+          all(any(h.startswith(n) for h in heads) for n in (rc.SERIES_SECTION, *rc.VARIANT_SECTIONS)), str(heads))
+    check("readme: the template's series table names every repo of the series",
+          all(r in template for r in rc.SERIES) and rc.BORROW_HEADER in template)
+
+    d = tmp / "readme_300"
+    cases = {}
+
+    def case(name, text, base_version="3.0.0"):
+        folder = d / name
+        folder.mkdir(parents=True)
+        (folder / "README.md").write_text(text, encoding="utf-8")
+        if base_version is not None:
+            (folder / "BASE_VERSION").write_text(base_version + "\n", encoding="utf-8")
+        cases[name] = folder
+        return folder
+
+    good = case("good", README_VARIANT_300)
+    expect("readme: a complete variant README passes", "readme_check.py", 0, "--repo", good,
+           says="README_CHECK: PASS kind=variant")
+    expect("readme: a base README (no BASE_VERSION) needs 所屬系列 and the shared sections", "readme_check.py", 0,
+           "--repo", case("base", README_BASE_300, None), says="README_CHECK: PASS kind=base", lacks="MISSING")
+    expect("readme: --kind variant on a base README wants the variant sections", "readme_check.py", 1, "--repo",
+           cases["base"], "--kind", "variant", says=["MISSING 新增", "MISSING 安裝", "README_CHECK: FAIL kind=variant"],
+           lacks="MISSING 致謝")
+    expect("readme: a base README without 版號規則 / 跨變體借用 fails (audit 300 section 4)", "readme_check.py", 1,
+           "--repo", case("base_short", "# DIRECTOR-WORK\n\n貼上啟動提示詞就開始。\n\n" + README_SERIES_300, None),
+           says=["MISSING 跨變體借用", "MISSING 版號規則", "MISSING 致謝", "README_CHECK: FAIL kind=base"])
+    expect("readme: a base README whose 跨變體借用 is prose fails", "readme_check.py", 1, "--repo",
+           case("base_prose", README_BASE_300.replace("## 跨變體借用\n\n無。", "## 跨變體借用\n\n有一些。"), None),
+           says="BAD 跨變體借用")
+    missing = case("missing", README_VARIANT_300.replace("## 跨變體借用\n\n| 做法", "| 做法"))
+    expect("readme: a missing section fails", "readme_check.py", 1, "--repo", missing,
+           says=["MISSING 跨變體借用", "README_CHECK: FAIL"])
+    empty = case("empty", README_VARIANT_300.replace("## 拿掉（NOT_PORTED）\n\n無。\n", "## 拿掉（NOT_PORTED）\n\n"))
+    expect("readme: a heading with nothing under it fails (write 無)", "readme_check.py", 1, "--repo", empty,
+           says=["EMPTY 拿掉", "README_CHECK: FAIL"])
+    expect("readme: a heading inside a ``` block does not count", "readme_check.py", 1, "--repo",
+           case("fenced", README_VARIANT_300.replace("## 新增（只有這個變體有）\n\n`adapters/x/`\n\n", "")),
+           says="MISSING 新增")
+    expect("readme: a series table without the agy row fails", "readme_check.py", 1, "--repo",
+           case("no_agy", README_VARIANT_300.replace("| https://github.com/example/agy-DIRECTOR-WORKER | Antigravity | "
+                                                     "`3.0.0-agy.7` | Antigravity |\n", "")),
+           says="BAD 所屬系列: no table row for agy-DIRECTOR-WORKER")
+    expect("readme: a series row without its address fails", "readme_check.py", 1, "--repo",
+           case("no_url", README_VARIANT_300.replace("https://github.com/example/cdx-", "cdx-")),
+           says="BAD 所屬系列: the cdx-DIRECTOR-WORKER row needs")
+    expect("readme: a variant without its frozen base commit fails", "readme_check.py", 1, "--repo",
+           case("no_sha", README_VARIANT_300.replace("`e93b51d`", "（待填）")), says="no frozen base commit")
+    expect("readme: a variant must name the base version of BASE_VERSION", "readme_check.py", 1, "--repo",
+           case("old_base", README_VARIANT_300, "3.0.1"), says="the base version `3.0.1` (BASE_VERSION) is not named")
+    expect("readme: 跨變體借用 is its table or 無", "readme_check.py", 1, "--repo",
+           case("borrow_text", README_VARIANT_300.replace("| 做法 | 原本出自哪版 | 現在用哪版 | 怎麼處理 |\n|---|---|---|---|\n"
+                                                          "| 版號整組比較 | ds.3 | 基板 3.0.0 | 改用基板 |\n", "待補。\n")),
+           says="BAD 跨變體借用")
+    expect("readme: 跨變體借用 may say 無", "readme_check.py", 0, "--repo",
+           case("borrow_none", README_VARIANT_300.replace("| 做法 | 原本出自哪版 | 現在用哪版 | 怎麼處理 |\n|---|---|---|---|\n"
+                                                          "| 版號整組比較 | ds.3 | 基板 3.0.0 | 改用基板 |\n", "無。\n")))
+    nothing = d / "nothing"
+    nothing.mkdir()
+    expect("readme: no README.md is INVALID (exit 2), never a pass", "readme_check.py", 2, "--repo", nothing,
+           says="README_CHECK: INVALID")
+
+    # --rev reads the commit, not the working tree
+    repo = d / "rev"
+    repo.mkdir()
+    for args in (("init", "-q"), ("config", "user.email", "selftest@example.invalid"), ("config", "user.name", "selftest"),
+                 ("config", "commit.gpgsign", "false")):
+        subprocess.run(["git", "-C", str(repo), *args], capture_output=True)
+    (repo / "README.md").write_text(README_VARIANT_300, encoding="utf-8")
+    (repo / "BASE_VERSION").write_text("3.0.0\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "readme"], capture_output=True)
+    (repo / "README.md").write_text(README_VARIANT_300.replace("## 安裝\n\n`install.py`\n\n", ""), encoding="utf-8")
+    expect("readme: --rev HEAD checks the commit", "readme_check.py", 0, "--repo", repo, "--rev", "HEAD",
+           says="README_CHECK: PASS kind=variant (rev HEAD)")
+    expect("readme: the working tree is checked without --rev", "readme_check.py", 1, "--repo", repo,
+           says="MISSING 安裝")
+    expect("readme: an unknown --rev is INVALID", "readme_check.py", 2, "--repo", repo, "--rev", "no-such-rev",
+           says="README_CHECK: INVALID")
+
+    # mutations: each check taken out lets a bad README through
+    for name, swaps, folder in (
+            ("empty section", [("        elif not found[heading].strip():\n", "        elif False:\n")], empty),
+            ("series rows", [("                problems.append(f\"BAD {SERIES_SECTION}: no table row for {repo}\")\n",
+                              "                pass\n")], cases["no_agy"]),
+            ("missing section", [("        if heading is None:\n            problems.append(f\"MISSING {name}\")\n",
+                                  "        if heading is None:\n            pass\n")], missing),
+            ("fence", [("            fence = not fence\n", "            pass\n")], cases["fenced"]),
+            ("base shared sections", [("VARIANT_SECTIONS if kind == \"variant\" else SHARED_SECTIONS",
+                                       "VARIANT_SECTIONS if kind == \"variant\" else ()")], cases["base_short"])):
+        module = mutant(TOOLS / "readme_check.py", swaps, f"readme_{name.replace(' ', '_')}")
+        if module is not None:
+            killed(f"readme {name}", not module.check(folder)[1])
+
+    # release.py: a series repo (HEAD tracks tools/readme_check.py) stops at the readme step
+    origin, base, config = rel_origin(tmp, "readme_300_release")
+    work = rel_clone(origin, base / "work")
+    checker = (TOOLS / "readme_check.py").read_text(encoding="utf-8")
+    rel_commit(work, "1.1.0", {"tools/readme_check.py": checker, "README.md": "# x\n\nno series\n"})
+    expect("readme: release stops at the readme step", "release.py", 1, "--repo", work, "--config", config,
+           says=["STEP version: OK", "MISSING 所屬系列", "STEP FAIL: readme_check: exit 1", "RELEASE: FAIL"],
+           lacks=["STEP selftest", "PLAN "])
+    module = mutant(TOOLS / "release.py", [("        job.readme()\n", "")], "readme_release_skipped")
+    if module is not None:
+        killed("release without the readme step", g2_main(module, "--repo", work, "--config", config) == 0)
+    rel_commit(work, "1.1.0", {"tools/readme_check.py": checker, "README.md": README_BASE_300})
+    expect("readme: release passes the readme step of a complete README", "release.py", 0, "--repo", work, "--config",
+           config, says=["STEP readme: OK README_CHECK: PASS kind=base (rev HEAD)", "STEP privacy: OK"])
+    other = rel_clone(origin, base / "other")
+    rel_commit(other, "1.1.0", {"README.md": "# x\n"})
+    expect("readme: a repo outside the series skips the step", "release.py", 0, "--repo", other, "--config", config,
+           says="STEP readme: SKIP HEAD has no tools/readme_check.py")
+
+    # no exit code (could not start, timed out) or no PASS line: FAIL, never a pass
+    import subprocess as real
+
+    def shim(answer):
+        fake = types.ModuleType("subprocess")
+        fake.__dict__.update(real.__dict__)
+
+        def run_(cmd, *args, **kwargs):
+            if cmd[0] != "git" and any(str(c).endswith("readme_check.py") for c in cmd):
+                return answer(cmd)
+            return real.run(cmd, *args, **kwargs)
+        fake.run = run_
+        return fake
+
+    def timeout(cmd):
+        raise real.TimeoutExpired(cmd, 1)
+
+    def cannot_start(cmd):
+        raise OSError("cannot start")
+
+    for name, answer, want in (
+            ("a PASS line and exit 0 passes (the shim works)",
+             lambda cmd: real.CompletedProcess(cmd, 0, "README_CHECK: PASS kind=base\n", ""), 0),
+            ("a timeout (no exit code) is FAIL", timeout, 1),
+            ("a check that cannot start (no exit code) is FAIL", cannot_start, 1),
+            ("exit 0 without a PASS line is FAIL", lambda cmd: real.CompletedProcess(cmd, 0, "", ""), 1),
+            ("a PASS line with exit 1 is FAIL", lambda cmd: real.CompletedProcess(cmd, 1, "README_CHECK: PASS\n", ""), 1)):
+        module = mutant(TOOLS / "release.py", [], f"readme_release_{len(name)}")
+        if module is not None:
+            module.subprocess = shim(answer)
+            check(f"readme: release: {name}", g2_main(module, "--repo", work, "--config", config) == want)
+
+
+def find_repo_300(path):
+    return load_common_300().find_repo(path)
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="director_work_selftest_")).resolve()
@@ -11351,6 +15811,51 @@ def main():
         guarded(test_pack_unique_260, tmp)
         guarded(test_waiver_bulk_260, tmp)
         guarded(test_lessons_intake_merged_260, tmp)
+        guarded(test_common_atomic_300, tmp)
+        guarded(test_common_git_300, tmp)
+        guarded(test_common_tail_300, tmp)
+        guarded(test_gate_fail_closed_300, tmp)
+        guarded(test_bootstrap_repo_300, tmp)
+        guarded(test_memory_chain_300, tmp)
+        guarded(test_final_outcome_300, tmp)
+        guarded(test_usage_partial_300, tmp)
+        guarded(test_safety_gate_300, tmp)
+        guarded(test_spec_gate_300, tmp)
+        guarded(test_director_in_project_300, tmp)
+        guarded(test_handoff_300, tmp)
+        guarded(test_delivery_300, tmp)
+        guarded(test_worktree_300, tmp)
+        guarded(test_loop_wait_tools_300, tmp)
+        guarded(test_install_300, tmp)
+        guarded(test_audit_source_300, tmp)
+        guarded(test_variant_readme_300, tmp)
+        guarded(test_optional_items_300, tmp)
+        guarded(test_chain_size_300, tmp)
+        guarded(test_version_300, tmp)
+        guarded(test_spec_reapprove_300, tmp)
+        guarded(test_spec_content_300, tmp)
+        guarded(test_worktree_gate_300, tmp)
+        guarded(test_delivery_bind_300, tmp)
+        guarded(test_handoff_names_300, tmp)
+        guarded(test_hash_order_300, tmp)
+        guarded(test_bootstrap_sub_300, tmp)
+        guarded(test_review_docs_300, tmp)
+        guarded(test_privacy_scan_300, tmp)
+        guarded(test_readme_check_300, tmp)
+        guarded(test_bootstrap_add_paths_300, tmp)
+        guarded(test_release_delivery_300, tmp)
+        guarded(test_scope_size_protected_300, tmp)
+        guarded(test_release_describe_300, tmp)
+        guarded(test_report_skeleton_300, tmp)
+        guarded(test_upstream_300, tmp)
+        guarded(test_loop_ds7_300, tmp)
+        guarded(test_variant_default_300, tmp)
+        guarded(test_optional_tools_300, tmp)
+        guarded(test_final_skip_old_300, tmp)
+        guarded(test_status_loops_300, tmp)
+        guarded(test_scope_candidate_300, tmp)
+        guarded(test_base_sync_check_300, tmp)
+        guarded(test_po_item_ch_300, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:

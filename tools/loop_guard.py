@@ -2,7 +2,7 @@
 two calls in turn, a poll whose answer never changes, calls the tool keeps rejecting, a subagent error nobody handled.
 
   python -I -X utf8 loop_guard.py scan --audit LOG [--audit LOG ...] [--transcript FILE.jsonl ...] [--no-subagents]
-                                  [--config FILE] [--session ID] [--json]
+                                  [--config FILE] [--session ID] [--json] [--out FILE]
 
 Reads the action log that audit_log.py append writes (and hook_guard.py --audit adds decision lines to; those are
 skipped), and / or Claude Code transcripts (read with transcript_audit.py's reader, subagent transcripts beside each
@@ -14,9 +14,13 @@ of a transcript with hashes of an action log. Calls are compared within one stre
 
 Categories (defaults in brackets; all counted within the last `window` [20] calls of the stream):
   repeat                 the same tool with the same input hash `repeat` [3] times or more
-  retry_same_error       the same call failing with the same error hash `retry_errors` [2] times or more
+  retry_same_error       the same call failing with the same error hash `retry_errors` [2] times or more; when the
+                         input says where the agent wrote text (a transcript: event text_before), only tries with no
+                         text between them count, the longest such run (3.0.0 B17, from dshdw ds.7)
   poll_no_progress       the same call `poll` [3] times in a row of its occurrences with an unchanged ok result
-  ping_pong              two different calls in turn, A B A B, for `ping_pong` [6] calls or more
+  ping_pong              two different calls in turn, A B A B, for `ping_pong` [6] calls or more, unless the result
+                         of A or of B changes inside the run (a build and a check of what it built: progress; 3.0.0
+                         B17, from dshdw ds.7)
   bad_args               `bad_args` [2] or more calls of one tool rejected for their arguments (InputValidationError
                          and the like); needs the error text, which only a transcript holds: with an action log
                          alone it prints `~ NOT_CHECKED bad_args`
@@ -24,18 +28,25 @@ Categories (defaults in brackets; all counted within the last `window` [20] call
                          nothing after it handled the error; with no subagent result in the input it prints
                          `~ NOT_VERIFIED child_error_unhandled` (Claude Code's subagent failure events are not checked)
 One key gets one category, the most specific: retry_same_error, then poll_no_progress, then repeat; a key that is part
-of a ping_pong finding is not also reported as repeat or poll_no_progress.
+of a ping_pong finding is not also reported as repeat or poll_no_progress. 3.0.0 B17 (the same as dshdw ds.7, so its
+reader can drop its own copy): an A B A B run left out for progress still keeps its keys out of repeat and
+poll_no_progress, and a retry the agent answered in text is not reported as another category either.
 
 --config FILE (JSON, all keys optional): {"schema_version": 1, "window": 20, "repeat": 3, "retry_errors": 2,
-"poll": 3, "ping_pong": 6, "bad_args": 2, "child_tools": ["Agent", "Task"], "allow": [{"tool": "Bash",
-"input": "<regex on the input JSON text>", "max": 30, "why": "waits for the build"}]}. An allow entry is a legitimate
-poll: matching calls are not reported as repeat or poll_no_progress until they reach "max" (default: never); a
-retry with the same error is still reported. The regex is matched inside the tool; it is never printed.
+"poll": 3, "ping_pong": 6, "bad_args": 2, "child_tools": ["Agent", "Task"], "wait_tools": [], "allow": [{"tool":
+"Bash", "input": "<regex on the input JSON text>", "max": 30, "why": "waits for the build"}]}. An allow entry is a
+legitimate poll: matching calls are not reported as repeat or poll_no_progress until they reach "max" (default:
+never); a retry with the same error is still reported. The regex is matched inside the tool; it is never printed.
+wait_tools (3.0.0, D5) are tools whose repeated call is the normal way to wait on a child (the DeepSeek port's
+wait_agent): they are left out of repeat, retry_same_error, poll_no_progress and ping_pong, and still count for
+bad_args and child_error_unhandled.
 
 Output shows tool names, hashes, counts and seq numbers only, never argument text:
   LOOP repeat tool=Bash args=1a2b3c4d5e6f count=4 seq=10..18 session=abcd1234
   LOOP_GUARD: FOUND n events=n streams=n (repeat=1 ...)   or   LOOP_GUARD: NONE events=n streams=n
 Exit 0 none found, 1 found, 2 input error (no such file, bad config, nothing to read: NO_DATA, never a measured 0).
+--out FILE (3.0.0 B10) also writes the --json text to FILE (UTF-8, whatever the shell; NO_DATA writes
+{"no_data": true, ...}) for status_gen.py's LOOPS section; the exit code stays the same.
 
 Hook mode: hook_guard.py --loop-guard --audit LOG (setup_project_settings.py --loop-guard) runs hook_check() before
 each tool call on the tail of the same action log and the call about to run. It only reminds (or asks, with
@@ -43,12 +54,16 @@ each tool call on the tail of the same action log and the call about to run. It 
 legitimate wait does not fill the context. It does nothing while the environment has DW_LOOP_GUARD set (hook_guard sets
 it for any process it starts), like DW_HOOK_REVIEW.
 
-The detection core (event_of, events_from_entries, detect, coverage, hook_check) is pure: a list of events in, a list
-of findings out, no files and no clock, so another host can feed it its own events. Standard library only.
+The detection core (config, event_of, events_from_entries, detect, coverage, hook_check, should_remind) is pure: a
+list of events in, a list of findings out, no files and no clock, so another host can feed it its own events. Since
+3.0.0 (D5) it is the one copy of the logic and the thresholds for every platform: the live hook here and each port's
+after-the-fact reader load this file and pass their events and the same config schema, instead of keeping a copy
+that drifts. Standard library only.
 Concepts borrowed (no code): stuck-loop thresholds and circuit breakers from MIT-licensed agent projects (see
 CHANGELOG 2.4.0 Credits).
 """
 import argparse
+import bisect
 import collections
 import datetime
 import hashlib
@@ -61,7 +76,7 @@ import sys
 
 CATEGORIES = ("repeat", "retry_same_error", "poll_no_progress", "ping_pong", "bad_args", "child_error_unhandled")
 DEFAULTS = {"window": 20, "repeat": 3, "retry_errors": 2, "poll": 3, "ping_pong": 6, "bad_args": 2,
-            "child_tools": ["Agent", "Task"], "allow": []}
+            "child_tools": ["Agent", "Task"], "wait_tools": [], "allow": []}
 THRESHOLD = {"repeat": "repeat", "retry_same_error": "retry_errors", "poll_no_progress": "poll",
              "ping_pong": "ping_pong", "bad_args": "bad_args", "child_error_unhandled": None}
 VALIDATION = re.compile(r"InputValidationError|Invalid tool parameters|invalid_type|required parameter|"
@@ -114,9 +129,9 @@ def config(raw=None):
             continue
         if key not in DEFAULTS:
             raise InputError(f"config: unknown key {key!r}")
-        if key == "child_tools":
+        if key in ("child_tools", "wait_tools"):
             if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
-                raise InputError("config: child_tools must be a list of tool names")
+                raise InputError(f"config: {key} must be a list of tool names")
         elif key == "allow":
             if not isinstance(value, list):
                 raise InputError("config: allow must be a list")
@@ -192,6 +207,27 @@ def longest_same_result(group):
     return best
 
 
+def results_changed(group, keys):
+    """3.0.0 B17 (from dshdw 2.3.0-ds.6 / ds.7, dsh_audit ping_pong_progressed): True when the result of one of the
+    two calls of an A B A B run changes inside the run (a build and a check of what it built: progress, not a
+    ping_pong). Calls still running (no result) are left out."""
+    return any(len({e["result"] for e in group if (e["tool"], e["args"]) == key and e["result"] is not None}) > 1
+               for key in keys)
+
+
+def unanswered(tries, events):
+    """3.0.0 B17 (from dshdw ds.7, dsh_audit retry_unanswered): the longest run of the same failed call with no text
+    the agent wrote between two tries. An event's text_before (True / False; absent = not known, as in an action
+    log) says the agent wrote text after the stream's previous call and before this one. Text between two tries means
+    the agent saw the error and said so, and the try after it starts a new run."""
+    marks = [e["_pos"] for e in events if e.get("text_before")]
+    best = run = 1 if tries else 0
+    for before, after in zip(tries, tries[1:]):
+        run = 1 if any(before["_pos"] < p <= after["_pos"] for p in marks) else run + 1
+        best = max(best, run)
+    return best
+
+
 def finding(category, stream, group, **extra):
     first, last = group[0], group[-1]
     out = {"category": category, "session": stream[0], "agent": stream[1], "tools": [first["tool"]],
@@ -207,23 +243,28 @@ def detect_stream(stream, events, conf):
         event["_pos"] = pos
     window = conf["window"]
     found, ping_keys = [], set()
+    texts_known = any("text_before" in e for e in events)  # 3.0.0 B17: a transcript says where the agent wrote text
+    wait = set(conf.get("wait_tools") or ())
+    calls = [e for e in events if e["tool"] not in wait]  # 3.0.0 (D5): waiting on a child is not a loop by itself
     # ping_pong: A B A B ...
     run_start = None
-    for i in range(len(events) + 1):
-        ok = (i < len(events) and i >= 2 and (events[i]["tool"], events[i]["args"]) == (events[i - 2]["tool"], events[i - 2]["args"])
-              and (events[i]["tool"], events[i]["args"]) != (events[i - 1]["tool"], events[i - 1]["args"]))
+    for i in range(len(calls) + 1):
+        ok = (i < len(calls) and i >= 2 and (calls[i]["tool"], calls[i]["args"]) == (calls[i - 2]["tool"], calls[i - 2]["args"])
+              and (calls[i]["tool"], calls[i]["args"]) != (calls[i - 1]["tool"], calls[i - 1]["args"]))
         if ok and run_start is None:
             run_start = i - 2
         if not ok and run_start is not None:
-            group = events[run_start:i]
+            group = calls[run_start:i]
             if len(group) >= conf["ping_pong"]:
                 a, b = group[0], group[1]
-                found.append(finding("ping_pong", stream, group, tools=[a["tool"], b["tool"]], args=[a["args"], b["args"]]))
-                ping_keys |= {(a["tool"], a["args"]), (b["tool"], b["args"])}
+                keys = ((a["tool"], a["args"]), (b["tool"], b["args"]))
+                if not results_changed(group, keys):  # 3.0.0 B17: a changing result is progress
+                    found.append(finding("ping_pong", stream, group, tools=[a["tool"], b["tool"]], args=[a["args"], b["args"]]))
+                ping_keys |= set(keys)
             run_start = None
     # repeat / retry_same_error / poll_no_progress, per key
     positions = collections.OrderedDict()
-    for event in events:
+    for event in calls:
         positions.setdefault((event["tool"], event["args"]), []).append(event)
     for key, occurrences in positions.items():
         best = {"retry_same_error": None, "poll_no_progress": None, "repeat": None}
@@ -251,6 +292,11 @@ def detect_stream(stream, events, conf):
                 continue
             if category in ("repeat", "poll_no_progress") and key in ping_keys:
                 continue
+            if category == "retry_same_error" and texts_known:  # 3.0.0 B17
+                n = unanswered(hit[1], events)
+                if n < conf["retry_errors"]:
+                    break  # the agent answered each error in text; like dshdw ds.7, no other category for this key
+                hit = (n,) + tuple(hit[1:])
             found.append(finding(category, stream, hit[1], count=hit[0], result=hit[2]))
             break
     # bad_args: one tool's calls rejected for their arguments
@@ -361,27 +407,9 @@ def read_log(path):
 
 
 def tail_entries(path, limit=TAIL_BYTES):
-    """The entries in the last `limit` bytes of an action log (a cut first line is skipped); [] when it is missing."""
-    try:
-        with open(path, "rb") as fh:
-            fh.seek(0, os.SEEK_END)
-            size = fh.tell()
-            fh.seek(max(0, size - limit))
-            raw = fh.read()
-    except OSError:
-        return []
-    lines = raw.split(b"\n")
-    if size > limit:
-        lines = lines[1:]
-    out = []
-    for line in lines:
-        try:
-            entry = json.loads(line.decode("utf-8", errors="replace"))
-        except ValueError:
-            continue
-        if isinstance(entry, dict):
-            out.append(entry)
-    return out
+    """The entries in the last `limit` bytes of an action log (a cut first line is skipped); [] when it is missing.
+    3.0.0 G1: the shared one-read tail of _common."""
+    return load_sibling("_common").tail_jsonl(path, limit)
 
 
 def transcript_files(paths, subagents=True):
@@ -411,8 +439,11 @@ def in_window(ts, since=None, until=None):
 def events_from_transcripts(files, since=None, until=None):
     """Events from transcripts (via transcript_audit's reader), in the order the calls were made; error text kept
     only as a class (validation / other). since / until (aware datetimes) keep only the calls made in [since, until)."""
+    if not pathlib.Path(__file__).with_name("transcript_audit.py").is_file():  # 3.0.0 B11: an optional tool
+        raise InputError("--transcript needs tools/transcript_audit.py, an optional tool (Claude Code transcripts) "
+                         "that is not installed here; use --audit LOG")
     reader, audit = load_sibling("transcript_audit"), load_sibling("audit_log")
-    calls, results, _, _ = reader.read_calls(files)
+    calls, results, counts, _ = reader.read_calls(files)
     events = []
     for key, call in sorted(calls.items(), key=lambda kv: kv[1]["order"]):
         if not in_window(call.get("ts"), since, until):
@@ -436,6 +467,17 @@ def events_from_transcripts(files, since=None, until=None):
         event = event_of(entry, error_text=error_text, seq=call["order"])
         if event is not None:
             events.append(event)
+    # 3.0.0 B17: text_before = the agent wrote text after the stream's previous call and before this one
+    texts = collections.defaultdict(list)
+    for order, session, agent in counts.get("texts", ()):
+        texts[(session, agent)].append(order)
+    previous = {}
+    for event in events:
+        stream = (event["session"], event["agent"])
+        marks = texts.get(stream, [])
+        at = bisect.bisect_left(marks, previous.get(stream, 0))
+        event["text_before"] = at < len(marks) and marks[at] < event["seq"]
+        previous[stream] = event["seq"]
     return events
 
 
@@ -488,6 +530,12 @@ def summary_line(events, conf=None):
     return f"LOOPS {' '.join(parts)} events={len(events)} (loop_guard.py scan for details)"
 
 
+def write_out(path, payload):
+    """3.0.0 B10: the --json text as a UTF-8 file (a shell redirect may write UTF-16), for status_gen.py LOOPS."""
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps(payload, ensure_ascii=False, indent=1) + "\n")
+
+
 def scan(a):
     conf = load_config(a.config)
     events = []
@@ -498,17 +546,24 @@ def scan(a):
     if a.session:
         events = [e for e in events if (e["session"] or "").startswith(a.session)]
     if not events:
+        if a.out:  # 3.0.0 B10: the status page says NO_DATA instead of showing an old file as current
+            write_out(a.out, {"no_data": True, "findings": [], "coverage": coverage([], conf), "events": 0,
+                              "streams": 0})
         print("LOOP_GUARD: NO_DATA events=0 (no tool call read; this is not a measured 0)")
         return 2
     hits = detect(events, conf)
     cover = coverage(events, conf)
     count = collections.Counter(h["category"] for h in hits)
     nstreams = len(streams(events))
+    clean = [{k: v for k, v in h.items() if k != "last_pos"} for h in hits]
+    payload = {"findings": clean, "coverage": cover, "events": len(events), "streams": nstreams}
+    if a.out:
+        write_out(a.out, payload)
     if a.json:
-        clean = [{k: v for k, v in h.items() if k != "last_pos"} for h in hits]
-        print(json.dumps({"findings": clean, "coverage": cover, "events": len(events), "streams": nstreams},
-                         ensure_ascii=False, indent=1))
+        print(json.dumps(payload, ensure_ascii=False, indent=1))
     else:
+        if a.out:
+            print(f"WROTE {a.out}")
         for hit in hits:
             print(describe(hit))
         if not cover["error_text"]:
@@ -532,6 +587,7 @@ def main(argv=None):
     s.add_argument("--config", help="loop_guard config JSON (thresholds, allow list)")
     s.add_argument("--session", help="only streams whose session id starts with this")
     s.add_argument("--json", action="store_true", help="print JSON")
+    s.add_argument("--out", metavar="FILE", help="also write the JSON to FILE (UTF-8) for status_gen.py LOOPS (3.0.0)")
     try:
         a = ap.parse_args(argv)
     except SystemExit as stop:

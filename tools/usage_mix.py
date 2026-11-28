@@ -46,6 +46,8 @@ unhandled); `loop_guard.py scan --transcript FILE` shows which. --no-loops leave
 cat / head / tail / sed -n / Get-Content) and the quota its reads cost (each call's cost split over its tool calls).
 It prints file paths, so keep its output local; the rest of the report prints no path.
 2.5.0: it counts only the calls made in [--since, --until) by their own timestamps, like the main tally.
+3.0.0 (D7): a usage value that is not a non-negative number (a bool, text, a negative number) counts as 0; the result
+says `partial: true` with the field names and a `PARTIAL usage:` line before RESULT (only for the calls counted).
 """
 import argparse
 import collections as C
@@ -262,10 +264,19 @@ def read_target(name, inp):
     return args[-1] if args else None
 
 
-def read_calls(path, pats, since=None, until=None, seen=None):
+def load_common():
+    spec = importlib.util.spec_from_file_location("dw_common", pathlib.Path(__file__).with_name("_common.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def read_calls(path, pats, since=None, until=None, seen=None, invalid=None):
     """The model calls of one transcript in order, fragments merged: dicts with id, ctx, eq, cats, time.
-    Also returns the session title and whether a call before --since was dropped."""
+    Also returns the session title and whether a call before --since was dropped. invalid (3.0.0 D7): a list that
+    gets (field, value) for each usage value of a counted call that is not a non-negative number (counted as 0)."""
     seen = set() if seen is None else seen
+    common = load_common()
     calls, by_id, title, dropped = [], {}, None, False
     with open(path, encoding="utf-8", errors="replace") as fh:
         for line in fh:
@@ -289,13 +300,14 @@ def read_calls(path, pats, since=None, until=None, seen=None):
                     if isinstance(b, dict) and b.get("type") == "tool_use"]
             reads = [t for t in (read_target(b.get("name", ""), b.get("input")) for b in content
                                  if isinstance(b, dict) and b.get("type") == "tool_use") if t]
-            usage = m.get("usage") if isinstance(m.get("usage"), dict) else {}
+            raw = m.get("usage")
             if mid in by_id:  # a later fragment of the same message
                 call = by_id[mid]
                 call["cats"].extend(cats)
                 call["reads"].extend(reads)
+                usage = dict(zip(WEIGHTS, common.usage_numbers(raw, list(WEIGHTS), "usage.", invalid)))
                 for k in WEIGHTS:
-                    call["usage"][k] = max(call["usage"].get(k, 0), usage.get(k) or 0)
+                    call["usage"][k] = max(call["usage"].get(k, 0), usage[k])
                 continue
             ts = stamp(o)
             if ts is None or (until and ts >= until):
@@ -306,7 +318,8 @@ def read_calls(path, pats, since=None, until=None, seen=None):
             if mid in seen:
                 continue
             seen.add(mid)
-            call = {"id": mid, "time": ts, "cats": cats, "reads": reads, "usage": {k: usage.get(k) or 0 for k in WEIGHTS}}
+            usage = dict(zip(WEIGHTS, common.usage_numbers(raw, list(WEIGHTS), "usage.", invalid)))
+            call = {"id": mid, "time": ts, "cats": cats, "reads": reads, "usage": usage}
             by_id[mid] = call
             calls.append(call)
     for call in calls:
@@ -451,10 +464,11 @@ def collect(root, project_dirs, pats, since=None, until=None, session=None):
         if since and os.path.getmtime(path) < since.timestamp():
             continue
         files += 1
-        calls, title, dropped = read_calls(path, pats, since, until, seen)
+        invalid = []
+        calls, title, dropped = read_calls(path, pats, since, until, seen, invalid)
         if title:
             titles[sid] = title
-        sessions.append({"sid": sid, "sub": sub, "calls": calls, "title": title, "dropped": dropped})
+        sessions.append({"sid": sid, "sub": sub, "calls": calls, "title": title, "dropped": dropped, "invalid": invalid})
     for s in sessions:
         s["title"] = s["title"] or titles.get(s["sid"])
     if session:
@@ -512,6 +526,8 @@ def render(res):
         lines.append(f"RESTART break-even after {be['calls_to_break_even']} more calls: rebuilding costs "
                      f"{kfmt(be['rebuild_eq'])}, each call saves {kfmt(be['saving_per_call'])} "
                      f"({kfmt(be['eq_per_call_>=170K'])} at >=170K vs {kfmt(be['eq_per_call_fresh'])} at {be['fresh_bucket']})")
+    if res.get("partial_line"):
+        lines.append(res["partial_line"])
     missed = [f"{g} {pct(t['share']).strip()} (target {t['target']})" for g, t in res["targets"].items() if not t["ok"]]
     lines.append(f"RESULT {res['result']}" + (": " + "; ".join(missed) if missed else ""))
     return "\n".join(lines)
@@ -574,6 +590,11 @@ def main(argv=None):
     res.update({"files": files, "sessions_read": len(sessions), "session": a.session,
                 "range": f"{a.since or 'start'}..{a.until or 'now'} UTC", "restart": restart_numbers(sessions, groups, a.min_cases),
                 "weights": WEIGHTS})
+    invalid = [item for s in sessions for item in s.pop("invalid", [])]
+    common = load_common()
+    res.update(common.usage_partial(invalid))
+    if invalid:
+        res["partial_line"] = common.partial_line(invalid)
     if not a.no_loops:
         res["loops"] = loops_line(a.root, dirs, since, {s["sid"] for s in sessions} if a.session else None, until)
     lines = render(res).split("\n")

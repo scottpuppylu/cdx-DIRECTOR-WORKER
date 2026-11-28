@@ -1,0 +1,36 @@
+name: Codex adapter
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  codex-adapter:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-24.04]
+        python: ['3.9', '3.12']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Adapter selftest
+        run: python -I -B -X utf8 adapters/codex/selftest_cdx.py
+      - name: Check frozen base
+        shell: pwsh
+        run: |
+          $frozen = (Get-Content adapters/codex/BASE_SYNC.json -Raw | ConvertFrom-Json).base_commit
+          $base = Join-Path $env:RUNNER_TEMP 'dw-frozen-base'
+          git worktree add --detach $base $frozen
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -I -B -X utf8 tools/base_sync_check.py --base $base

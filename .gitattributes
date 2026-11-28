@@ -1,4 +1,4 @@
-* text=auto eol=lf
+# Scripts and the Dockerfile run inside Linux; keep LF even where Git converts line endings.
 *.sh text eol=lf
 tools/container/Dockerfile text eol=lf
 tools/container/dns_allow.py text eol=lf

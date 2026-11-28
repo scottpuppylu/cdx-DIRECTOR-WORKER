@@ -17,6 +17,7 @@ RESULT: PASS | PARTIAL | BLOCKED | FAIL
 DONE: 完成項目，每項附證據路徑
 TESTS: 實際執行的測試與結果；沒跑的寫 NOT_RUN
 SCOPE_CHECK: PASS | VIOLATION | NOT_RUN，貼 scope_check.py 的最後一行
+PROTECTED_CHANGED: （有保護的測試檔時）照抄 scope_check.py 印的那一行：改到的保護測試檔，或 NONE（3.0.0 B4）
 EVIDENCE: 重跑指令與產物雜湊的紀錄路徑（evidence_record.py）；沒有就寫 NONE: 原因
 AUDIT_RANGE: （選用）audit_log.py cite 印出的那一行；有裝動作紀錄才寫
 SESSION_ID: （選用）本 session 的 session_id；有裝動作紀錄才寫

@@ -19,7 +19,8 @@ A missing or repeated line, a placeholder (`<...>`), an empty or missing reason,
 2.2.1 checks the three files beside DIRECTOR_STATE.md (in the folder given, or beside a file named
 DIRECTOR_STATE.md); a file that is not there yet is only noted (PO_PENDING.md and RESUME_STATE.md come at BOOTSTRAP
 step 6, director_work.json at step 7):
-  PO_PENDING.md       every entry `ID: OD-xx` / `ID: ACT-xx` has ID, STATUS, QUESTION, OPTIONS, RECOMMENDED, SOURCE
+  PO_PENDING.md       every entry `ID: OD-xx` / `ID: ACT-xx` / `ID: CH-xx` (3.0.0: a web choice question keeps its
+                      web id) has ID, STATUS, QUESTION, OPTIONS, RECOMMENDED, SOURCE
                       and ANSWER once each (CREATED missing is a note); STATUS is open, answered or closed; QUESTION,
                       OPTIONS and RECOMMENDED are filled in; SOURCE is filled in or NONE; answered / closed needs a real
                       ANSWER; an ID is used once
@@ -53,7 +54,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 PO_FIELDS = ("ID", "STATUS", "QUESTION", "OPTIONS", "RECOMMENDED", "SOURCE", "ANSWER")
 PO_STATUSES = ("open", "answered", "closed")
 PO_ID = re.compile(r"^[ \t]*ID[ \t]*:[ \t]*(.*)$")
-PO_ITEM = re.compile(r"(?:OD|ACT)-\w+")  # metrics_report.py counts `ID: OD-..` / `ID: ACT-..` the same way
+PO_ITEM = re.compile(r"(?:OD|ACT|CH)-\w+")  # metrics_report.py counts `ID: OD-..` / `ACT-..` / `CH-..` the same way
 PO_LINE = re.compile(r"^[ \t]*([A-Z][A-Z_]*)[ \t]*:[ \t]?(.*)$")
 HEADING = re.compile(r"^[ \t]*#{1,6}[ \t]+(.*)$")
 CONFIG_MODES = ("general", "beginner")
@@ -62,7 +63,7 @@ CONFIG_LISTS = ("skip_worktrees", "po_pending_files")
 CONFIG_BOOLS = ("hooks", "runtime_guard", "guard_review")
 CONFIG_PATTERNS = ("trace_id_pattern", "po_item_pattern", "po_open_pattern")
 CONFIG_KEYS = (("schema_version", "mode", "window", "plugins_off", "guard_profile", "guard_mode", "resume", "base_ref",
-                "release", "verdict_self_check") + CONFIG_STRINGS
+                "release", "verdict_self_check", "strength", "safety") + CONFIG_STRINGS
                + CONFIG_LISTS + CONFIG_BOOLS + CONFIG_PATTERNS)
 RESUME_KEYS = ("max_bytes", "max_line_bytes", "keep_recent", "protect_headings")
 BASE_REF_KEYS = ("check", "fetch", "strict")  # 2.2.2: gate_check --order BASE_REF freshness
@@ -141,7 +142,7 @@ def check_po_pending(text, notes):
             item = PO_ITEM.match(start.group(1).strip())
             current = None
             if not item:
-                notes.append(f"PO_PENDING line {number}: `ID: {start.group(1).strip()[:40]}` is not OD-xx / ACT-xx; "
+                notes.append(f"PO_PENDING line {number}: `ID: {start.group(1).strip()[:40]}` is not OD-xx / ACT-xx / CH-xx; "
                              "the tools do not count it")
                 continue
             current = {"id": item.group(0), "line": number, "section": section, "fields": {"ID": [item.group(0)]}}
@@ -291,6 +292,9 @@ def check_config(text, notes):
                         say(f"release.gh_repo: owner/name or null, got {value!r}")
                 elif value is not None and not (isinstance(value, str) and value.strip()):
                     say(f"release.{key}: a non-empty string, got {value!r}")
+    if "strength" in data or "safety" in data:  # 3.0.0 (D1): the check gate_check --order / --match runs
+        for message in neighbour("safety_gate").from_data(data)[1]:
+            say(message)
     unknown = sorted(k for k in data if k not in CONFIG_KEYS and not k.startswith("_"))
     if unknown:
         notes.append(f"director_work.json: keys no tool reads: {', '.join(unknown)} (a typo?)")
@@ -338,7 +342,10 @@ def main(argv=None):
     for path in a.dirs:
         target, notes = state_file(path), []
         if target.is_file():
-            problems = check_setup(target.read_text(encoding="utf-8-sig"), notes)
+            try:
+                problems = check_setup(target.read_text(encoding="utf-8-sig"), notes)
+            except UnicodeDecodeError as error:  # 3.0.0 (G2): one FAIL line, never a traceback
+                problems = [f"INVALID not UTF-8 text ({error.reason} at byte {error.start}); save it as UTF-8 and run again"]
         else:
             problems = ["file not found"]
         if target.parent.is_dir() and (pathlib.Path(path).is_dir() or target.name == "DIRECTOR_STATE.md"):

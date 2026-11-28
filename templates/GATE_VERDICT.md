@@ -41,6 +41,7 @@ NO MERGE / NO PUSH / NO FINAL ACCEPTANCE（除非 PO 另行核准，寫明核准
 
 ## G. 最終驗收清單（只有最終裁決填，2.2.5）
 - 公開入口（ENTRY_POINT）：<交付物唯一的公開入口：CLI 指令或可呼叫的函式>
-- 端到端證據：`evidence/E2E/<檔名>`：lead 照規格的情境，從上面的入口實際跑一次；每份紀錄寫一行 `ENTRY_POINT: <入口>`
+- 端到端證據：`evidence/E2E/<檔名>`：lead 照規格的情境，從上面的入口實際跑一次；每份紀錄寫一行 `ENTRY_POINT: <入口>` 和一行 `CANDIDATE: <跑的 commit>`，結尾寫一行 `EXIT_CODE: <結束碼>`（3.0.0：沒有 `EXIT_CODE: 0` 或 `RESULT: PASS` 就不算跑完）
 - `gate_check.py --final <DIRECTOR 資料夾>` 的結論行：<原樣貼上；FAIL 不能給最終 PASS>
+- 交付紀錄（3.0.0，硬底線）：`delivery.py record --candidate <CANDIDATE_HEAD> --file <交付的檔> --order <WO> --env <環境>…` 寫 `evidence/DELIVERY.json`，候選不是要交付的 HEAD、或不是本裁決的 `CANDIDATE_HEAD` 就不寫（本檔檔名要有 VERDICT 和工單 ID）；每個驗收條件、每個環境用 `delivery.py judge` 各記一筆（auto／manual／review／po 分開）；`delivery.py check` 的結論行：<原樣貼上>
 - DD 驗收案例：DECISION_REGISTER 每條 DD 的「驗收案例」都有對應的端到端案例和精確期望數字；`~ WARN DD_CASE` 的逐條寫原因

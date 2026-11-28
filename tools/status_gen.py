@@ -20,12 +20,18 @@ Director sections (any of them, all optional; "Director" status in docs/06b):
   AUDIT    per action log (audit_log.py) of "globs": lines, blocked (hook_guard deny / pause) and log reads (the
            poll_hint.py rules) in the last "hours" (default 1), and how many sessions
   PROC     per "processes" item: whether a process whose command line matches "match" runs (NOT RUNNING exits 1)
+  LOOPS    (3.0.0 B10, from agy 2.3.0-ds.6) the JSON file of `loop_guard.py scan --out FILE` (or --json): one line with
+           the file's age, findings=<n>, the count per category that has findings, the categories the input cannot
+           check (bad_args=NOT_CHECKED, child_error_unhandled=NOT_VERIFIED), events and streams; NO_DATA when the scan
+           read no tool call. agy_audit.py loops --out (findings_total / counts) is read too. A missing or unreadable
+           file is MISSING; findings do not change the exit code. Refresh the file at a checkpoint
 
   {"po_page": {"path": "PO_PENDING.md", "counts": [{"label": "answered", "regex": "..."},
      {"label": "notes new", "list": "notes", "field": "status", "value": "new"}]},
    "orders": {"dir": "orders", "glob": "WO-*.md", "closed": "...", "show": 8},
    "pending_sends": {"path": "PENDING_SENDS.md", "unsent": "..."},
-   "audit": {"globs": ["audit/*.jsonl"], "hours": 1}, "processes": [{"label": "idle_watch", "match": "idle_watch"}]}
+   "audit": {"globs": ["audit/*.jsonl"], "hours": 1}, "processes": [{"label": "idle_watch", "match": "idle_watch"}],
+   "loops": {"path": "loops.json"}}
 
 templates/status_director.json is a Director config to copy.
 
@@ -35,7 +41,7 @@ not run makes status.py exit 1.
 Settings come from --config FILE (JSON, below) and/or the flags; a flag replaces the config's value.
 
   {"schema_version": 1, "name": "line-a", "logs": ["run/out.log"], "log_lines": 8, "hash_files": ["run/hashes.txt"],
-   "checksum": ["build/app.zip"], "outputs": ["run/frames"], "output_count": 5, "disk": "D:/", "disk_min_gib": 20,
+   "checksum": ["build/app.zip"], "outputs": ["run/frames"], "output_count": 5, "disk": "<WS>", "disk_min_gib": 20,
    "git": ".", "max_lines": 60, "width": 160}
 
 Relative paths are resolved against the config file's folder (flags: the current folder) and written into status.py
@@ -50,13 +56,13 @@ import sys
 
 KEYS = {"name": str, "logs": list, "log_lines": int, "hash_files": list, "checksum": list, "outputs": list,
         "output_count": int, "disk": str, "disk_min_gib": (int, float), "git": str, "max_lines": int, "width": int,
-        "po_page": dict, "orders": dict, "pending_sends": dict, "audit": dict, "processes": list,
+        "po_page": dict, "orders": dict, "pending_sends": dict, "audit": dict, "processes": list, "loops": dict,
         "lines": dict}  # 2.3.0: "lines" is read by line_brief.py; status.py ignores it
 DEFAULTS = {"name": "status", "logs": [], "log_lines": 8, "hash_files": [], "checksum": [], "outputs": [],
             "output_count": 5, "disk": None, "disk_min_gib": None, "git": None, "max_lines": 60, "width": 160,
-            "po_page": None, "orders": None, "pending_sends": None, "audit": None, "processes": [],
+            "po_page": None, "orders": None, "pending_sends": None, "audit": None, "processes": [], "loops": None,
             "lines": None}
-DIRECTOR_KEYS = ("po_page", "orders", "pending_sends", "audit", "processes")
+DIRECTOR_KEYS = ("po_page", "orders", "pending_sends", "audit", "processes", "loops")  # 3.0.0 B10: loops
 CLOSED = r"(?im)^\s*(?:STATUS|狀態)\s*[:=：]\s*(?:CLOSED|DONE|ACCEPTED|結案)"
 UNSENT = r"^\s*[-*] \[ \]"
 PATH_KEYS = ("logs", "hash_files", "checksum", "outputs")
@@ -383,6 +389,33 @@ def director():
             hits = [x for x in listing if re.search(proc["match"], x, re.I)]
             problems += not hits
             say(f"PROC {proc['label']}: " + (f"running ({len(hits)})" if hits else "NOT RUNNING"))
+    loops = CONFIG.get("loops")
+    if loops:  # 3.0.0 B10: loop_guard.py scan --out / --json (agy_audit.py loops --out too)
+        try:
+            data = json.loads(read_text(loops["path"]))
+            if "findings_total" in data:  # agy_audit.py loops --out
+                total, counts = int(data["findings_total"]), dict(data["counts"])
+                flagged = [f"{k}=NOT_VERIFIED" for k in data.get("not_verified") or []]
+                where = f"sessions={data.get('sessions')}"
+            else:  # loop_guard.py scan
+                counts = {}
+                for hit in data["findings"]:
+                    counts[hit["category"]] = counts.get(hit["category"], 0) + 1
+                total = len(data["findings"])
+                cover = data["coverage"]
+                flagged = ([] if cover.get("error_text") else ["bad_args=NOT_CHECKED"]) \
+                    + ([] if cover.get("child_results") else ["child_error_unhandled=NOT_VERIFIED"])
+                where = f"events={int(data['events'])} streams={int(data['streams'])}"
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+            missing("LOOPS", f"{loops['path']} ({type(e).__name__})")
+        else:
+            head = f"LOOPS {os.path.basename(loops['path'])} (modified {age(loops['path'])} ago)"
+            if data.get("no_data"):
+                say(f"{head}: NO_DATA (the scan read no tool call; not a measured 0)")
+            else:
+                say(f"{head}: findings={total}" + "".join(f" {k}={v}" for k, v in counts.items() if v)
+                    + "".join(" " + f for f in flagged) + f"; {where}"
+                    + ("; details: loop_guard.py scan" if total else ""))
 """
 
 
@@ -474,6 +507,10 @@ def director_settings(conf, base):
         audit.setdefault("hours", 1)
         if not isinstance(audit["hours"], (int, float)) or isinstance(audit["hours"], bool) or audit["hours"] <= 0:
             raise ValueError("audit.hours: more than 0")
+    loops = conf["loops"]
+    if loops is not None:  # 3.0.0 B10
+        only(loops, "loops", ("path",))
+        loops["path"] = absolute(text(loops.get("path"), "loops.path"))
     for proc in conf["processes"]:
         if not isinstance(proc, dict):
             raise ValueError("processes: a list of {label, match}")
@@ -546,7 +583,7 @@ def main(argv=None):
     ap.add_argument("--checksum", action="append", default=[], metavar="FILE")
     ap.add_argument("--outputs", action="append", default=[], metavar="DIR")
     ap.add_argument("--output-count", type=int)
-    ap.add_argument("--disk", metavar="PATH", help="a path on the drive to measure, e.g. D:/")
+    ap.add_argument("--disk", metavar="PATH", help="a path on the drive to measure, e.g. <WS>")
     ap.add_argument("--disk-min-gib", type=float)
     ap.add_argument("--git", metavar="DIR")
     ap.add_argument("--max-lines", type=int)

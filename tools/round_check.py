@@ -27,7 +27,8 @@ differ. Missing or the same prints `~ WARN NO_INDEPENDENT_DIAGNOSIS` (a warning,
   round_check.py --resume FILE ...    these files
 
 Prints OK / FAIL per defect and a last line `ROUNDS: PASS|FAIL files=n defects=n failed=n`; exit 1 on any FAIL or
-when no RESUME_STATE is found. Only reads. A project's guard_check runs it for each worktree (docs/06b).
+when no RESUME_STATE is found. 3.0.0 (G2): an empty RESUME_STATE or one that is not UTF-8 text is FAIL (INVALID), not
+"no FIX_ROUNDS field". Only reads. A project's guard_check runs it for each worktree (docs/06b).
 """
 import argparse
 import pathlib
@@ -154,6 +155,18 @@ def check_defect(defect, fields, folder):
     return problems
 
 
+def unreadable(path):
+    """3.0.0 (G2): why a RESUME_STATE gives no result (empty, or not UTF-8 text), or None when it can be read."""
+    raw = path.read_bytes()
+    if not raw.strip():
+        return "INVALID empty file: nothing to check"
+    try:
+        raw.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        return f"INVALID not UTF-8 text ({error.reason} at byte {error.start}); save it as UTF-8 and run again"
+    return None
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dir", default=".", help="folder whose RESUME_STATE*.md files are checked (default: current)")
@@ -170,7 +183,12 @@ def main(argv=None):
             failed += 1
             print(f"FAIL {f}: file not found")
             continue
-        rows = fix_rounds(f.read_text(encoding="utf-8-sig", errors="replace"))
+        problem = unreadable(f)
+        if problem:  # 3.0.0 (G2): a file that cannot be read gives no result, so it is never OK
+            failed += 1
+            print(f"FAIL {f}: {problem}")
+            continue
+        rows = fix_rounds(f.read_text(encoding="utf-8-sig"))
         if rows is None:
             print(f"OK   {f}: no FIX_ROUNDS field")
             continue

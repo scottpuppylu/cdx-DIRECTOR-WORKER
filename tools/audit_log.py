@@ -30,7 +30,8 @@ an anchor a missing copy prints a `~ warning` line). Lines after the first bad o
 only. A log with nothing broken is left as it is (exit 0); a missing log gives exit 2.
 
 verify recomputes the chain and prints the first break (BROKEN seq=n / BROKEN line=n) with exit 1; a missing log,
-anchor commit or file gives exit 2. A chain that was rewritten whole, every hash recomputed, passes on its own: only an
+anchor commit or file gives exit 2. 3.0.0 (G2): a log with no entries ends `EMPTY` with exit 1 (a log cut to nothing
+is empty too; an empty log proves nothing). A chain that was rewritten whole, every hash recomputed, passes on its own: only an
 anchor catches it. --anchor-log reads AUDIT_HEAD lines from a file; --anchor-rev reads them from DIRECTOR_LOG as
 committed (git show REV:PATH), so an edited working copy of the LOG does not help. Every AUDIT_HEAD line for this log
 (same absolute path) must still be on the chain with the same hash; none at all is a failure too. Lines added after
@@ -448,13 +449,16 @@ def cmd_verify(a):
     problems = list(dict.fromkeys(p for p in problems if p))
     for problem in problems:
         print(f"BROKEN {problem}")
+    empty = not entries and not problems  # 3.0.0 (G2): a log cut to nothing would verify too; an empty log proves nothing
+    if empty:
+        print("INVALID EMPTY: the log has no entries, so there is no chain to verify")
     head = entries[-1][1] if entries else {}
     print(f"AUDIT_VERIFY file={show(log)} entries={len(entries)} head_seq={head.get('seq', 0)}"
           f"{f' anchors={anchors}' if texts else ''}{f' gaps={len(found_gaps)}' if found_gaps else ''}"
-          f"{' cite=checked' if cite else ''} {'BROKEN' if problems else 'OK'}")
+          f"{' cite=checked' if cite else ''} {'BROKEN' if problems else 'EMPTY' if empty else 'OK'}")
     if bad or chain_problem(entries):
         print(f"  ~ to go on writing: audit_log.py recover --log {log} (keeps a copy, adds a recovery line)")
-    return 1 if problems else 0
+    return 1 if problems or empty else 0
 
 
 def cmd_head(a):

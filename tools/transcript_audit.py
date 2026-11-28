@@ -19,7 +19,7 @@ hook log. One line per tool call that has a result in the transcript:
   duration_ms              null (the transcript does not time the tool)
   ts                       the tool_result line's timestamp, as YYYY-MM-DDTHH:MM:SS.mmm+00:00
 Lines are sorted by ts (ties in reading order) and chained from seq 1. Line 1 is kind=rebuild with a `source` field
-(by, version, transcripts with name / sha256 / bytes, lines, no_result, duplicates, no_time) so a rebuilt log is never
+(by, version, transcripts with name / sha256 / lines / bytes, lines, no_result, duplicates, no_time) so a rebuilt log is never
 taken for one the hook wrote while the agent worked. Only `assistant` / `user` lines are read (the api-request copies
 of the same blocks are not). A tool_use with no result (still running, cut transcript) is not written and is counted
 as no_result; a tool_use_id seen again is counted as duplicates (the first one is kept); a result whose time cannot be
@@ -43,7 +43,6 @@ import datetime
 import hashlib
 import importlib.util
 import json
-import os
 import pathlib
 import re
 import sys
@@ -58,6 +57,13 @@ class CannotRun(Exception):
 
 def load_audit():
     spec = importlib.util.spec_from_file_location("audit_log", pathlib.Path(__file__).with_name("audit_log.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_common():
+    spec = importlib.util.spec_from_file_location("dw_common", pathlib.Path(__file__).with_name("_common.py"))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -121,15 +127,16 @@ def read_calls(files):
     calls, results, counts, sources = {}, {}, {"duplicates": 0, "bad_lines": 0}, []
     order = 0
     for path in files:
-        sha, size = hashlib.sha256(), 0
+        sha, size, nlines = hashlib.sha256(), 0, 0
         with open(path, "rb") as fh:  # line by line: a long session's transcript can be hundreds of MB
             for raw in fh:
                 sha.update(raw)
                 size += len(raw)
+                nlines += 1
                 line = parse(raw, counts)
                 if line is not None:
                     order = take(line, order, calls, results, counts)
-        sources.append({"name": path.name, "sha256": sha.hexdigest(), "bytes": size})
+        sources.append({"name": path.name, "sha256": sha.hexdigest(), "lines": nlines, "bytes": size})  # 3.0.0 (C9)
     return calls, results, counts, sources
 
 
@@ -149,6 +156,9 @@ def take(line, order, calls, results, counts):
     """Record the tool_use / tool_result blocks of one assistant / user line (the api-request copies of the same
     blocks are other line types and are skipped); returns the reading order reached."""
     if line.get("type") == "assistant":
+        if any(isinstance(b.get("text"), str) and b["text"].strip() for b in blocks(line, "text")):
+            # 3.0.0 B17: where the agent wrote text (reading order reached), for loop_guard's retry rule
+            counts.setdefault("texts", []).append((order, text_word(line, "sessionId"), text_word(line, "agentId")))
         for use in blocks(line, "tool_use"):
             key = use.get("id")
             if not isinstance(key, str) or not isinstance(use.get("name"), str):
@@ -245,16 +255,9 @@ def build(a):
         prev = entry["hash"]
         lines.append(audit.canonical(entry) + "\n")
     out.parent.mkdir(parents=True, exist_ok=True)
-    temporary = out.with_name(f"{out.name}.tmp-{os.getpid()}")
     try:
-        with open(temporary, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write("".join(lines))
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(temporary, out)
+        load_common().write_text_atomic(out, "".join(lines))  # 3.0.0 G1: temp, fsync, replace, temp removed on failure
     except OSError as error:
-        if temporary.exists():
-            temporary.unlink()
         print(f"NOT_WRITTEN {out}: {error}")
         return 1
     sessions = {row[2]["session_id"] for row in rows}

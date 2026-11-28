@@ -8,7 +8,7 @@ TRACES_TO      = <這張工單服務的初衷卡、需求或決定編號，逗�
 BRIEF_REVISION        = <選用：初衷卡版次；不用就刪掉這兩行>
 BRIEF_FINGERPRINTS_V1 = <選用：gate_check.py --brief BRIEF.md 印的 {"B-2": "<64 位雜湊>"}>
 PRIMARY_WORKER = session「<名稱>」
-MODEL / EFFORT = <模型> / <所選模型支援的 effort>（理由見 docs/05）
+MODEL / EFFORT = <模型> / <medium|high|xhigh>（理由見 docs/05）
 FALLBACK       = <同 session 新對話，從 RESUME_STATE 接續 | 其他 worker>
 GOVERNANCE     = <Direct | Standard | Strict>
 BASE_REF       = <remote/branch @ commit，例：origin/main @ <fetch 後的 commit>>   # 開工前先 git fetch，寫 fetch 後遠端分支的最新 commit；落後時 gate_check.py --order 印 WARN BASE_REF（docs/02）
@@ -17,10 +17,11 @@ WORKTREE       = <路徑>
 WORK_DIR       = <放報告、RESUME_STATE.md、輸出的資料夾>   # 開工時 TEMP、TMP（及 TMPDIR）設成 WORK_DIR/tmp；scratchpad 和系統暫存資料夾算工作區外（docs/02）
 BUDGET         = <US$0 | PO 核准的金額>
 HEAVY_RESOURCE = <無 | 需先 TEST REQUEST：類型、預估分鐘>
+ORDER_LIMITS   = <選用：files=3 lines=200 test_lines=400；不寫＝不查大小（3.0.0 B4，scope_check 執行）>
 WORKER_LIMIT   = <80 輪或 context 60%，先到先停（預設，可改）>   # 到上限就停：寫 HANDOFF.md、回報 lead，lead 開新的 worker 接續（docs/02，2.2.5）
 ```
 
-追溯到 `B-*` 的工單，先用 `cdxdw work lock-brief` 保留 PO 核准的初衷，再填入兩個 `BRIEF_` 欄位。將此工單所引用的條目填進指紋物件。初衷條目變更時，cdxdw 要求重新確認並派工。若工單只追溯決策或沒有初衷條目，請刪除這兩個範本佔位欄位。
+兩個 `BRIEF_` 欄位是選用的：寫了以後，工單依據的初衷卡列被改掉時，`gate_check.py --order / --match --brief BRIEF.md` 印 `~ BRIEF_STALE`（舊條件驗過，新條件待重驗）；只是提示，不改結果。不寫照樣通過。
 
 ## A. 背景
 需求、已知事實（附證據等級）、限制。只寫 worker 需要知道的。
@@ -73,6 +74,13 @@ CHECKS:
 - AC-1: ["python", "-I", "-m", "unittest", "tests.test_parser"]
 ```
 
+- `TESTS_LOCKED`（3.0.0，Standard / Strict 必填，除非 `strength` 是 light）：開工前先寫好驗收測試，用 `python -I tools/safety_gate.py --lock-tests <測試檔...> --repo <repo>` 印出清單貼在下面；路徑有空白時工具會加引號。沒有測試檔的工作（例如只改文件）寫 `- NONE  # 原因`；`#` 後面一定要有原因，只寫 `TESTS_LOCKED:` 底下空白也是 FAIL。鎖住的測試檔變了，`gate_check --order` 判 FAIL；`--match --candidate <commit>` 從候選 commit 讀檔比對，worker 改了測試再 commit 也會被抓到。測試有問題時回報 BLOCKED，不要自己改：
+
+```text
+TESTS_LOCKED:
+- tests/test_parser.py sha256=<--lock-tests 印的 64 位>
+```
+
 - `REVIEW`：要有人看成品。開工前寫明誰看、從哪個角度看、看多大範圍、看哪些常識閘門項目（docs/07）。worker 最多填 `READY_FOR_REVIEW`。
 - `PO`：PO 保留的判定，例如最終驗收。worker 和總監都只填 `PENDING_PO`。同一個 commit 給 PO 看兩份以上成品時，報告寫 `CANDIDATE_ID: <PO_ACCEPTANCE 的 candidate_id>`（2.2）。
 - 接手演練、要用 `metrics_report --run --compare` 比較的工單：run 資料夾的 `run.json` 要寫 `sampling` 標記（`complete`、`scenario`），否則比較結果是 UNKNOWN（2.2，`tools/README.md`）。
@@ -90,21 +98,6 @@ CHECKS:
 - 選用的 `追溯` 欄（加在表的最後一欄）：這條 AC 驗證 TRACES_TO 的哪些編號，例如 `DD-03`；沒有寫 `—`。不加這欄也照樣通過；加了之後 `trace_report.py` 每個編號一列，不必猜哪條 AC 服務哪個需求。
 
 結果不寫在這裡，寫在 TASK REPORT 的 ACCEPTANCE 表。成品類交件另附常識閘門表（docs/07）。
-
-Standard 與 Strict 需鎖定驗收測試。用 `cdxdw work lock-tests --base <SHA> <paths>` 產生指紋，規格審查後才派工。確定沒有可鎖的測試時，填 `- NONE` 並附原因。
-
-若公開入口能由命令執行，在派工前加一行 `E2E_COMMAND = ["python", "-m", "your_app", "--smoke-test"]`。命令在候選的暫存副本執行。需要核對發行版的開關或輸出時，加上 `E2E_RUN_PLAN = {"file": "tests/run-plan.json", "run": "smoke"}`，讓驗收依 base 內的 run-plan-v1、候選內程式位置及實際 stdout 的啟動行判定。瀏覽器或人工驗收使用 `work record --kind e2e` 保存實際操作與結果。
-
-付費、裝置或對量測條件敏感的驗收，可選用 `CDX_GATES = {"feasibility": true, "pre_tr": "ci/pre_tr.json"}`，並用 `work preflight` 在正式測試前核對。也可指定量尺、審查包、外部稽核及 PO 原文。 [cdxdw 工具手冊](../tools/CDX-TOOLS.md#量測裝置與外部證據)
-
-有命令產出的交付檔時，可在同一個 `CDX_GATES` 物件加 `"artifact_path": "dist/product.zip"`，讓每次 `E2E_COMMAND` 都使用此相對路徑。總監以結果的 SHA-256 登記人工判定並執行 `final`。
-
-REVIEW 或 PO 條件若必須在多個環境通過，在同一個 `CDX_GATES` 物件加 `"environments": {"AC-2": ["windows", "wsl"]}`。環境 ID 用小寫英數、點、底線或連字號。每次用 `work record --ac AC-2 --environment-id windows ...` 登記該格的判定，同一條件的其他環境各自保留結果。
-
-```text
-TESTS_LOCKED:
-- <repo 相對路徑> sha256=<64 位>
-```
 
 ## F. 安全與版控
 照 docs/08。驗收條件和規格不准改，有問題回報 BLOCKED 由總監裁決（docs/02）。總監派工時記下本檔雜湊，交件時比對；改了會被查出來，但工具擋不住改動。本工單特別禁止：<...>
